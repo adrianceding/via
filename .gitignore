@@ -1,0 +1,11 @@
+/dist/
+/webmanager/node_modules/
+/coverage.out
+*.prof
+*.test
+/.env
+/client.yml
+/server.yml
+/.local-docs/
+/AGENTS.md
+/.github/copilot-instructions.md

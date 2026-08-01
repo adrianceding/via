@@ -1,0 +1,94 @@
+# Via 客户端示例。当前有效配置可直接连接同机运行的服务端。
+# Via client example. The active settings connect to a server running on the same host.
+# 示例密钥仅用于本机试用；公网部署前必须替换，并与服务端保持一致。
+# The example key is for local testing only. Replace it before deployment and use the same key on the server.
+
+# ==================== 必填配置 / Required ====================
+
+# 生成新密钥：openssl rand -base64 32
+# Generate a new key with: openssl rand -base64 32
+# principal_id 和 psk 必须与服务端 principals 中的一项一致。
+# principal_id and psk must match one entry in the server's principals list.
+principal_id: client-01
+psk: "MTIzNDU2Nzg5MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTI="
+
+# 第一版只支持 tcp。公网部署时把 address 改为服务端域名或地址。
+# Via v1 supports tcp only. For remote deployment, set address to the server hostname or address.
+transport:
+  type: tcp
+  address: "127.0.0.1:38473"
+
+# 应用连接的 SOCKS5 地址。
+# SOCKS5 address used by local applications.
+socks_listen: "127.0.0.1:1080"
+
+# ================= 可选配置 / Optional =================
+
+# 为 SOCKS5 启用用户名和密码认证。只监听本机时可保持关闭。
+# Enable SOCKS5 username and password authentication. It can remain disabled for a loopback-only listener.
+# socks_auth:
+#   username: local-user
+#   password: replace-with-a-strong-password
+
+# 可选：省略时默认使用自适应发送，并优先选择最快线路。
+# When omitted, adaptive delivery over the fastest path is used by default.
+# delivery:
+#   mode: adaptive
+#   path_selection: fastest
+
+# 可选：分散发送示例。两个时延限制均可单独省略；范围为 10ms 到 10s。
+# Distributed delivery example. Either delay limit may be omitted; valid values range from 10ms to 10s.
+# constraint_fallback 可选 fastest 或 pause。
+# constraint_fallback may be fastest or pause.
+# delivery:
+#   mode: adaptive
+#   path_selection: distributed
+#   constraints:
+#     max_delivery_delay: "80ms"
+#     max_delay_gap: "30ms"
+#     constraint_fallback: fastest
+
+# 可选：全量冗余发送。redundant 模式不能同时设置 path_selection 或 constraints。
+# Full redundant delivery. Redundant mode cannot be combined with path_selection or constraints.
+# delivery:
+#   mode: redundant
+
+# 可选：网卡名称支持 * 和 ? 模糊匹配。省略时使用所有符合条件的网卡。
+# Interface names support * and ? wildcards. When omitted, all eligible interfaces are used.
+# interfaces:
+#   include: ["eth*", "wlan*"]
+#   exclude: ["docker*", "veth*"]
+
+# 可选：启用内嵌只读观测界面和 JSON 接口。
+# Enable the embedded read-only Manager and JSON API.
+# status:
+#   enabled: true
+#   listen: "127.0.0.1:9090"
+#   basic_auth:              # 可选；保护页面、静态资源、JSON 接口和健康检查 / Optional; protects the page, assets, JSON API, and health endpoint
+#     username: "observer"
+#     password: "replace-with-a-strong-password"
+
+# 可选：所有数量字段省略或设为 0 均表示不设置人工配额。
+# Omitting a count or setting it to 0 disables its configured quota.
+# memory_budget_bytes 为 0 时不启用配置内存预算。
+# Setting memory_budget_bytes to 0 disables the configured memory budget.
+# limits:
+#   flows: 0                 # 同时存在的逻辑数据流总数 / Total concurrent logical flows
+#   opening_flows: 0         # 正在建立的数据流数，不得大于 flows / Flows being opened; cannot exceed flows
+#   recovering_flows: 0      # 所有线路中断后正在恢复的数据流数，不得大于 flows / Flows recovering after all paths fail; cannot exceed flows
+#   sessions: 0              # 传输会话数；默认按每张合格网卡建立一个 / Transport sessions; one per eligible interface by default
+#   auth_in_progress: 0      # 同时进行传输会话认证的数量，不得大于 sessions / Concurrent transport authentications; cannot exceed sessions
+#   socks_connections: 0     # 应用到 SOCKS5 监听器的连接总数 / Total application connections to the SOCKS5 listener
+#   socks_handshakes: 0      # 同时进行 SOCKS5 握手的数量，不得大于 socks_connections / Concurrent SOCKS5 handshakes; cannot exceed socks_connections
+#   socks_per_source: 0      # 同一来源地址同时进行 SOCKS5 握手的数量 / Concurrent SOCKS5 handshakes from one source address
+#   memory_budget_bytes: 0   # 估算资源超过此字节数时拒绝启动；0 表示不检查 / Reject startup above this estimated resource size; 0 disables the check
+
+# 可选：以下均为默认值。通常无需修改。
+# The values below are defaults and usually do not need to be changed.
+# deadlines:
+#   dial: "10s"               # 解析地址和连接服务端的最长时间 / Maximum time to resolve and connect to the server
+#   frame_total: "30s"        # 读取一个传输帧的总时限 / Total time limit for reading one transport frame
+#   frame_no_progress: "5s"   # 读取传输帧无进展的最长时间 / Maximum time without progress while reading a transport frame
+#   socks_greeting: "5s"      # 应用完成 SOCKS5 协商的最长时间 / Maximum time for an application to complete SOCKS5 negotiation
+#   socks_request: "5s"       # 应用提交 SOCKS5 连接请求的最长时间 / Maximum time for an application to submit a SOCKS5 request
+#   drain_cleanup: "5s"       # 停止时等待数据流收敛和资源清理的时间 / Time allowed for flows to settle and resources to be cleaned up during shutdown

@@ -1,0 +1,61 @@
+# Via 服务端示例。当前有效配置可与同机运行的客户端直接配合使用。
+# Via server example. The active settings work with a client running on the same host.
+# 示例密钥仅用于本机试用；公网部署前必须替换，并与客户端保持一致。
+# The example key is for local testing only. Replace it before deployment and use the same key on the client.
+
+# ==================== 必填配置 / Required ====================
+
+# 第一版只支持 tcp。默认接受来自所有 IPv4 地址的客户端连接。
+# Via v1 supports tcp only. By default, it accepts client connections on all IPv4 addresses.
+transport:
+  type: tcp
+  listen: "0.0.0.0:38473"
+
+# 生成新密钥：openssl rand -base64 32
+# Generate a new key with: openssl rand -base64 32
+# 至少配置一个客户端身份。生成后把同一个 psk 填入对应客户端。
+# Configure at least one client identity, then use the same psk in that client configuration.
+# 可继续追加 id 和 psk 均唯一的条目。
+# Additional entries must have unique id and psk values.
+principals:
+  - id: client-01
+    psk: "MTIzNDU2Nzg5MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTI="
+#  - id: client-02
+#    psk: "QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE="
+
+# ================= 可选配置 / Optional =================
+
+# 启用内嵌只读观测界面和 JSON 接口。
+# Enable the embedded read-only Manager and JSON API.
+# status:
+#   enabled: true
+#   listen: "127.0.0.1:9091"
+#   basic_auth:              # 可选；保护页面、静态资源、JSON 接口和健康检查 / Optional; protects the page, assets, JSON API, and health endpoint
+#     username: "observer"
+#     password: "replace-with-a-strong-password"
+
+# 可选：所有数量字段省略或设为 0 均表示不设置人工配额。
+# Omitting a count or setting it to 0 disables its configured quota.
+# memory_budget_bytes 为 0 时不启用配置内存预算。
+# Setting memory_budget_bytes to 0 disables the configured memory budget.
+# limits:
+#   flows: 0                       # 所有客户端合计的逻辑数据流总数 / Total logical flows across all clients
+#   per_principal_flows: 0         # 单个客户端身份的数据流数，不得大于 flows / Flows for one client identity; cannot exceed flows
+#   opening_flows: 0               # 正在建立的数据流数，不得大于 flows / Flows being opened; cannot exceed flows
+#   recovering_flows: 0            # 所有线路中断后正在恢复的数据流数，不得大于 flows / Flows recovering after all paths fail; cannot exceed flows
+#   sessions: 0                    # 所有客户端合计的传输会话数 / Transport sessions across all clients
+#   sessions_per_principal: 0      # 单个客户端身份的传输会话数，不得大于 sessions / Sessions for one client identity; cannot exceed sessions
+#   auth_in_progress: 0            # 同时进行传输会话认证的数量，不得大于 sessions / Concurrent transport authentications; cannot exceed sessions
+#   target_dials: 0                # 同时连接目标网站的数量，不得大于 opening_flows / Concurrent target connections; cannot exceed opening_flows
+#   tombstones: 0                  # 已结束数据流的短期记录总数，用于处理迟到或重复消息 / Short-lived records for closed flows, used for late or duplicate messages
+#   tombstones_per_principal: 0    # 单个客户端身份的结束记录数，不得大于 tombstones / Closed-flow records for one identity; cannot exceed tombstones
+#   rate_limit_keys: 0             # 速率限制器同时保存的客户端或数据流状态数 / Client or flow states retained by rate limiters
+#   memory_budget_bytes: 0         # 估算资源超过此字节数时拒绝启动；0 表示不检查 / Reject startup above this estimated resource size; 0 disables the check
+
+# 可选：以下均为默认值。通常无需修改。
+# The values below are defaults and usually do not need to be changed.
+# deadlines:
+#   dial: "10s"               # 连接目标网站的最长时间 / Maximum time to connect to a target
+#   frame_total: "30s"        # 读取一个传输帧的总时限 / Total time limit for reading one transport frame
+#   frame_no_progress: "5s"   # 读取传输帧无进展的最长时间 / Maximum time without progress while reading a transport frame
+#   drain_cleanup: "5s"       # 停止时等待数据流收敛和资源清理的时间 / Time allowed for flows to settle and resources to be cleaned up during shutdown

@@ -1,0 +1,50 @@
+name: via
+
+x-via-service: &via-service
+  image: ghcr.io/adrianceding/via:latest
+  user: ${VIA_UID:-1000}:${VIA_GID:-1000}
+  network_mode: host
+  read_only: true
+  restart: unless-stopped
+  stop_grace_period: 15s
+  pids_limit: 256
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  logging:
+    driver: json-file
+    options:
+      max-size: 10m
+      max-file: '3'
+
+services:
+  server:
+    <<: *via-service
+    profiles:
+      - server
+    command:
+      - server
+      - --config
+      - /config.yml
+    volumes:
+      - type: bind
+        source: ./server.yml
+        target: /config.yml
+        read_only: true
+
+  client:
+    <<: *via-service
+    profiles:
+      - client
+    cap_add:
+      - NET_RAW
+    command:
+      - client
+      - --config
+      - /config.yml
+    volumes:
+      - type: bind
+        source: ./client.yml
+        target: /config.yml
+        read_only: true

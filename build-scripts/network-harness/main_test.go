@@ -1,0 +1,239 @@
+package main
+
+import (
+	"bytes"
+	"encoding/binary"
+	"encoding/json"
+	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+func TestSOCKSConnectSupportsOptionalAuthentication(t *testing.T) {
+	for _, testCase := range []struct {
+		name     string
+		username string
+		password string
+		method   byte
+	}{
+		{name: "no authentication", method: 0},
+		{name: "username password", username: "user", password: "password", method: 2},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			client, server := net.Pipe()
+			defer client.Close()
+			defer server.Close()
+			serverResult := make(chan error, 1)
+			go func() {
+				greeting := make([]byte, 3)
+				if _, err := io.ReadFull(server, greeting); err != nil {
+					serverResult <- err
+					return
+				}
+				if !bytes.Equal(greeting, []byte{5, 1, testCase.method}) {
+					serverResult <- io.ErrUnexpectedEOF
+					return
+				}
+				if _, err := server.Write([]byte{5, testCase.method}); err != nil {
+					serverResult <- err
+					return
+				}
+				if testCase.method == 2 {
+					authentication := make([]byte, 2+len(testCase.username)+1+len(testCase.password))
+					if _, err := io.ReadFull(server, authentication); err != nil {
+						serverResult <- err
+						return
+					}
+					if _, err := server.Write([]byte{1, 0}); err != nil {
+						serverResult <- err
+						return
+					}
+				}
+				request := make([]byte, 10)
+				if _, err := io.ReadFull(server, request); err != nil {
+					serverResult <- err
+					return
+				}
+				_, err := server.Write([]byte{5, 0, 0, 1, 0, 0, 0, 0, 0, 0})
+				serverResult <- err
+			}()
+			if err := socksConnect(client, "192.0.2.1:443", testCase.username, testCase.password); err != nil {
+				t.Fatal(err)
+			}
+			if err := <-serverResult; err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestTransferHeaderRoundTrip(t *testing.T) {
+	want := transferHeader{
+		mode: transferBidirectional, flags: flagSynchronizeDownload,
+		requestID: 41, seed: 97, uploadBytes: maximumTransfer, downloadBytes: 1,
+	}
+	var encoded bytes.Buffer
+	if err := writeTransferHeader(&encoded, want); err != nil {
+		t.Fatal(err)
+	}
+	got, err := readTransferHeader(&encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Fatalf("header = %+v, want %+v", got, want)
+	}
+}
+
+func TestTransferHeaderRejectsMalformedFields(t *testing.T) {
+	valid := transferHeader{mode: transferUpload, requestID: 1, seed: 2, uploadBytes: 1}
+	var encoded bytes.Buffer
+	if err := writeTransferHeader(&encoded, valid); err != nil {
+		t.Fatal(err)
+	}
+	original := encoded.Bytes()
+	tests := []struct {
+		name   string
+		mutate func([]byte)
+	}{
+		{name: "magic", mutate: func(data []byte) { data[0] ^= 1 }},
+		{name: "mode", mutate: func(data []byte) { data[4] = 0xff }},
+		{name: "flags", mutate: func(data []byte) { data[5] = 0x80 }},
+		{name: "reserved first", mutate: func(data []byte) { data[6] = 1 }},
+		{name: "reserved second", mutate: func(data []byte) { data[7] = 1 }},
+		{name: "zero request id", mutate: func(data []byte) { binary.BigEndian.PutUint64(data[8:16], 0) }},
+		{name: "upload too large", mutate: func(data []byte) { binary.BigEndian.PutUint64(data[24:32], maximumTransfer+1) }},
+		{name: "download too large", mutate: func(data []byte) { binary.BigEndian.PutUint64(data[32:40], maximumTransfer+1) }},
+		{name: "upload with download", mutate: func(data []byte) { binary.BigEndian.PutUint64(data[32:40], 1) }},
+		{name: "download without download bytes", mutate: func(data []byte) { data[4] = transferDownload }},
+		{name: "bidirectional without download", mutate: func(data []byte) { data[4] = transferBidirectional }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			data := append([]byte(nil), original...)
+			test.mutate(data)
+			if _, err := readTransferHeader(bytes.NewReader(data)); err == nil {
+				t.Fatal("malformed transfer header was accepted")
+			}
+		})
+	}
+	for length := 0; length < transferHeaderBytes; length++ {
+		if _, err := readTransferHeader(bytes.NewReader(original[:length])); !errorsIsUnexpectedEOF(err) {
+			t.Fatalf("length %d: error = %v, want truncated input", length, err)
+		}
+	}
+}
+
+func errorsIsUnexpectedEOF(err error) bool {
+	return err == io.EOF || err == io.ErrUnexpectedEOF
+}
+
+func TestPatternDetectsExactCorruptionOffset(t *testing.T) {
+	data := make([]byte, 4096)
+	fillPattern(data, 71, 8192)
+	if err := verifyPattern(data, 71, 8192); err != nil {
+		t.Fatal(err)
+	}
+	data[123] ^= 1
+	if err := verifyPattern(data, 71, 8192); err == nil {
+		t.Fatal("corrupt payload was accepted")
+	} else if !strings.Contains(err.Error(), "byte 8315") {
+		t.Fatalf("corruption error = %q, want exact absolute offset", err)
+	}
+}
+
+func TestSessionsReadyRequiresNamedReadyPathsAndMeasuredFastest(t *testing.T) {
+	var sessions sessionList
+	sessions.Items = make([]struct {
+		Interface string `json:"interface"`
+		State     uint8  `json:"state"`
+		Quality   struct {
+			SmoothedRTTMicros uint64 `json:"smoothed_rtt_micros"`
+		} `json:"quality"`
+	}, 2)
+	sessions.Items[0].Interface = "vianet-a"
+	sessions.Items[0].State = 3
+	sessions.Items[0].Quality.SmoothedRTTMicros = 100
+	sessions.Items[1].Interface = "vianet-b"
+	sessions.Items[1].State = 3
+	sessions.Items[1].Quality.SmoothedRTTMicros = 200
+	if !sessionsReady(sessions, 2, []string{"vianet-a", "vianet-b"}, "vianet-a") {
+		t.Fatal("valid ready paths were rejected")
+	}
+	sessions.Items[1].State = 4
+	if sessionsReady(sessions, 2, []string{"vianet-a", "vianet-b"}, "vianet-a") {
+		t.Fatal("backoff path was counted as ready")
+	}
+}
+
+func TestWaitTargetRequiresExactUniqueConnectionCount(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "state.json")
+	writeState := func(state targetState) {
+		encoded, err := json.Marshal(state)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, encoded, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeState(targetState{Accepted: 2, Completed: 2})
+	if err := waitTarget([]string{"--state-file", path, "--accepted", "2", "--completed", "2", "--timeout", "100ms"}); err != nil {
+		t.Fatal(err)
+	}
+	writeState(targetState{Accepted: 3, Completed: 2})
+	if err := waitTarget([]string{"--state-file", path, "--accepted", "2", "--completed", "2", "--timeout", "100ms"}); err == nil {
+		t.Fatal("extra target connection was accepted")
+	}
+}
+
+func TestWaitResourcesUsesExactBaseline(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		_, _ = writer.Write([]byte(`{"resources":{"flows":0,"sessions":2,"socks_connections":0,"pending_target_dials":0}}`))
+	}))
+	defer server.Close()
+	if err := waitResources([]string{
+		"--url", server.URL, "--flows", "0", "--sessions", "2",
+		"--socks-connections", "0", "--target-dials", "0", "--timeout", time.Second.String(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestInspectStatusRequiresAllJSONRoutesAndRejectsSensitiveValues(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		requests++
+		if request.URL.Path == "/api/v1/flows" {
+			_, _ = writer.Write([]byte(`{"items":[],"marker":"redacted"}`))
+			return
+		}
+		_, _ = writer.Write([]byte(`{"ok":true}`))
+	}))
+	defer server.Close()
+
+	var output bytes.Buffer
+	if err := inspectStatus(server.URL, []string{"secret"}, &output); err != nil {
+		t.Fatal(err)
+	}
+	if requests != 5 {
+		t.Fatalf("requests = %d, want all 5 status routes", requests)
+	}
+	if lines := strings.Count(strings.TrimSpace(output.String()), "\n") + 1; lines != 5 {
+		t.Fatalf("status lines = %d, want 5", lines)
+	}
+	var rejectedOutput bytes.Buffer
+	if err := inspectStatus(server.URL, []string{"redacted"}, &rejectedOutput); err == nil {
+		t.Fatal("sensitive status value was accepted")
+	}
+	if strings.Contains(rejectedOutput.String(), "redacted") {
+		t.Fatal("sensitive status response was written to diagnostics")
+	}
+}

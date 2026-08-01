@@ -1,0 +1,15 @@
+.git
+.github
+.vscode
+dist
+webmanager/node_modules
+internal/status/webmanager/dist
+docs
+examples
+build-scripts
+coverage.out
+*.prof
+*.test
+AGENTS.md
+LICENSE
+README.md
