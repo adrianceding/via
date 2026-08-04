@@ -6,14 +6,14 @@ import (
 )
 
 const (
-	PerFlowBytes      uint64 = 1_730_560
+	PerFlowBytes      uint64 = 1_861_632
 	PerSessionBytes   uint64 = 1_196_032
 	ObserveBytes      uint64 = 3_051_520
 	ClientGlobalBytes uint64 = 16 << 20
 	ServerGlobalBytes uint64 = 64 << 20
 
-	DefaultClientRequiredBytes uint64 = 3_642_921_984
-	DefaultServerRequiredBytes uint64 = 19_171_021_824
+	DefaultClientRequiredBytes uint64 = 3_911_357_440
+	DefaultServerRequiredBytes uint64 = 20_244_763_648
 )
 
 var ErrBudget = errors.New("config: memory budget")

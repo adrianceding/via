@@ -55,7 +55,7 @@ func TestRedundantPolicyPlacesEveryCopyAndControl(t *testing.T) {
 	placements := policy.PlaceNew(PlacementRequest{Bytes: 100})
 	assertPlacementSet(t, placements, testAttachmentA, testAttachmentB)
 	for _, placement := range placements {
-		if placement.RetryAfter != InitialRetryEstimate || placement.EstimatedDelivery <= 0 {
+		if placement.RetryAfter != placement.EstimatedDelivery || placement.RetryAfter <= InitialRetryEstimate {
 			t.Fatalf("placement estimates = %#v", placement)
 		}
 	}
@@ -64,8 +64,43 @@ func TestRedundantPolicyPlacesEveryCopyAndControl(t *testing.T) {
 	assertPlacementSet(t, placements, testAttachmentB)
 }
 
-func TestFastestPolicyIncludesCongestionAndStall(t *testing.T) {
+func TestPolicyBoundsRetryAfterByEstimatedDelivery(t *testing.T) {
 	policy := newTestPolicy(t, Config{Mode: protocol.DeliveryAdaptive, Selection: protocol.PathFastest})
+	addTestAttachments(t, policy)
+	quality := QualitySnapshot{
+		SRTT:             20 * time.Millisecond,
+		CapacityBytesSec: 1 << 20,
+		QueuedBytes:      256 << 10,
+		RetryEstimate:    MinimumRetryEstimate,
+	}
+	if err := policy.SetQualitySnapshot(testAttachmentA, quality); err != nil {
+		t.Fatal(err)
+	}
+	if err := policy.SetQualitySnapshot(testAttachmentB, quality); err != nil {
+		t.Fatal(err)
+	}
+
+	placement := policy.PlaceNew(PlacementRequest{Bytes: 1024})[0]
+	if placement.RetryAfter != placement.EstimatedDelivery || placement.RetryAfter <= MinimumRetryEstimate {
+		t.Fatalf("delivery-aware placement = %#v", placement)
+	}
+
+	quality.QueuedBytes = 8 << 20
+	if err := policy.SetQualitySnapshot(testAttachmentA, quality); err != nil {
+		t.Fatal(err)
+	}
+	if err := policy.SetQualitySnapshot(testAttachmentB, quality); err != nil {
+		t.Fatal(err)
+	}
+	placement = policy.PlaceNew(PlacementRequest{Bytes: 1024})[0]
+	if placement.EstimatedDelivery <= MaximumRetryEstimate || placement.RetryAfter != MaximumRetryEstimate {
+		t.Fatalf("bounded delivery-aware placement = %#v", placement)
+	}
+}
+
+func TestFastestPolicyIncludesCongestionAndStall(t *testing.T) {
+	now := time.Unix(100, 0)
+	policy := newTestPolicyWithClock(t, Config{Mode: protocol.DeliveryAdaptive, Selection: protocol.PathFastest}, func() time.Time { return now })
 	addTestAttachments(t, policy)
 	qualityA, _ := policy.Quality(testAttachmentA)
 	qualityB, _ := policy.Quality(testAttachmentB)
@@ -82,8 +117,52 @@ func TestFastestPolicyIncludesCongestionAndStall(t *testing.T) {
 	if err := qualityA.SetStallPenalty(time.Second); err != nil {
 		t.Fatal(err)
 	}
+	if got := policy.PlaceNew(PlacementRequest{Bytes: 100})[0].Attachment; got != testAttachmentA {
+		t.Fatalf("fastest placement during challenge = %+v", got)
+	}
+	now = now.Add(fastestChallengeDuration - time.Nanosecond)
+	if got := policy.PlaceNew(PlacementRequest{Bytes: 100})[0].Attachment; got != testAttachmentA {
+		t.Fatalf("fastest placement before challenge = %+v", got)
+	}
+	now = now.Add(time.Nanosecond)
 	if got := policy.PlaceNew(PlacementRequest{Bytes: 100})[0].Attachment; got != testAttachmentB {
 		t.Fatalf("congested placement = %+v", got)
+	}
+}
+
+func TestFastestPolicyHoldDownAndImmediateFailureSwitch(t *testing.T) {
+	now := time.Unix(200, 0)
+	policy := newTestPolicyWithClock(t, Config{Mode: protocol.DeliveryAdaptive, Selection: protocol.PathFastest}, func() time.Time { return now })
+	addTestAttachments(t, policy)
+	if err := policy.SetQualitySnapshot(testAttachmentA, QualitySnapshot{SRTT: 100 * time.Millisecond, CapacityBytesSec: 1 << 20}); err != nil {
+		t.Fatal(err)
+	}
+	if err := policy.SetQualitySnapshot(testAttachmentB, QualitySnapshot{SRTT: 200 * time.Millisecond, CapacityBytesSec: 1 << 20}); err != nil {
+		t.Fatal(err)
+	}
+	if got := policy.PlaceNew(PlacementRequest{Bytes: 1})[0].Attachment; got != testAttachmentA {
+		t.Fatalf("initial fastest placement = %+v", got)
+	}
+	if err := policy.SetQualitySnapshot(testAttachmentB, QualitySnapshot{SRTT: 50 * time.Millisecond, CapacityBytesSec: 1 << 20}); err != nil {
+		t.Fatal(err)
+	}
+	if got := policy.PlaceNew(PlacementRequest{Bytes: 1})[0].Attachment; got != testAttachmentA {
+		t.Fatalf("candidate switched before challenge = %+v", got)
+	}
+	now = now.Add(fastestChallengeDuration)
+	if got := policy.PlaceNew(PlacementRequest{Bytes: 1})[0].Attachment; got != testAttachmentB {
+		t.Fatalf("candidate did not switch after challenge = %+v", got)
+	}
+	if err := policy.SetQualitySnapshot(testAttachmentA, QualitySnapshot{SRTT: 10 * time.Millisecond, CapacityBytesSec: 1 << 20}); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(fastestChallengeDuration)
+	if got := policy.PlaceNew(PlacementRequest{Bytes: 1})[0].Attachment; got != testAttachmentB {
+		t.Fatalf("hold-down switched early = %+v", got)
+	}
+	policy.RemoveAttachment(testAttachmentB)
+	if got := policy.PlaceNew(PlacementRequest{Bytes: 1})[0].Attachment; got != testAttachmentA {
+		t.Fatalf("failure switch = %+v", got)
 	}
 }
 
@@ -120,6 +199,122 @@ func TestDistributedPolicyWeightsByCapacityAndIsDeterministic(t *testing.T) {
 	}
 	if counts[testAttachmentA] <= counts[testAttachmentB] || counts[testAttachmentB] == 0 {
 		t.Fatalf("weighted counts = %#v", counts)
+	}
+}
+
+func TestDistributedPolicyApproximatesCapacityRatios(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		capacityA float64
+		capacityB float64
+		wantMinB  int
+		wantMaxB  int
+	}{
+		{name: "one-to-two", capacityA: 1, capacityB: 2, wantMinB: 55, wantMaxB: 70},
+		{name: "one-to-four", capacityA: 1, capacityB: 4, wantMinB: 75, wantMaxB: 85},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			policy := newTestPolicy(t, Config{Mode: protocol.DeliveryAdaptive, Selection: protocol.PathDistributed})
+			addTestAttachments(t, policy)
+			if err := policy.SetQualitySnapshot(testAttachmentA, QualitySnapshot{SRTT: time.Millisecond, CapacityBytesSec: test.capacityA}); err != nil {
+				t.Fatal(err)
+			}
+			if err := policy.SetQualitySnapshot(testAttachmentB, QualitySnapshot{SRTT: time.Millisecond, CapacityBytesSec: test.capacityB}); err != nil {
+				t.Fatal(err)
+			}
+			counts := map[flow.AttachmentKey]int{}
+			for index := 0; index < 100; index++ {
+				placement := policy.PlaceNew(PlacementRequest{ItemID: uint64(index + 1), Bytes: 1})
+				if len(placement) != 1 {
+					t.Fatalf("placement %d = %#v", index, placement)
+				}
+				counts[placement[0].Attachment]++
+			}
+			if counts[testAttachmentB] < test.wantMinB || counts[testAttachmentB] > test.wantMaxB {
+				t.Fatalf("capacity ratio counts = %#v", counts)
+			}
+		})
+	}
+}
+
+func TestDistributedPolicyRetainsDecisionAssignedUntilAdmissionResolution(t *testing.T) {
+	policy := newTestPolicy(t, Config{Mode: protocol.DeliveryAdaptive, Selection: protocol.PathDistributed})
+	addTestAttachments(t, policy)
+	quality := QualitySnapshot{SRTT: time.Millisecond, CapacityBytesSec: 1 << 20}
+	if err := policy.SetQualitySnapshots(map[flow.AttachmentKey]QualitySnapshot{
+		testAttachmentA: quality,
+		testAttachmentB: quality,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < 8; index++ {
+		if placements := policy.PlaceNew(PlacementRequest{ItemID: uint64(index + 1), Bytes: 4096}); len(placements) != 1 {
+			t.Fatalf("placement %d = %#v", index, placements)
+		}
+	}
+	before := policy.Snapshot()
+	if before.Attachments[0].Assigned == 0 && before.Attachments[1].Assigned == 0 {
+		t.Fatal("placements did not create temporary assigned bytes")
+	}
+	if err := policy.SetQualitySnapshots(map[flow.AttachmentKey]QualitySnapshot{
+		testAttachmentA: quality,
+		testAttachmentB: quality,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	unabsorbed := policy.Snapshot()
+	if unabsorbed.Attachments[0].Assigned != before.Attachments[0].Assigned ||
+		unabsorbed.Attachments[1].Assigned != before.Attachments[1].Assigned {
+		t.Fatalf("unabsorbed assigned bytes were discarded: before=%#v after=%#v", before.Attachments, unabsorbed.Attachments)
+	}
+	if err := policy.SetQualitySnapshots(map[flow.AttachmentKey]QualitySnapshot{
+		testAttachmentA: {SRTT: time.Millisecond, CapacityBytesSec: 1 << 20, QueuedBytes: before.Attachments[0].Assigned},
+		testAttachmentB: {SRTT: time.Millisecond, CapacityBytesSec: 1 << 20, QueuedBytes: before.Attachments[1].Assigned},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	afterLoad := policy.Snapshot()
+	if afterLoad.Attachments[0].Assigned != before.Attachments[0].Assigned ||
+		afterLoad.Attachments[1].Assigned != before.Attachments[1].Assigned {
+		t.Fatalf("runtime load implicitly resolved assigned bytes: before=%#v after=%#v", before.Attachments, afterLoad.Attachments)
+	}
+	for _, attachment := range before.Attachments {
+		if err := policy.ResolveAssigned(attachment.Attachment, attachment.Assigned); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, attachment := range policy.Snapshot().Attachments {
+		if attachment.Assigned != 0 {
+			t.Fatalf("assigned bytes after admission resolution = %#v", policy.Snapshot().Attachments)
+		}
+	}
+}
+
+func TestDistributedPolicyResolvesAssignedAfterInvisibleLoadPulse(t *testing.T) {
+	policy := newTestPolicy(t, Config{Mode: protocol.DeliveryAdaptive, Selection: protocol.PathDistributed})
+	addTestAttachments(t, policy)
+	quality := QualitySnapshot{SRTT: time.Millisecond, CapacityBytesSec: 1 << 20}
+	if err := policy.SetQualitySnapshots(map[flow.AttachmentKey]QualitySnapshot{
+		testAttachmentA: quality,
+		testAttachmentB: quality,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	placement := policy.PlaceNew(PlacementRequest{ItemID: 1, Bytes: 32 << 10})
+	if len(placement) != 1 {
+		t.Fatalf("placement = %#v", placement)
+	}
+	unknown := flow.AttachmentKey{SessionGeneration: 99, AttachmentGeneration: 99}
+	if err := policy.ResolveAssigned(unknown, 32<<10); !errors.Is(err, ErrUnknownAttachment) {
+		t.Fatalf("unknown attachment resolve error = %v", err)
+	}
+	if err := policy.ResolveAssigned(placement[0].Attachment, 64<<10); err != nil {
+		t.Fatal(err)
+	}
+	for _, attachment := range policy.Snapshot().Attachments {
+		if attachment.Assigned != 0 {
+			t.Fatalf("assigned bytes after completed load pulse = %#v", policy.Snapshot().Attachments)
+		}
 	}
 }
 
@@ -232,6 +427,43 @@ func TestPolicySnapshotReportsPreferredAttachmentWithoutMutatingPlacement(t *tes
 	}
 }
 
+func TestPolicyUsesImmutableSessionQualitySnapshotForAttachments(t *testing.T) {
+	policy := newTestPolicy(t, Config{Mode: protocol.DeliveryAdaptive, Selection: protocol.PathFastest})
+	addTestAttachments(t, policy)
+	physical := QualitySnapshot{
+		ProbeSamples:     3,
+		SRTT:             25 * time.Millisecond,
+		RTTVariation:     5 * time.Millisecond,
+		CapacityBytesSec: 2 << 20,
+		QueuedBytes:      4096,
+		InFlightBytes:    8192,
+		StallPenalty:     0,
+		RetryEstimate:    100 * time.Millisecond,
+		DataSampleFresh:  true,
+		DataSampleAge:    time.Second,
+		LastDataCapacity: 2 << 20,
+	}
+	if err := policy.SetQualitySnapshot(testAttachmentA, physical); err != nil {
+		t.Fatal(err)
+	}
+	if err := policy.SetQualitySnapshot(testAttachmentB, physical); err != nil {
+		t.Fatal(err)
+	}
+
+	physical.QueuedBytes = 1 << 20
+	snapshot := policy.Snapshot()
+	if len(snapshot.Attachments) != 2 || snapshot.Attachments[0].Quality != snapshot.Attachments[1].Quality {
+		t.Fatalf("shared physical snapshot = %#v", snapshot.Attachments)
+	}
+	if snapshot.Attachments[0].Quality.QueuedBytes != 4096 {
+		t.Fatalf("published snapshot changed through source value = %#v", snapshot.Attachments[0].Quality)
+	}
+	placements := policy.PlaceNew(PlacementRequest{Bytes: 1024})
+	if len(placements) != 1 || placements[0].EstimatedDelivery <= 0 {
+		t.Fatalf("placement from immutable snapshot = %#v", placements)
+	}
+}
+
 func TestPolicyStatusSnapshotIsCompactAndReadOnly(t *testing.T) {
 	policy := newTestPolicy(t, Config{Mode: protocol.DeliveryAdaptive, Selection: protocol.PathFastest})
 	addTestAttachments(t, policy)
@@ -278,8 +510,12 @@ func TestPolicyAttachmentLimitsAndSnapshotIsolation(t *testing.T) {
 }
 
 func newTestPolicy(t *testing.T, config Config) *Policy {
+	return newTestPolicyWithClock(t, config, time.Now)
+}
+
+func newTestPolicyWithClock(t *testing.T, config Config, now func() time.Time) *Policy {
 	t.Helper()
-	policy, err := New(testFlowID, config)
+	policy, err := NewWithClock(testFlowID, config, now)
 	if err != nil {
 		t.Fatal(err)
 	}

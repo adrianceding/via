@@ -14,6 +14,8 @@ const (
 	minimumRTTVariation  = 50 * time.Millisecond
 	defaultCapacity      = 1 << 20
 	maximumSamplePeriod  = 30 * time.Second
+	minimumDataFreshness = 3 * time.Second
+	maximumDataFreshness = 15 * time.Second
 )
 
 var ErrInvalidSample = errors.New("policy: invalid quality sample")
@@ -28,38 +30,57 @@ type QualitySnapshot struct {
 	InFlightBytes    uint64
 	StallPenalty     time.Duration
 	RetryEstimate    time.Duration
+	DataSampleFresh  bool
+	DataSampleAge    time.Duration
+	LastDataCapacity float64
 }
 
 type Quality struct {
-	dataSamples  uint64
-	probeSamples uint64
-	dataSRTT     time.Duration
-	dataRTTVar   time.Duration
-	probeSRTT    time.Duration
-	probeRTTVar  time.Duration
-	capacity     float64
-	queued       uint64
-	inFlight     uint64
-	stallPenalty time.Duration
+	dataSamples    uint64
+	dataRTTSamples uint64
+	probeSamples   uint64
+	dataSRTT       time.Duration
+	dataRTTVar     time.Duration
+	probeSRTT      time.Duration
+	probeRTTVar    time.Duration
+	capacity       float64
+	lastCapacity   float64
+	lastDataAt     time.Time
+	queued         uint64
+	inFlight       uint64
+	stallPenalty   time.Duration
+	now            func() time.Time
 }
 
-func NewQuality() *Quality { return &Quality{capacity: defaultCapacity} }
+func NewQuality() *Quality { return NewQualityWithClock(time.Now) }
+
+func NewQualityWithClock(now func() time.Time) *Quality {
+	if now == nil {
+		now = time.Now
+	}
+	return &Quality{capacity: defaultCapacity, now: now}
+}
 
 func (quality *Quality) ObserveData(rtt time.Duration, acknowledgedBytes uint64, interval time.Duration) error {
-	if quality == nil || rtt <= 0 || rtt > maximumSamplePeriod || acknowledgedBytes == 0 || interval <= 0 || interval > maximumSamplePeriod {
+	if quality == nil || rtt < 0 || rtt > maximumSamplePeriod || acknowledgedBytes == 0 || interval <= 0 || interval > maximumSamplePeriod {
 		return ErrInvalidSample
 	}
-	quality.dataSRTT, quality.dataRTTVar = updateRTT(quality.dataSRTT, quality.dataRTTVar, quality.dataSamples, rtt)
-	quality.dataSamples++
 	sampleCapacity := float64(acknowledgedBytes) / interval.Seconds()
 	if !finitePositive(sampleCapacity) {
 		return ErrInvalidSample
 	}
+	if rtt > 0 {
+		quality.dataSRTT, quality.dataRTTVar = updateRTT(quality.dataSRTT, quality.dataRTTVar, quality.dataRTTSamples, rtt)
+		quality.dataRTTSamples++
+	}
+	quality.dataSamples++
 	if quality.dataSamples == 1 {
 		quality.capacity = sampleCapacity
 	} else {
 		quality.capacity = (7*quality.capacity + sampleCapacity) / 8
 	}
+	quality.lastCapacity = quality.capacity
+	quality.lastDataAt = quality.now()
 	return nil
 }
 
@@ -89,25 +110,46 @@ func (quality *Quality) SetStallPenalty(penalty time.Duration) error {
 }
 
 func (quality *Quality) Snapshot() QualitySnapshot {
+	return quality.SnapshotAt(quality.currentNow())
+}
+
+func (quality *Quality) SnapshotAt(now time.Time) QualitySnapshot {
 	if quality == nil {
 		return QualitySnapshot{CapacityBytesSec: defaultCapacity, RetryEstimate: InitialRetryEstimate}
 	}
-	srtt, variation := quality.preferredRTT()
+	srtt, variation := quality.preferredRTT(now)
+	capacity := quality.capacity
+	fresh := false
+	var age time.Duration
+	if !quality.lastDataAt.IsZero() && !now.Before(quality.lastDataAt) {
+		age = now.Sub(quality.lastDataAt)
+		freshness := dataFreshness(quality.probeSRTT)
+		fresh = age <= freshness
+	}
+	if !fresh {
+		capacity = defaultCapacity
+	}
 	return QualitySnapshot{
 		DataSamples:      quality.dataSamples,
 		ProbeSamples:     quality.probeSamples,
 		SRTT:             srtt,
 		RTTVariation:     variation,
-		CapacityBytesSec: quality.capacity,
+		CapacityBytesSec: capacity,
 		QueuedBytes:      quality.queued,
 		InFlightBytes:    quality.inFlight,
 		StallPenalty:     quality.stallPenalty,
-		RetryEstimate:    retryEstimate(srtt, variation, quality.dataSamples+quality.probeSamples),
+		RetryEstimate:    retryEstimate(srtt, variation, quality.dataRTTSamples+quality.probeSamples),
+		DataSampleFresh:  fresh,
+		DataSampleAge:    age,
+		LastDataCapacity: quality.lastCapacity,
 	}
 }
 
 func (quality *Quality) DeliveryEstimate(payloadBytes uint64) time.Duration {
-	snapshot := quality.Snapshot()
+	return deliveryEstimate(quality.Snapshot(), payloadBytes)
+}
+
+func deliveryEstimate(snapshot QualitySnapshot, payloadBytes uint64) time.Duration {
 	base := snapshot.SRTT
 	if base == 0 {
 		base = InitialRetryEstimate
@@ -121,8 +163,8 @@ func (quality *Quality) DeliveryEstimate(payloadBytes uint64) time.Duration {
 	return saturatingDurationSum(base, serialization, snapshot.StallPenalty)
 }
 
-func (quality *Quality) preferredRTT() (time.Duration, time.Duration) {
-	if quality.dataSamples != 0 {
+func (quality *Quality) preferredRTT(now time.Time) (time.Duration, time.Duration) {
+	if quality.dataRTTSamples != 0 && !quality.lastDataAt.IsZero() && !now.Before(quality.lastDataAt) && now.Sub(quality.lastDataAt) <= dataFreshness(quality.probeSRTT) {
 		return quality.dataSRTT, quality.dataRTTVar
 	}
 	if quality.probeSamples != 0 {
@@ -162,6 +204,24 @@ func retryEstimate(srtt, variation time.Duration, samples uint64) time.Duration 
 
 func finitePositive(value float64) bool {
 	return value > 0 && !math.IsInf(value, 0) && !math.IsNaN(value)
+}
+
+func (quality *Quality) currentNow() time.Time {
+	if quality == nil || quality.now == nil {
+		return time.Now()
+	}
+	return quality.now()
+}
+
+func dataFreshness(probeRTT time.Duration) time.Duration {
+	freshness := minimumDataFreshness
+	if probeRTT > 0 && 4*probeRTT > freshness {
+		freshness = 4 * probeRTT
+	}
+	if freshness > maximumDataFreshness {
+		freshness = maximumDataFreshness
+	}
+	return freshness
 }
 
 func saturatingSum(values ...uint64) uint64 {

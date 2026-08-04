@@ -11,6 +11,7 @@ import (
 
 	"github.com/adrianceding/via/internal/auth"
 	"github.com/adrianceding/via/internal/flow"
+	"github.com/adrianceding/via/internal/policy"
 	"github.com/adrianceding/via/internal/protocol"
 	"github.com/adrianceding/via/internal/transport"
 )
@@ -33,6 +34,7 @@ type wireSession struct {
 	principal    string
 	connectionID auth.CorrelationID
 	connection   transport.Connection
+	runtime      *sessionRuntime
 	ctx          context.Context
 	cancel       context.CancelFunc
 
@@ -51,13 +53,27 @@ type wireSession struct {
 	probeStall bool
 }
 
+type pendingSessionWrite struct {
+	session *wireSession
+	request *sessionRuntimeRequest
+	ctx     context.Context
+	cancel  context.CancelFunc
+	encoded uint64
+}
+
 func newWireSession(ctx context.Context, generation uint64, connection transport.Connection) (*wireSession, error) {
 	if ctx == nil || generation == 0 || connection == nil {
 		return nil, ErrWireProtocol
 	}
 	sessionCtx, cancel := context.WithCancel(ctx)
+	runtime, err := newSessionRuntime(sessionCtx, connection, func(error) { _ = connection.Close() })
+	if err != nil {
+		cancel()
+		return nil, err
+	}
 	return &wireSession{
 		generation: generation, connection: connection, ctx: sessionCtx, cancel: cancel,
+		runtime:      runtime,
 		attachments:  make(map[protocol.FlowID]flow.AttachmentKey, transport.MaxSessionAttachments),
 		reservations: make(map[protocol.FlowID]flow.AttachmentKey, transport.MaxSessionAttachments),
 	}, nil
@@ -72,6 +88,7 @@ func (session *wireSession) startProbe(now time.Time) (protocol.Probe, bool, boo
 	expired := session.probeToken != 0 && now.Sub(session.probeSent) >= probeTimeout
 	if expired {
 		session.probeStall = true
+		session.runtime.setStallPenalty(probeTimeout)
 	}
 	if session.probeToken != 0 && !expired ||
 		!session.lastProbe.IsZero() && now.Sub(session.lastProbe) < probeInterval ||
@@ -103,6 +120,8 @@ func (session *wireSession) completeProbe(token uint64, now time.Time) (time.Dur
 	} else {
 		session.probeSRTT = (7*session.probeSRTT + rtt) / 8
 	}
+	session.runtime.observeProbe(rtt)
+	session.runtime.setStallPenalty(0)
 	return rtt, true
 }
 
@@ -123,6 +142,26 @@ func (session *wireSession) probeQuality() (time.Duration, time.Duration) {
 	return session.probeSRTT, 0
 }
 
+func (session *wireSession) qualitySnapshot() policy.QualitySnapshot {
+	if session == nil || session.runtime == nil {
+		return policy.QualitySnapshot{}
+	}
+	return session.runtime.snapshot().Quality
+}
+
+func (session *wireSession) setStatusObserver(observer *runtimeStatus) {
+	if session == nil {
+		return
+	}
+	session.status = observer
+	if observer == nil || session.runtime == nil {
+		return
+	}
+	session.runtime.setSnapshotObserver(func(snapshot sessionRuntimeSnapshot) {
+		observer.observeSessionRuntime(session.generation, snapshot)
+	})
+}
+
 func (session *wireSession) send(message protocol.Message) error {
 	return session.sendContext(session.ctx, message)
 }
@@ -134,26 +173,95 @@ func (session *wireSession) sendContext(parent context.Context, message protocol
 	if parent == nil {
 		return ErrWireProtocol
 	}
-	encoded, err := protocol.EncodeMessage(message)
+	pending, err := session.admitMessageContext(parent, message)
 	if err != nil {
 		return err
 	}
-	return session.sendEncodedContext(parent, messageClass(message), encoded)
+	_, err = pending.wait()
+	return err
+}
+
+func (session *wireSession) admitMessageContext(parent context.Context, message protocol.Message) (*pendingSessionWrite, error) {
+	if session == nil || parent == nil || message == nil {
+		return nil, ErrWireProtocol
+	}
+	encoded, err := protocol.EncodeMessage(message)
+	if err != nil {
+		return nil, err
+	}
+	return session.admitEncodedContextMetadata(parent, messageClass(message), encoded, protocol.FlowID{}, 1, 1, 0)
 }
 
 func (session *wireSession) sendEncodedContext(parent context.Context, class transport.FrameClass, encoded []byte) error {
+	_, err := session.sendEncodedContextWithCompletion(parent, class, encoded, protocol.FlowID{}, 1, 1, 0)
+	return err
+}
+
+func (session *wireSession) sendEncodedContextWithCompletion(parent context.Context, class transport.FrameClass, encoded []byte, flowID protocol.FlowID, itemID, attemptGeneration, dataPayload uint64) (time.Time, error) {
 	if session == nil || parent == nil || len(encoded) == 0 {
-		return ErrWireProtocol
+		return time.Time{}, ErrWireProtocol
 	}
-	ctx, cancel := context.WithTimeout(parent, sendTimeout)
-	defer cancel()
-	if err := session.connection.WriteFrame(ctx, transport.WriteRequest{Class: class, Encoded: encoded}); err != nil {
-		return err
+	if class == transport.FrameData {
+		if flowID == (protocol.FlowID{}) || itemID == 0 || attemptGeneration == 0 || dataPayload == 0 {
+			_, message, err := protocol.DecodeEncodedFrame(encoded)
+			if err != nil {
+				return time.Time{}, err
+			}
+			data, ok := message.(protocol.Data)
+			if !ok {
+				return time.Time{}, ErrWireProtocol
+			}
+			flowID = data.FlowID
+			itemID, attemptGeneration = 1, 1
+			dataPayload = uint64(len(data.Bytes))
+		}
+	} else if class != transport.FrameControl {
+		return time.Time{}, ErrWireProtocol
 	}
-	if session.status != nil {
-		session.status.frameSent(uint64(len(encoded)))
+	return session.sendEncodedContextMetadataWithCompletion(parent, class, encoded, flowID, itemID, attemptGeneration, dataPayload)
+}
+
+func (session *wireSession) sendEncodedContextMetadata(parent context.Context, class transport.FrameClass, encoded []byte, flowID protocol.FlowID, itemID, attemptGeneration, dataPayload uint64) error {
+	_, err := session.sendEncodedContextMetadataWithCompletion(parent, class, encoded, flowID, itemID, attemptGeneration, dataPayload)
+	return err
+}
+
+func (session *wireSession) sendEncodedContextMetadataWithCompletion(parent context.Context, class transport.FrameClass, encoded []byte, flowID protocol.FlowID, itemID, attemptGeneration, dataPayload uint64) (time.Time, error) {
+	pending, err := session.admitEncodedContextMetadata(parent, class, encoded, flowID, itemID, attemptGeneration, dataPayload)
+	if err != nil {
+		return time.Time{}, err
 	}
-	return nil
+	return pending.wait()
+}
+
+func (session *wireSession) admitEncodedContextMetadata(parent context.Context, class transport.FrameClass, encoded []byte, flowID protocol.FlowID, itemID, attemptGeneration, dataPayload uint64) (*pendingSessionWrite, error) {
+	if session == nil || parent == nil || len(encoded) == 0 {
+		return nil, ErrWireProtocol
+	}
+	if err := session.runtime.setConnection(session.connection); err != nil {
+		return nil, err
+	}
+	sendCtx, cancel := context.WithTimeout(parent, sendTimeout)
+	request, err := session.runtime.admit(sendCtx, transport.WriteRequest{Class: class, Encoded: encoded}, flowID, itemID, attemptGeneration, dataPayload)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	return &pendingSessionWrite{
+		session: session, request: request, ctx: sendCtx, cancel: cancel, encoded: uint64(len(encoded)),
+	}, nil
+}
+
+func (pending *pendingSessionWrite) wait() (time.Time, error) {
+	if pending == nil || pending.session == nil || pending.request == nil || pending.ctx == nil || pending.cancel == nil {
+		return time.Time{}, ErrWireProtocol
+	}
+	defer pending.cancel()
+	completedAt, err := pending.session.runtime.waitCompletion(pending.ctx, pending.request)
+	if err == nil && pending.session.status != nil {
+		pending.session.status.frameSent(pending.encoded)
+	}
+	return completedAt, err
 }
 
 func (session *wireSession) read(ctx context.Context) (protocol.Message, error) {
@@ -259,6 +367,9 @@ func (session *wireSession) close() {
 	}
 	session.closeOnce.Do(func() {
 		session.cancel()
+		if session.runtime != nil {
+			session.runtime.close(transport.ErrClosed)
+		}
 		_ = session.connection.Close()
 	})
 }

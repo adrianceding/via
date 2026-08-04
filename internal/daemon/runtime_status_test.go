@@ -62,6 +62,57 @@ func TestRuntimeStatusMergesAuthoritativeSessionObservation(t *testing.T) {
 	}
 }
 
+func TestRuntimeStatusPublishesSessionRuntimeQuality(t *testing.T) {
+	repository, err := statusapi.NewRepository(statusapi.Limits{Interfaces: 1, Sessions: 1, Flows: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(1_500, 0).UTC()
+	var statusKey [32]byte
+	statusKey[0] = 4
+	observer, err := newRuntimeStatusWithClock(repository, 1, 1, statusKey, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	observer.upsertSession(1, "tcp", "eth0", netip.MustParseAddr("192.0.2.1"), statusapi.SessionReady, statusapi.ReasonPathAdded)
+	age := uint64(250)
+	observer.observeSessionRuntime(1, sessionRuntimeSnapshot{
+		ScheduledData: 1024, WrittenData: 768, EligibleAckedData: 512, DataQueueFrames: 3, ActiveDataFlows: 2,
+		Quality: policy.QualitySnapshot{
+			ProbeSamples: 2, SRTT: 20 * time.Millisecond, RetryEstimate: 200 * time.Millisecond,
+			CapacityBytesSec: 2.5 * 1024 * 1024, QueuedBytes: 4096, InFlightBytes: 2048,
+			StallPenalty: 3 * time.Millisecond, DataSamples: 1, DataSampleFresh: true,
+			DataSampleAge: time.Duration(age) * time.Millisecond, LastDataCapacity: 3 * 1024 * 1024,
+		},
+	})
+	session := observer.sessions[observer.hasher.SessionID(1)]
+	if session.Quality.CapacityBytesSec != uint64(2.5*1024*1024) || session.Quality.QueuedBytes != 4096 ||
+		session.Quality.InFlightBytes != 2048 || session.Quality.DataSampleAgeMillis == nil || *session.Quality.DataSampleAgeMillis != age ||
+		session.Quality.ScheduledDataPayloadBytes != 1024 || session.Quality.WrittenDataPayloadBytes != 768 ||
+		session.Quality.EligibleAckedDataPayloadBytes != 512 || session.Quality.DataQueueFrames != 3 || session.Quality.ActiveDataFlows != 2 {
+		t.Fatalf("runtime quality status = %#v", session.Quality)
+	}
+}
+
+func TestRuntimeStatusDropsLateClosedSnapshotAfterSessionRemoval(t *testing.T) {
+	repository, err := statusapi.NewRepository(statusapi.Limits{Interfaces: 1, Sessions: 1, Flows: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var statusKey [32]byte
+	statusKey[0] = 5
+	observer, err := newRuntimeStatusWithKey(repository, 1, 1, statusKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	observer.upsertSession(1, "tcp", "eth0", netip.MustParseAddr("192.0.2.1"), statusapi.SessionReady, statusapi.ReasonPathAdded)
+	observer.removeSession(1)
+	observer.observeSessionRuntime(1, sessionRuntimeSnapshot{Closed: true})
+	if _, exists := observer.runtime[1]; exists {
+		t.Fatal("late closed session snapshot was cached after removal")
+	}
+}
+
 func TestRuntimeStatusPublishesAuthoritativeFlowObservationAndTerminal(t *testing.T) {
 	now := time.Unix(2_000, 0).UTC()
 	repository, err := statusapi.NewRepository(statusapi.Limits{Interfaces: 1, Sessions: 1, Flows: 1})

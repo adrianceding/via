@@ -19,6 +19,7 @@ export function createStatusController({
 } = {}) {
   const snapshot = shallowRef(emptySnapshot);
   const trends = shallowRef([]);
+  const aggregateTrend = shallowRef(null);
   const error = shallowRef(null);
   const health = shallowRef({ level: 'connecting', reasons: [] });
   const rates = shallowRef({ sent: null, received: null });
@@ -33,14 +34,16 @@ export function createStatusController({
       const previousDrops = Number(previousSummary.counters?.dropped_status_events || 0);
       const nextDrops = Number(nextSnapshot.summary.counters?.dropped_status_events || 0);
       const droppedDelta = lastSuccessAt.value === null ? 0 : Math.max(0, nextDrops - previousDrops);
-      trendStore.update(nextSnapshot.sessions);
+      trendStore.update(nextSnapshot.sessions, nextSnapshot.summary.generated_at);
       const nextTrends = trendStore.snapshot();
+      const nextAggregateTrend = trendStore.aggregateSnapshot ? trendStore.aggregateSnapshot() : null;
       const nextRates = lastSuccessAt.value === null
         ? { sent: null, received: null }
         : calculateRates(previousSummary, nextSnapshot.summary);
       const nextHealth = evaluateHealth(nextSnapshot, droppedDelta);
       snapshot.value = nextSnapshot;
       trends.value = nextTrends;
+      aggregateTrend.value = nextAggregateTrend;
       rates.value = nextRates;
       health.value = nextHealth;
       lastSuccessAt.value = now();
@@ -52,5 +55,5 @@ export function createStatusController({
     }
   }
 
-  return { snapshot, trends, error, health, rates, lastSuccessAt, refreshing, refresh };
+  return { snapshot, trends, aggregateTrend, error, health, rates, lastSuccessAt, refreshing, refresh };
 }

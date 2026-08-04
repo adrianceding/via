@@ -112,7 +112,7 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 			GeneratedAt: snapshot.GeneratedAt, Healthy: snapshot.Healthy, Role: snapshot.Role,
 			Resources: snapshot.Resources, Counters: snapshot.Counters,
 			Interfaces: len(snapshot.Interfaces), Sessions: len(snapshot.Sessions),
-			Flows: len(snapshot.Flows), Terminals: len(snapshot.Terminals),
+			Flows: activeFlowCount(snapshot.Flows), Terminals: len(snapshot.Terminals),
 		})
 	case "/api/v1/interfaces":
 		encoded, err = encodeBoundedList(snapshot.GeneratedAt, snapshot.Interfaces)
@@ -192,11 +192,12 @@ func encodeBoundedList[T any](generatedAt time.Time, items []T) ([]byte, error) 
 }
 
 func encodeBoundedFlows(snapshot Snapshot) ([]byte, error) {
-	flowCount := len(snapshot.Flows)
+	activeFlows := nonClosingFlows(snapshot.Flows)
+	flowCount := len(activeFlows)
 	terminalCount := len(snapshot.Terminals)
 	encodeFlows := func(count int) ([]byte, error) {
 		return json.Marshal(flowsResponse{
-			GeneratedAt: snapshot.GeneratedAt, Items: snapshot.Flows[:count],
+			GeneratedAt: snapshot.GeneratedAt, Items: activeFlows[:count],
 			Total: flowCount, TerminalTotal: terminalCount, Truncated: count != flowCount || terminalCount != 0,
 		})
 	}
@@ -216,6 +217,26 @@ func encodeBoundedFlows(snapshot Snapshot) ([]byte, error) {
 		})
 	}
 	return largestBounded(terminalCount, encodeTerminals)
+}
+
+func activeFlowCount(flows []Flow) int {
+	count := 0
+	for _, flow := range flows {
+		if flow.State != FlowClosing {
+			count++
+		}
+	}
+	return count
+}
+
+func nonClosingFlows(flows []Flow) []Flow {
+	active := make([]Flow, 0, activeFlowCount(flows))
+	for _, flow := range flows {
+		if flow.State != FlowClosing {
+			active = append(active, flow)
+		}
+	}
+	return active
 }
 
 func largestBounded(maximum int, encode func(int) ([]byte, error)) ([]byte, error) {

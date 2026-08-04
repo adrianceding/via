@@ -6,8 +6,8 @@ import (
 )
 
 const (
-	SendWindowSize      uint64 = 256 << 10
-	ReceiveWindowSize   uint64 = 256 << 10
+	SendWindowSize      uint64 = 320 << 10
+	ReceiveWindowSize   uint64 = 320 << 10
 	MaxReplaySegments          = 128
 	MaxReassemblyRanges        = 128
 	MaxAttachments             = 64

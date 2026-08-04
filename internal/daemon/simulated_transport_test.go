@@ -436,6 +436,19 @@ func (controller *simulatedFaultController) heldCount() int {
 	return len(controller.held)
 }
 
+func (controller *simulatedFaultController) heldTypes() []protocol.Type {
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
+	types := make([]protocol.Type, 0, len(controller.held))
+	for _, held := range controller.held {
+		frame, _, err := protocol.DecodeEncodedFrame(held.encoded)
+		if err == nil {
+			types = append(types, frame.Type)
+		}
+	}
+	return types
+}
+
 func (controller *simulatedFaultController) heldEvents() <-chan struct{} {
 	return controller.heldReady
 }

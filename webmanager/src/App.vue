@@ -50,6 +50,7 @@ const visibleInterfaces = computed(() => controller.snapshot.value.interfaces.fi
 const visibleSessionIDs = computed(() => new Set(visibleSessions.value.map((session) => session.connection_id || session.id)));
 const visibleTrends = computed(() => controller.trends.value.filter((trend) => visibleSessionIDs.value.has(trend.id)
   && (!normalizedQuery.value || `${trend.label} ${trend.id} ${trend.localEndpoint} ${trend.remoteEndpoint}`.toLowerCase().includes(normalizedQuery.value))));
+const visibleAggregateTrend = computed(() => !normalizedQuery.value && !onlyAnomalies.value ? controller.aggregateTrend.value : null);
 const anomalyCount = computed(() => controller.snapshot.value.sessions.filter(isSessionAbnormal).length
   + controller.snapshot.value.flows.filter(isFlowAbnormal).length
   + controller.snapshot.value.terminals.filter(isTerminalAbnormal).length
@@ -136,6 +137,7 @@ onBeforeUnmount(() => {
   />
   <main class="manager-main">
     <OverviewMetrics
+      :active-flows="controller.snapshot.value.flowTotal"
       :rates="controller.rates.value"
       :sessions="controller.snapshot.value.sessions"
       :summary="controller.snapshot.value.summary"
@@ -152,7 +154,7 @@ onBeforeUnmount(() => {
       :sessions="visibleSessions"
       :summary="controller.snapshot.value.summary"
     />
-    <SessionTrend v-if="visibleTrends.length" :trends="visibleTrends" />
+    <SessionTrend v-if="visibleTrends.length || visibleAggregateTrend" :aggregate="visibleAggregateTrend" :trends="visibleTrends" />
     <EmptyTrend v-else />
     <SessionTable
       v-model:sort="sessionSort"

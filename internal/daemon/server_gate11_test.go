@@ -57,7 +57,7 @@ func TestServerJoinTerminalRaceExplicitlyRetiresSession(t *testing.T) {
 	}
 }
 
-func TestServerFlowTerminalCancelsBlockedSessionSend(t *testing.T) {
+func TestServerFlowTerminalDoesNotCancelSelectedSessionSend(t *testing.T) {
 	harness := newServerRuntimeHarness(t)
 	defer harness.close()
 	if err := harness.daemon.handleJoin(harness.session, protocol.Join{
@@ -73,7 +73,7 @@ func TestServerFlowTerminalCancelsBlockedSessionSend(t *testing.T) {
 		t.Fatal("JOIN did not publish the server attachment")
 	}
 
-	connection := &gate11BlockingConnection{started: make(chan struct{})}
+	connection := &gate11BlockingConnection{started: make(chan struct{}), release: make(chan struct{})}
 	harness.session.connection = connection
 	done := make(chan struct{})
 	go func() {
@@ -93,8 +93,14 @@ func TestServerFlowTerminalCancelsBlockedSessionSend(t *testing.T) {
 	harness.instance.close()
 	select {
 	case <-done:
+		t.Fatal("terminal server Flow canceled an already selected session write")
+	default:
+	}
+	close(connection.release)
+	select {
+	case <-done:
 	case <-time.After(time.Second):
-		t.Fatal("terminal server Flow did not cancel its blocked send")
+		t.Fatal("selected session send did not report its real write result")
 	}
 	if harness.session.ctx.Err() != nil {
 		t.Fatal("terminating one Flow cancelled the shared transport session")
@@ -117,11 +123,14 @@ func TestServerProbeTimeoutPenaltyAndRecoveryUpdatePublishedFlow(t *testing.T) {
 		t.Fatal("JOIN did not publish the server attachment")
 	}
 
+	harness.session.runtime.setStallPenalty(probeTimeout)
 	harness.daemon.notifyServerProbeStallPenalty(harness.session, probeTimeout)
 	snapshot := harness.instance.snapshot().Policy
 	if len(snapshot.Attachments) != 1 || snapshot.Attachments[0].Attachment != attachment || snapshot.Attachments[0].Quality.StallPenalty != probeTimeout {
 		t.Fatalf("server probe penalty snapshot = %#v", snapshot)
 	}
+	harness.session.runtime.observeProbe(25 * time.Millisecond)
+	harness.session.runtime.setStallPenalty(0)
 	harness.daemon.notifyServerProbeQuality(harness.session, 25*time.Millisecond)
 	snapshot = harness.instance.snapshot().Policy
 	if len(snapshot.Attachments) != 1 || snapshot.Attachments[0].Quality.StallPenalty != 0 || snapshot.Attachments[0].Quality.SRTT != 25*time.Millisecond {
@@ -164,12 +173,17 @@ func TestServerShutdownWaitsForRunningTimerCallback(t *testing.T) {
 
 type gate11BlockingConnection struct {
 	started   chan struct{}
+	release   chan struct{}
 	startOnce sync.Once
 	closed    atomic.Bool
 }
 
 func (*gate11BlockingConnection) Capabilities() transport.Capabilities {
-	return transport.Capabilities{}
+	capabilities, err := transport.NewCapabilities(transport.CapabilitySpec{MaxEncodedFrame: protocol.MaxFrameSize})
+	if err != nil {
+		panic(err)
+	}
+	return capabilities
 }
 func (*gate11BlockingConnection) QueueLimits() transport.QueueLimits {
 	return transport.V1QueueLimits()
@@ -181,8 +195,12 @@ func (*gate11BlockingConnection) ReadFrame(context.Context) ([]byte, error) {
 }
 func (connection *gate11BlockingConnection) WriteFrame(ctx context.Context, _ transport.WriteRequest) error {
 	connection.startOnce.Do(func() { close(connection.started) })
-	<-ctx.Done()
-	return ctx.Err()
+	select {
+	case <-connection.release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 func (*gate11BlockingConnection) CloseWrite() error { return nil }
 func (connection *gate11BlockingConnection) Close() error {

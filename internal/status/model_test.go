@@ -1,6 +1,7 @@
 package status
 
 import (
+	"encoding/json"
 	"net/netip"
 	"strings"
 	"testing"
@@ -8,6 +9,27 @@ import (
 
 	"github.com/adrianceding/via/internal/protocol"
 )
+
+func TestQualityDataSampleAgePreservesNullAndZero(t *testing.T) {
+	snapshot := Snapshot{Sessions: []Session{{Quality: Quality{}}}}
+	encoded, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), `"data_sample_age_ms":null`) {
+		t.Fatalf("missing null DATA sample age: %s", encoded)
+	}
+
+	age := uint64(0)
+	snapshot.Sessions[0].Quality.DataSampleAgeMillis = &age
+	encoded, err = json.Marshal(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), `"data_sample_age_ms":0`) {
+		t.Fatalf("missing zero DATA sample age: %s", encoded)
+	}
+}
 
 func TestHasherIsDeterministicDomainSeparatedAndOpaque(t *testing.T) {
 	key := [32]byte{1, 2, 3}

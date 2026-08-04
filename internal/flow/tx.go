@@ -256,31 +256,84 @@ func (t *Tx) RecordAttemptResult(itemID, generation uint64, attachment Attachmen
 // ApplyACK validates and applies a cumulative plus selective ACK atomically.
 // Only cumulative progress releases replay bytes.
 func (t *Tx) ApplyACK(nextOffset uint64, ranges []ByteRange) (bool, error) {
+	progress, _, err := t.ApplyACKWithCoverage(nextOffset, ranges)
+	return progress, err
+}
+
+// ApplyACKWithCoverage returns only logical byte ranges newly covered by this ACK.
+func (t *Tx) ApplyACKWithCoverage(nextOffset uint64, ranges []ByteRange) (bool, []ByteRange, error) {
 	if err := t.validateACK(nextOffset, ranges); err != nil {
-		return false, err
+		return false, nil, err
 	}
 	if nextOffset < t.acknowledged {
-		return false, nil
+		return false, nil, nil
 	}
+	before := acknowledgedRanges(t.acknowledged, t.selective)
 
 	if nextOffset > t.acknowledged {
 		t.acknowledged = nextOffset
 		t.releasePrefix(nextOffset)
 		t.selective = append([]ByteRange(nil), ranges...)
 		t.invalidateCoveredItems()
-		return true, nil
+		return true, subtractRanges(acknowledgedRanges(t.acknowledged, t.selective), before), nil
 	}
 
 	merged, err := mergeSelective(t.selective, ranges, nextOffset)
 	if err != nil {
-		return false, err
+		return false, nil, err
 	}
 	progress := !equalRanges(merged, t.selective)
 	if progress {
 		t.selective = merged
 		t.invalidateCoveredItems()
 	}
-	return progress, nil
+	return progress, subtractRanges(acknowledgedRanges(t.acknowledged, t.selective), before), nil
+}
+
+func acknowledgedRanges(nextOffset uint64, selective []ByteRange) []ByteRange {
+	ranges := make([]ByteRange, 0, len(selective)+1)
+	if nextOffset != 0 {
+		ranges = append(ranges, ByteRange{End: nextOffset})
+	}
+	ranges = append(ranges, selective...)
+	return ranges
+}
+
+func subtractRanges(source, covered []ByteRange) []ByteRange {
+	if len(source) == 0 {
+		return nil
+	}
+	result := make([]ByteRange, 0, len(source))
+	for _, current := range source {
+		cursor := current.Start
+		for _, existing := range covered {
+			if existing.End <= cursor {
+				continue
+			}
+			if existing.Start >= current.End {
+				break
+			}
+			if existing.Start > cursor {
+				end := existing.Start
+				if end > current.End {
+					end = current.End
+				}
+				if end > cursor {
+					result = append(result, ByteRange{Start: cursor, End: end})
+				}
+			}
+			if existing.End > cursor {
+				cursor = existing.End
+			}
+			if cursor >= current.End {
+				break
+			}
+		}
+		if cursor < current.End {
+			result = append(result, ByteRange{Start: cursor, End: current.End})
+		}
+	}
+	return result
 }
 
 // ApplyFINACK completes Tx only for the final offset fixed by Finish.

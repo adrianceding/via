@@ -137,12 +137,21 @@ type Interface struct {
 }
 
 type Quality struct {
-	SmoothedRTTMicros  uint64 `json:"smoothed_rtt_micros"`
-	RetryMicros        uint64 `json:"retry_micros"`
-	CapacityBytesSec   uint64 `json:"capacity_bytes_sec"`
-	QueuedBytes        uint64 `json:"queued_bytes"`
-	InFlightBytes      uint64 `json:"in_flight_bytes"`
-	StallPenaltyMicros uint64 `json:"stall_penalty_micros"`
+	SmoothedRTTMicros             uint64  `json:"smoothed_rtt_micros"`
+	RetryMicros                   uint64  `json:"retry_micros"`
+	CapacityBytesSec              uint64  `json:"capacity_bytes_sec"`
+	QueuedBytes                   uint64  `json:"queued_bytes"`
+	InFlightBytes                 uint64  `json:"in_flight_bytes"`
+	StallPenaltyMicros            uint64  `json:"stall_penalty_micros"`
+	DataSampleFresh               bool    `json:"data_sample_fresh"`
+	DataSampleAgeMillis           *uint64 `json:"data_sample_age_ms"`
+	LastDataCapacityBytesSec      uint64  `json:"last_data_capacity_bytes_sec"`
+	ScheduledDataPayloadBytes     uint64  `json:"scheduled_data_payload_bytes"`
+	WrittenDataPayloadBytes       uint64  `json:"written_data_payload_bytes"`
+	EligibleAckedDataPayloadBytes uint64  `json:"eligible_acked_data_payload_bytes"`
+	DataQueueFrames               uint32  `json:"data_queue_frames"`
+	ActiveDataFlows               uint32  `json:"active_data_flows"`
+	ProbeSamples                  uint64  `json:"-"`
 }
 
 type Session struct {
@@ -279,6 +288,12 @@ func cloneSnapshot(source Snapshot) Snapshot {
 		result.Interfaces[index].Addresses = append([]string(nil), source.Interfaces[index].Addresses...)
 	}
 	result.Sessions = append([]Session(nil), source.Sessions...)
+	for index := range result.Sessions {
+		if source.Sessions[index].Quality.DataSampleAgeMillis != nil {
+			age := *source.Sessions[index].Quality.DataSampleAgeMillis
+			result.Sessions[index].Quality.DataSampleAgeMillis = &age
+		}
+	}
 	result.Flows = append([]Flow(nil), source.Flows...)
 	result.Terminals = append([]Terminal(nil), source.Terminals...)
 	return result

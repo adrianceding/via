@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -18,10 +19,11 @@ import (
 )
 
 const (
-	transferHeaderBytes = 40
-	transferChunkBytes  = 32 << 10
-	maximumTransfer     = 64 << 20
-	transferStatusOK    = 0xa5
+	transferHeaderBytes  = 40
+	transferChunkBytes   = 32 << 10
+	maximumTransfer      = 64 << 20
+	transferStatusOK     = 0xa5
+	maximumWindowSamples = 10_000
 
 	transferUpload byte = iota + 1
 	transferDownload
@@ -56,13 +58,47 @@ type targetStateStore struct {
 }
 
 type sessionList struct {
-	Items []struct {
-		Interface string `json:"interface"`
-		State     uint8  `json:"state"`
-		Quality   struct {
-			SmoothedRTTMicros uint64 `json:"smoothed_rtt_micros"`
-		} `json:"quality"`
-	} `json:"items"`
+	Items []sessionStatus `json:"items"`
+}
+
+type flowList struct {
+	Items []flowStatus `json:"items"`
+}
+
+type flowStatus struct {
+	UnacknowledgedBytes uint64 `json:"unacknowledged_bytes"`
+	TxAllocatedOffset   uint64 `json:"tx_allocated_offset"`
+	TxAcknowledged      uint64 `json:"tx_acknowledged_offset"`
+}
+
+type flowWindowObservation struct {
+	ActiveFlows           int
+	FullWindowFlows       int
+	MaximumUnacknowledged uint64
+	AcknowledgedBytes     uint64
+}
+
+type flowWindowSummary struct {
+	WindowBytes            uint64 `json:"window_bytes"`
+	Samples                uint64 `json:"samples"`
+	ActiveSamples          uint64 `json:"active_samples"`
+	FullWindowSamples      uint64 `json:"full_window_samples"`
+	MaximumUnacknowledged  uint64 `json:"maximum_unacknowledged_bytes"`
+	ACKProgressSamples     uint64 `json:"ack_progress_samples"`
+	OneSessionProgress     uint64 `json:"one_session_progress_samples"`
+	BothSessionsProgress   uint64 `json:"both_sessions_progress_samples"`
+	FullWindowNoProgress   uint64 `json:"full_window_no_ack_progress_samples"`
+	LongestFullWindowStall uint64 `json:"longest_full_window_no_ack_streak"`
+}
+
+type sessionStatus struct {
+	Interface      string `json:"interface"`
+	RemoteEndpoint string `json:"remote_endpoint"`
+	State          uint8  `json:"state"`
+	Quality        struct {
+		SmoothedRTTMicros       uint64 `json:"smoothed_rtt_micros"`
+		WrittenDataPayloadBytes uint64 `json:"written_data_payload_bytes"`
+	} `json:"quality"`
 }
 
 type stringValues []string
@@ -95,6 +131,10 @@ func main() {
 		err = waitTarget(os.Args[2:])
 	case "wait-resources":
 		err = waitResources(os.Args[2:])
+	case "session-written":
+		err = sessionWritten(os.Args[2:], os.Stdout)
+	case "sample-flow-window":
+		err = sampleFlowWindow(os.Args[2:])
 	default:
 		err = fmt.Errorf("unknown command %q", os.Args[1])
 	}
@@ -339,6 +379,8 @@ func runApplication(arguments []string) error {
 	pauseAfter := flags.Uint64("pause-after", 0, "pause upload after this many bytes")
 	readyFile := flags.String("ready-file", "", "pause readiness file")
 	continueFile := flags.String("continue-file", "", "pause continuation file")
+	progressFile := flags.String("progress-file", "", "first verified download progress file")
+	resultFile := flags.String("result-file", "", "successful transfer duration file")
 	timeout := flags.Duration("timeout", 90*time.Second, "application timeout")
 	if err := flags.Parse(arguments); err != nil || flags.NArg() != 0 || *requestID == 0 || *timeout <= 0 ||
 		(*socksUsername == "") != (*socksPassword == "") || len(*socksUsername) > 255 || len(*socksPassword) > 255 {
@@ -370,6 +412,7 @@ func runApplication(arguments []string) error {
 	if err := socksConnect(connection, *targetAddress, *socksUsername, *socksPassword); err != nil {
 		return err
 	}
+	startedAt := time.Now()
 	header := transferHeader{
 		mode: mode, requestID: *requestID, seed: *seed,
 		uploadBytes: *uploadBytes, downloadBytes: *downloadBytes,
@@ -382,7 +425,7 @@ func runApplication(arguments []string) error {
 	}
 	downloadResult := make(chan error, 1)
 	go func() {
-		downloadResult <- readApplicationDownload(connection, header)
+		downloadResult <- readApplicationDownload(connection, header, *progressFile)
 	}()
 	uploadErr := writeApplicationUpload(connection, header, *pauseAfter, *readyFile, *continueFile, *timeout)
 	if uploadErr == nil {
@@ -397,7 +440,13 @@ func runApplication(arguments []string) error {
 	if uploadErr != nil {
 		return uploadErr
 	}
-	return downloadErr
+	if downloadErr != nil {
+		return downloadErr
+	}
+	if *resultFile != "" {
+		return writeResultFile(*resultFile, time.Since(startedAt))
+	}
+	return nil
 }
 
 func parseTransferMode(value string) (byte, error) {
@@ -440,7 +489,7 @@ func writeApplicationUpload(connection net.Conn, header transferHeader, pauseAft
 	return nil
 }
 
-func readApplicationDownload(connection net.Conn, header transferHeader) error {
+func readApplicationDownload(connection net.Conn, header transferHeader, progressFile string) error {
 	buffer := make([]byte, transferChunkBytes)
 	var offset uint64
 	for offset < header.downloadBytes {
@@ -452,6 +501,12 @@ func readApplicationDownload(connection net.Conn, header transferHeader) error {
 			return fmt.Errorf("download verify at %d: %w", offset, err)
 		}
 		offset += uint64(count)
+		if progressFile != "" {
+			if err := createSignalFile(progressFile); err != nil {
+				return err
+			}
+			progressFile = ""
+		}
 	}
 	var status [1]byte
 	if _, err := io.ReadFull(connection, status[:]); err != nil {
@@ -461,6 +516,17 @@ func readApplicationDownload(connection net.Conn, header transferHeader) error {
 		return fmt.Errorf("target status = %#x", status[0])
 	}
 	return nil
+}
+
+func writeResultFile(path string, duration time.Duration) error {
+	if path == "" || duration <= 0 {
+		return errors.New("invalid result file")
+	}
+	temporary := path + ".tmp"
+	if err := os.WriteFile(temporary, []byte(strconv.FormatInt(duration.Nanoseconds(), 10)+"\n"), 0o600); err != nil {
+		return err
+	}
+	return os.Rename(temporary, path)
 }
 
 func socksConnect(connection net.Conn, target, username, password string) error {
@@ -614,6 +680,177 @@ func sessionsReady(sessions sessionList, minimum int, required []string, fastest
 		}
 	}
 	return true
+}
+
+func sessionWritten(arguments []string, output io.Writer) error {
+	flags := flag.NewFlagSet("session-written", flag.ContinueOnError)
+	url := flags.String("url", "http://127.0.0.1:18081/api/v1/sessions", "sessions URL")
+	interfaceName := flags.String("interface", "", "client interface name")
+	remoteHost := flags.String("remote-host", "", "server session remote host")
+	if err := flags.Parse(arguments); err != nil || flags.NArg() != 0 || output == nil || (*interfaceName == "") == (*remoteHost == "") {
+		return errors.New("invalid session-written flags")
+	}
+	data, err := getURL(*url)
+	if err != nil {
+		return err
+	}
+	var sessions sessionList
+	if err := json.Unmarshal(data, &sessions); err != nil {
+		return err
+	}
+	written, matches := selectSessionWritten(sessions, *interfaceName, *remoteHost)
+	if matches != 1 {
+		return fmt.Errorf("session selector matched %d sessions", matches)
+	}
+	_, err = fmt.Fprintln(output, written)
+	return err
+}
+
+func selectSessionWritten(sessions sessionList, interfaceName, remoteHost string) (uint64, int) {
+	var written uint64
+	matches := 0
+	for _, session := range sessions.Items {
+		matched := interfaceName != "" && session.Interface == interfaceName
+		if remoteHost != "" {
+			host, _, err := net.SplitHostPort(session.RemoteEndpoint)
+			matched = err == nil && host == remoteHost
+		}
+		if !matched {
+			continue
+		}
+		matches++
+		written += session.Quality.WrittenDataPayloadBytes
+	}
+	return written, matches
+}
+
+func observeFlowWindow(flows flowList, window uint64) (flowWindowObservation, error) {
+	if window == 0 {
+		return flowWindowObservation{}, errors.New("invalid flow window")
+	}
+	observation := flowWindowObservation{ActiveFlows: len(flows.Items)}
+	for _, flow := range flows.Items {
+		if flow.TxAcknowledged > flow.TxAllocatedOffset || flow.UnacknowledgedBytes != flow.TxAllocatedOffset-flow.TxAcknowledged {
+			return flowWindowObservation{}, errors.New("inconsistent flow offsets")
+		}
+		if flow.UnacknowledgedBytes > observation.MaximumUnacknowledged {
+			observation.MaximumUnacknowledged = flow.UnacknowledgedBytes
+		}
+		if math.MaxUint64-observation.AcknowledgedBytes < flow.TxAcknowledged {
+			return flowWindowObservation{}, errors.New("flow acknowledgement overflow")
+		}
+		observation.AcknowledgedBytes += flow.TxAcknowledged
+		if flow.UnacknowledgedBytes == window {
+			observation.FullWindowFlows++
+		}
+	}
+	return observation, nil
+}
+
+func (summary *flowWindowSummary) add(observation flowWindowObservation, acknowledgedProgress bool, sessionsProgressed int, fullWindowStreak *uint64) {
+	summary.Samples++
+	if observation.ActiveFlows != 0 {
+		summary.ActiveSamples++
+	}
+	if observation.FullWindowFlows != 0 {
+		summary.FullWindowSamples++
+	}
+	if observation.MaximumUnacknowledged > summary.MaximumUnacknowledged {
+		summary.MaximumUnacknowledged = observation.MaximumUnacknowledged
+	}
+	if acknowledgedProgress {
+		summary.ACKProgressSamples++
+	}
+	switch sessionsProgressed {
+	case 1:
+		summary.OneSessionProgress++
+	case 2:
+		summary.BothSessionsProgress++
+	}
+	if observation.FullWindowFlows != 0 && !acknowledgedProgress {
+		summary.FullWindowNoProgress++
+		*fullWindowStreak++
+		if *fullWindowStreak > summary.LongestFullWindowStall {
+			summary.LongestFullWindowStall = *fullWindowStreak
+		}
+	} else {
+		*fullWindowStreak = 0
+	}
+}
+
+func sampleFlowWindow(arguments []string) error {
+	flags := flag.NewFlagSet("sample-flow-window", flag.ContinueOnError)
+	url := flags.String("url", "http://127.0.0.1:18082/api/v1/flows", "flows URL")
+	sessionsURL := flags.String("sessions-url", "http://127.0.0.1:18082/api/v1/sessions", "sessions URL")
+	stopFile := flags.String("stop-file", "", "file that stops sampling")
+	resultFile := flags.String("result-file", "", "summary result file")
+	window := flags.Uint64("window-bytes", 320<<10, "full Flow send window")
+	interval := flags.Duration("interval", 50*time.Millisecond, "sample interval")
+	timeout := flags.Duration("timeout", 80*time.Second, "sampling timeout")
+	if err := flags.Parse(arguments); err != nil || flags.NArg() != 0 || *url == "" || *sessionsURL == "" || *stopFile == "" || *resultFile == "" ||
+		*window == 0 || *interval < 10*time.Millisecond || *interval > time.Second || *timeout <= 0 || *timeout > 90*time.Second ||
+		*timeout / *interval > maximumWindowSamples {
+		return errors.New("invalid sample-flow-window flags")
+	}
+	summary := flowWindowSummary{WindowBytes: *window}
+	var previousAcknowledged uint64
+	previousSessions := make(map[string]uint64, 2)
+	var fullWindowStreak uint64
+	havePrevious := false
+	deadline := time.Now().Add(*timeout)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(*stopFile); err == nil {
+			return writeJSONFile(*resultFile, summary)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		data, err := getURL(*url)
+		sessionData, sessionErr := getURL(*sessionsURL)
+		if err == nil && sessionErr == nil {
+			var flows flowList
+			if err := json.Unmarshal(data, &flows); err != nil {
+				return err
+			}
+			var sessions sessionList
+			if err := json.Unmarshal(sessionData, &sessions); err != nil {
+				return err
+			}
+			observation, err := observeFlowWindow(flows, *window)
+			if err != nil {
+				return err
+			}
+			progressed := 0
+			currentSessions := make(map[string]uint64, len(sessions.Items))
+			for _, session := range sessions.Items {
+				currentSessions[session.RemoteEndpoint] = session.Quality.WrittenDataPayloadBytes
+				if previous, exists := previousSessions[session.RemoteEndpoint]; havePrevious && exists && session.Quality.WrittenDataPayloadBytes > previous {
+					progressed++
+				}
+			}
+			acknowledgedProgress := havePrevious && observation.AcknowledgedBytes > previousAcknowledged
+			summary.add(observation, acknowledgedProgress, progressed, &fullWindowStreak)
+			previousAcknowledged = observation.AcknowledgedBytes
+			previousSessions = currentSessions
+			havePrevious = true
+		}
+		time.Sleep(*interval)
+	}
+	if err := writeJSONFile(*resultFile, summary); err != nil {
+		return err
+	}
+	return errors.New("flow window sampling timed out")
+}
+
+func writeJSONFile(path string, value any) error {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	temporary := path + ".tmp"
+	if err := os.WriteFile(temporary, append(encoded, '\n'), 0o600); err != nil {
+		return err
+	}
+	return os.Rename(temporary, path)
 }
 
 func dumpStatus(arguments []string) error {

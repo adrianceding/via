@@ -460,7 +460,9 @@ func (instance *clientFlow) handleRelay(event clientcore.ApplicationRelayEvent) 
 	if instance.relay == nil {
 		return
 	}
+	refreshErr := instance.refreshSessionQualities(event.Kind)
 	actions, err := instance.relay.Handle(event)
+	err = errors.Join(refreshErr, err)
 	if err != nil {
 		log.Printf("client flow event failed: %s, %s", clientRelayEventCategory(event), clientRelayErrorCategory(err))
 	}
@@ -499,6 +501,29 @@ func (instance *clientFlow) handleRelay(event clientcore.ApplicationRelayEvent) 
 	instance.publishStatus(reason)
 }
 
+func (instance *clientFlow) refreshSessionQualities(kind clientcore.ApplicationRelayEventKind) error {
+	switch kind {
+	case clientcore.ApplicationRelayObserveDataQuality, clientcore.ApplicationRelayObserveProbeQuality,
+		clientcore.ApplicationRelaySetAttachmentLoad, clientcore.ApplicationRelaySetStallPenalty,
+		clientcore.ApplicationRelaySetSessionQuality, clientcore.ApplicationRelaySetSessionQualities,
+		clientcore.ApplicationRelaySendAdmitted:
+		return nil
+	}
+	attachments := instance.relay.Snapshot().Policy.Attachments
+	qualities := make(map[flow.AttachmentKey]policy.QualitySnapshot, len(attachments))
+	for _, attachment := range attachments {
+		session := instance.host.session(attachment.Attachment.SessionGeneration)
+		if session == nil {
+			return nil
+		}
+		qualities[attachment.Attachment] = session.qualitySnapshot()
+	}
+	_, err := instance.relay.Handle(clientcore.ApplicationRelayEvent{
+		Kind: clientcore.ApplicationRelaySetSessionQualities, SessionQualities: qualities,
+	})
+	return err
+}
+
 func clientRelayEventCategory(event clientcore.ApplicationRelayEvent) string {
 	switch event.Kind {
 	case clientcore.ApplicationRelayReserveAttachment:
@@ -517,6 +542,8 @@ func clientRelayEventCategory(event clientcore.ApplicationRelayEvent) string {
 		return "application write result"
 	case clientcore.ApplicationRelayCloseWriteResult:
 		return "application half-close result"
+	case clientcore.ApplicationRelaySendAdmitted:
+		return "transport send admission"
 	case clientcore.ApplicationRelaySendResult:
 		return "transport send result"
 	case clientcore.ApplicationRelayRetryDeadline:
@@ -532,7 +559,8 @@ func clientRelayEventCategory(event clientcore.ApplicationRelayEvent) string {
 	case clientcore.ApplicationRelayResetRequested:
 		return "reset request"
 	case clientcore.ApplicationRelayObserveDataQuality, clientcore.ApplicationRelayObserveProbeQuality,
-		clientcore.ApplicationRelaySetAttachmentLoad, clientcore.ApplicationRelaySetStallPenalty:
+		clientcore.ApplicationRelaySetAttachmentLoad, clientcore.ApplicationRelaySetStallPenalty,
+		clientcore.ApplicationRelaySetSessionQuality:
 		return "path quality"
 	default:
 		return "internal event"
@@ -736,28 +764,38 @@ func (instance *clientFlow) executeRelay(actions []clientcore.ApplicationRelayAc
 		case clientcore.ApplicationRelayActionClose:
 			_, _, _ = instance.application.Execute(action)
 		case clientcore.ApplicationRelayActionSendMessage:
+			pending, ok := instance.admitRelaySend(action)
+			if !ok {
+				instance.emit(clientcore.ApplicationRelayEvent{
+					Kind: clientcore.ApplicationRelaySendResult, Generation: action.Generation, AttemptOutcome: flow.AttemptFailed,
+				})
+				continue
+			}
+			quality := policy.QualitySnapshot{}
+			if pending.session != nil {
+				quality = pending.session.qualitySnapshot()
+			}
+			instance.handleRelay(clientcore.ApplicationRelayEvent{
+				Kind: clientcore.ApplicationRelaySendAdmitted, Generation: action.Generation, Quality: quality,
+			})
 			instance.host.wg.Add(1)
-			go func(action clientcore.ApplicationRelayAction) {
+			go func(action clientcore.ApplicationRelayAction, pending *pendingSessionWrite) {
 				defer instance.host.wg.Done()
 				outcome := flow.AttemptFailed
-				session := instance.host.session(action.Attachment.SessionGeneration)
-				if session != nil {
-					if attachment, ok := session.attachment(instance.flowID); ok && attachment == action.Attachment {
-						var err error
-						if len(action.Encoded) != 0 {
-							err = session.sendEncodedContext(instance.ctx, action.Class, action.Encoded)
-						} else {
-							err = session.sendContext(instance.ctx, action.Message)
-						}
-						if err == nil {
-							outcome = flow.AttemptSucceeded
-						}
-					}
+				writeCompletedAt, err := pending.wait()
+				if err == nil {
+					outcome = flow.AttemptSucceeded
 				}
 				instance.emit(clientcore.ApplicationRelayEvent{
 					Kind: clientcore.ApplicationRelaySendResult, Generation: action.Generation, AttemptOutcome: outcome,
+					WriteCompletedAt: writeCompletedAt,
 				})
-			}(action)
+			}(action, pending)
+		case clientcore.ApplicationRelayActionDataCredit:
+			session := instance.host.session(action.Attachment.SessionGeneration)
+			if session != nil {
+				session.runtime.observeDataCredit(action.DataCreditBytes, action.WriteCompletedAt, action.AcknowledgedAt)
+			}
 		case clientcore.ApplicationRelayActionArmRetryDeadline:
 			instance.armRelayTimer(relayTimerRetry, action.Generation, action.After)
 		case clientcore.ApplicationRelayActionCancelRetryDeadline:
@@ -788,17 +826,10 @@ func (instance *clientFlow) executeRelay(actions []clientcore.ApplicationRelayAc
 					SessionGeneration: action.Attachment.SessionGeneration,
 				})
 			} else {
-				rtt, stall := session.probeQuality()
-				if rtt > 0 {
-					instance.handleRelay(clientcore.ApplicationRelayEvent{
-						Kind: clientcore.ApplicationRelayObserveProbeQuality, Attachment: action.Attachment, RTT: rtt,
-					})
-				}
-				if stall > 0 {
-					instance.handleRelay(clientcore.ApplicationRelayEvent{
-						Kind: clientcore.ApplicationRelaySetStallPenalty, Attachment: action.Attachment, StallPenalty: stall,
-					})
-				}
+				instance.handleRelay(clientcore.ApplicationRelayEvent{
+					Kind: clientcore.ApplicationRelaySetSessionQuality, Attachment: action.Attachment,
+					Quality: session.qualitySnapshot(),
+				})
 				instance.emit(clientcore.OpenJoinEvent{
 					Kind: clientcore.OpenJoinAttachmentPublished, Generation: generation,
 					SessionGeneration: action.Attachment.SessionGeneration,
@@ -811,6 +842,26 @@ func (instance *clientFlow) executeRelay(actions []clientcore.ApplicationRelayAc
 			}
 		}
 	}
+}
+
+func (instance *clientFlow) admitRelaySend(action clientcore.ApplicationRelayAction) (*pendingSessionWrite, bool) {
+	session := instance.host.session(action.Attachment.SessionGeneration)
+	if session == nil {
+		return nil, false
+	}
+	attachment, ok := session.attachment(instance.flowID)
+	if !ok || attachment != action.Attachment {
+		return nil, false
+	}
+	var pending *pendingSessionWrite
+	var err error
+	if len(action.Encoded) != 0 {
+		pending, err = session.admitEncodedContextMetadata(instance.ctx, action.Class, action.Encoded,
+			instance.flowID, action.ItemID, action.AttemptGeneration, uint64(action.SendDataBytes))
+	} else {
+		pending, err = session.admitMessageContext(instance.ctx, action.Message)
+	}
+	return pending, err == nil
 }
 
 func (instance *clientFlow) armOpenJoinTimer(kind openJoinTimerKind, generation uint64, duration time.Duration) {

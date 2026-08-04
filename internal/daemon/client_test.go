@@ -176,27 +176,27 @@ func TestClientProbeTimeoutPenaltyAndRecoveryReachPublishedFlow(t *testing.T) {
 	session.attachments[flowID] = attachment
 	daemon := &clientDaemon{flows: map[protocol.FlowID]*clientFlow{flowID: instance}}
 
+	session.runtime.setStallPenalty(probeTimeout)
 	daemon.notifyProbeStallPenalty(session, probeTimeout)
 	stalledQuality := (<-instance.events).(clientFlowSessionQuality)
 	penalty := (<-instance.events).(clientcore.ApplicationRelayEvent)
 	if stalledQuality.generation != session.generation || stalledQuality.stall != probeTimeout {
 		t.Fatalf("stalled session quality = %#v", stalledQuality)
 	}
-	if penalty.Kind != clientcore.ApplicationRelaySetStallPenalty || penalty.Attachment != attachment || penalty.StallPenalty != probeTimeout {
+	if penalty.Kind != clientcore.ApplicationRelaySetSessionQuality || penalty.Attachment != attachment || penalty.Quality.StallPenalty != probeTimeout {
 		t.Fatalf("probe penalty event = %#v", penalty)
 	}
+	session.runtime.observeProbe(25 * time.Millisecond)
+	session.runtime.setStallPenalty(0)
 	daemon.notifyProbeQuality(session, 25*time.Millisecond)
 	recoveredQuality := (<-instance.events).(clientFlowSessionQuality)
 	clear := (<-instance.events).(clientcore.ApplicationRelayEvent)
-	quality := (<-instance.events).(clientcore.ApplicationRelayEvent)
 	if recoveredQuality.generation != session.generation || recoveredQuality.stall != 0 {
 		t.Fatalf("recovered session quality = %#v", recoveredQuality)
 	}
-	if clear.Kind != clientcore.ApplicationRelaySetStallPenalty || clear.Attachment != attachment || clear.StallPenalty != 0 {
-		t.Fatalf("probe penalty clear = %#v", clear)
-	}
-	if quality.Kind != clientcore.ApplicationRelayObserveProbeQuality || quality.Attachment != attachment || quality.RTT != 25*time.Millisecond {
-		t.Fatalf("probe quality event = %#v", quality)
+	if clear.Kind != clientcore.ApplicationRelaySetSessionQuality || clear.Attachment != attachment ||
+		clear.Quality.SRTT != 25*time.Millisecond || clear.Quality.StallPenalty != 0 {
+		t.Fatalf("probe quality event = %#v", clear)
 	}
 }
 

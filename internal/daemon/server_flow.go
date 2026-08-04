@@ -111,7 +111,9 @@ func (instance *serverFlow) handle(event servercore.RelayEvent) error {
 		return nil
 	}
 	beforeState := instance.owner.LifecycleState()
+	refreshErr := instance.refreshSessionQualitiesLocked(event.Kind)
 	actions, err := instance.relay.Handle(event)
+	err = errors.Join(refreshErr, err)
 	reason := statusReasonForRelayEvent(event, err)
 	if actionReason := serverStatusReasonFromRelayActions(actions); actionReason != statusapi.ReasonNone &&
 		(reason == statusapi.ReasonNone || err != nil) {
@@ -121,6 +123,29 @@ func (instance *serverFlow) handle(event servercore.RelayEvent) error {
 	followups, lost, closes := instance.finishTransitionLocked(actions, reason)
 	instance.mu.Unlock()
 	instance.runEffects(followups, lost, closes)
+	return err
+}
+
+func (instance *serverFlow) refreshSessionQualitiesLocked(kind servercore.RelayEventKind) error {
+	switch kind {
+	case servercore.RelayObserveDataQuality, servercore.RelayObserveProbeQuality,
+		servercore.RelaySetAttachmentLoad, servercore.RelaySetStallPenalty,
+		servercore.RelaySetSessionQuality, servercore.RelaySetSessionQualities,
+		servercore.RelaySendAdmitted:
+		return nil
+	}
+	attachments := instance.relay.Snapshot().Policy.Attachments
+	qualities := make(map[flow.AttachmentKey]policy.QualitySnapshot, len(attachments))
+	for _, attachment := range attachments {
+		session := instance.host.session(attachment.Attachment.SessionGeneration)
+		if session == nil {
+			return nil
+		}
+		qualities[attachment.Attachment] = session.qualitySnapshot()
+	}
+	_, err := instance.relay.Handle(servercore.RelayEvent{
+		Kind: servercore.RelaySetSessionQualities, SessionQualities: qualities,
+	})
 	return err
 }
 
@@ -268,10 +293,40 @@ func (instance *serverFlow) executeLocked(actions []servercore.RelayAction) ([]s
 		case servercore.RelayActionCloseTarget:
 			closes = append(closes, action)
 		case servercore.RelayActionSendMessage:
-			if !instance.host.startWorker(func() { instance.executeSend(action) }) {
+			if !instance.host.reserveWorker() {
 				followups = append(followups, servercore.RelayEvent{
 					Kind: servercore.RelaySendResult, Generation: action.Generation, AttemptOutcome: flow.AttemptFailed,
 				})
+				continue
+			}
+			pending, ok := instance.admitSend(action)
+			if !ok {
+				instance.host.releaseWorker()
+				followups = append(followups, servercore.RelayEvent{
+					Kind: servercore.RelaySendResult, Generation: action.Generation, AttemptOutcome: flow.AttemptFailed,
+				})
+				continue
+			}
+			quality := policy.QualitySnapshot{}
+			if pending.session != nil {
+				quality = pending.session.qualitySnapshot()
+			}
+			admissionActions, err := instance.relay.Handle(servercore.RelayEvent{
+				Kind: servercore.RelaySendAdmitted, Generation: action.Generation, Quality: quality,
+			})
+			if err != nil {
+				instance.host.releaseWorker()
+				followups = append(followups, servercore.RelayEvent{
+					Kind: servercore.RelaySendResult, Generation: action.Generation, AttemptOutcome: flow.AttemptFailed,
+				})
+				continue
+			}
+			actions = append(actions, admissionActions...)
+			instance.host.runReservedWorker(func() { instance.completeSend(action, pending) })
+		case servercore.RelayActionDataCredit:
+			session := instance.host.session(action.Attachment.SessionGeneration)
+			if session != nil {
+				session.runtime.observeDataCredit(action.DataCreditBytes, action.WriteCompletedAt, action.AcknowledgedAt)
 			}
 		case servercore.RelayActionArmRetryDeadline:
 			instance.armTimer(relayTimerRetry, action.Generation, action.After)
@@ -331,23 +386,45 @@ func (instance *serverFlow) executeTarget(action servercore.RelayAction) {
 }
 
 func (instance *serverFlow) executeSend(action servercore.RelayAction) {
-	outcome := flow.AttemptFailed
+	pending, ok := instance.admitSend(action)
+	if !ok {
+		_ = instance.handle(servercore.RelayEvent{
+			Kind: servercore.RelaySendResult, Generation: action.Generation, AttemptOutcome: flow.AttemptFailed,
+		})
+		return
+	}
+	instance.completeSend(action, pending)
+}
+
+func (instance *serverFlow) admitSend(action servercore.RelayAction) (*pendingSessionWrite, bool) {
 	session := instance.host.session(action.Attachment.SessionGeneration)
-	if session != nil {
-		if attachment, ok := session.attachment(instance.key.FlowID); ok && attachment == action.Attachment {
-			var err error
-			if len(action.Encoded) != 0 {
-				err = session.sendEncodedContext(instance.ctx, action.Class, action.Encoded)
-			} else {
-				err = session.sendContext(instance.ctx, action.Message)
-			}
-			if err == nil {
-				outcome = flow.AttemptSucceeded
-			}
-		}
+	if session == nil {
+		return nil, false
+	}
+	attachment, ok := session.attachment(instance.key.FlowID)
+	if !ok || attachment != action.Attachment {
+		return nil, false
+	}
+	var pending *pendingSessionWrite
+	var err error
+	if len(action.Encoded) != 0 {
+		pending, err = session.admitEncodedContextMetadata(instance.ctx, action.Class, action.Encoded,
+			instance.key.FlowID, action.ItemID, action.AttemptGeneration, uint64(action.SendDataBytes))
+	} else {
+		pending, err = session.admitMessageContext(instance.ctx, action.Message)
+	}
+	return pending, err == nil
+}
+
+func (instance *serverFlow) completeSend(action servercore.RelayAction, pending *pendingSessionWrite) {
+	outcome := flow.AttemptFailed
+	writeCompletedAt, err := pending.wait()
+	if err == nil {
+		outcome = flow.AttemptSucceeded
 	}
 	_ = instance.handle(servercore.RelayEvent{
 		Kind: servercore.RelaySendResult, Generation: action.Generation, AttemptOutcome: outcome,
+		WriteCompletedAt: writeCompletedAt,
 	})
 }
 
@@ -484,30 +561,13 @@ func (instance *serverFlow) applyLifecycle(event flow.LifecycleEvent) {
 		instance.mu.Unlock()
 		return
 	}
+	refreshErr := instance.refreshSessionQualitiesLocked(servercore.RelayApplyFlowActions)
 	flowActions, flowErr := instance.owner.Handle(flow.FlowEvent{
 		Kind:      flow.FlowLifecycle,
 		Lifecycle: event,
 	})
 	relayActions, relayErr := instance.relay.Handle(servercore.RelayEvent{Kind: servercore.RelayApplyFlowActions, FlowActions: flowActions})
-	if event.Kind == flow.LifecycleJoinResultSendCompleted && relayErr == nil {
-		if session := instance.host.session(event.Attachment.SessionGeneration); session != nil {
-			rtt, stall := session.probeQuality()
-			if rtt > 0 {
-				qualityActions, qualityErr := instance.relay.Handle(servercore.RelayEvent{
-					Kind: servercore.RelayObserveProbeQuality, Attachment: event.Attachment, RTT: rtt,
-				})
-				relayActions = append(relayActions, qualityActions...)
-				relayErr = errors.Join(relayErr, qualityErr)
-			}
-			if stall > 0 {
-				qualityActions, qualityErr := instance.relay.Handle(servercore.RelayEvent{
-					Kind: servercore.RelaySetStallPenalty, Attachment: event.Attachment, StallPenalty: stall,
-				})
-				relayActions = append(relayActions, qualityActions...)
-				relayErr = errors.Join(relayErr, qualityErr)
-			}
-		}
-	}
+	relayErr = errors.Join(refreshErr, relayErr)
 	reason := statusReasonForLifecycleEvent(event, errors.Join(flowErr, relayErr))
 	followups, lost, closes := instance.finishTransitionLocked(relayActions, reason)
 	instance.mu.Unlock()

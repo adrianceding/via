@@ -320,6 +320,39 @@ func TestHTTPFlowResponseIsTruncatedBelowHardByteLimit(t *testing.T) {
 	}
 }
 
+func TestHTTPFlowResponseExcludesClosingFlowsFromActiveItems(t *testing.T) {
+	active := validTestFlow(1)
+	closing := validTestFlow(2)
+	closing.State = FlowClosing
+	handler, err := NewHandler(staticProvider{snapshot: Snapshot{
+		Healthy: true, GeneratedAt: time.Unix(1, 0).UTC(), Flows: []Flow{active, closing},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/flows", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("flow response status = %d", recorder.Code)
+	}
+	var response flowsResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Total != 1 || len(response.Items) != 1 || response.Items[0].IDHash != active.IDHash {
+		t.Fatalf("active flow response = %#v", response)
+	}
+	var summary summaryResponse
+	summaryRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(summaryRecorder, httptest.NewRequest(http.MethodGet, "/api/v1/summary", nil))
+	if err := json.Unmarshal(summaryRecorder.Body.Bytes(), &summary); err != nil {
+		t.Fatal(err)
+	}
+	if summary.Flows != 1 {
+		t.Fatalf("summary active flow count = %d, want 1", summary.Flows)
+	}
+}
+
 type blockingProvider struct {
 	started chan struct{}
 	release chan struct{}

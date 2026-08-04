@@ -46,6 +46,7 @@ type FlowActionKind uint8
 const (
 	FlowActionTxItem FlowActionKind = iota + 1
 	FlowActionTxAttempt
+	FlowActionTxAcknowledged
 	FlowActionRx
 	FlowActionLifecycle
 	FlowActionArmRetryDeadline
@@ -58,6 +59,7 @@ type FlowAction struct {
 	Kind       FlowActionKind
 	TxItem     TxItem
 	TxAttempt  TxAttempt
+	ACKRanges  []ByteRange
 	Rx         RxAction
 	Lifecycle  LifecycleAction
 	Generation uint64
@@ -269,12 +271,16 @@ func (flow *Flow) handleRemoteACK(nextOffset uint64, ranges []ByteRange) ([]Flow
 		return nil, ErrInvalidState
 	}
 	before := flow.tx.AcknowledgedOffset()
-	_, err := flow.tx.ApplyACK(nextOffset, ranges)
+	_, newlyCovered, err := flow.tx.ApplyACKWithCoverage(nextOffset, ranges)
 	if err != nil {
 		return flow.resetForError(protocol.ResetProtocolConflict), err
 	}
+	var actions []FlowAction
+	if len(newlyCovered) != 0 {
+		actions = append(actions, FlowAction{Kind: FlowActionTxAcknowledged, ACKRanges: newlyCovered})
+	}
 	cumulativeProgress := flow.tx.AcknowledgedOffset() > before
-	return flow.syncDataDeadlines(nil, cumulativeProgress, cumulativeProgress), nil
+	return flow.syncDataDeadlines(actions, cumulativeProgress, cumulativeProgress), nil
 }
 
 func (flow *Flow) handleRemoteFIN(finalOffset uint64) ([]FlowAction, error) {

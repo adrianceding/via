@@ -11,6 +11,7 @@ import { buildTrendOption, selectionBySeriesID, toggleTrendIsolation } from '../
 use([CanvasRenderer, GridComponent, LegendComponent, LineChart, TooltipComponent]);
 
 const props = defineProps({
+  aggregate: { type: Object, default: null },
   trends: { type: Array, required: true },
 });
 
@@ -23,7 +24,10 @@ let legendSelection = {};
 
 function render() {
   if (!chart) return;
-  chart.setOption(buildTrendOption(props.trends, legendSelection, t('trend.connection')), { notMerge: true });
+  const trends = props.aggregate
+    ? [{ ...props.aggregate, label: t('trend.aggregate') }, ...props.trends]
+    : props.trends;
+  chart.setOption(buildTrendOption(trends, legendSelection, t('trend.connection'), t('trend.axis')), { notMerge: true });
 }
 
 onMounted(() => {
@@ -43,7 +47,7 @@ onMounted(() => {
   render();
 });
 
-watch([() => props.trends, locale], render);
+watch([() => props.aggregate, () => props.trends, locale], render);
 
 onBeforeUnmount(() => {
   resizeObserver?.disconnect();

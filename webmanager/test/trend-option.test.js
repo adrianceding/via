@@ -3,7 +3,7 @@ import test from 'node:test';
 
 import { buildTrendOption, selectionBySeriesID, toggleTrendIsolation } from '../src/trend-option.js';
 
-test('trend option right-aligns bounded RTT samples in milliseconds', () => {
+test('trend option right-aligns bounded DATA throughput samples', () => {
   const option = buildTrendOption([
     { id: 'connection-a', label: 'eth0', localEndpoint: '192.0.2.10:1000', remoteEndpoint: '198.51.100.20:2000', samples: [1000, 2500] },
   ]);
@@ -14,11 +14,11 @@ test('trend option right-aligns bounded RTT samples in milliseconds', () => {
   assert.equal(option.series[0].id, 'connection-a');
   assert.equal(option.series[0].name, 'eth0');
   assert.equal(option.series[0].data.length, 120);
-  assert.deepEqual(option.series[0].data.slice(-3), [null, 1, 2.5]);
-    assert.equal(option.series[0].triggerEvent, 'line');
+  assert.deepEqual(option.series[0].data.slice(-3), [null, 1000, 2500]);
+  assert.equal(option.series[0].triggerEvent, 'line');
   assert.equal(option.series[0].localEndpoint, '192.0.2.10:1000');
-  assert.equal(option.yAxis.name, 'RTT (ms)');
-  assert.match(option.tooltip.formatter([{ seriesName: option.series[0].name, data: 2.5, seriesId: 'connection-a' }]), /198\.51\.100\.20:2000/);
+  assert.equal(option.yAxis.name, 'DATA throughput (bytes/s)');
+  assert.match(option.tooltip.formatter([{ seriesName: option.series[0].name, data: 2500, seriesId: 'connection-a' }]), /2\.44 KiB\/s/);
 });
 
 test('trend option remains empty without valid series', () => {

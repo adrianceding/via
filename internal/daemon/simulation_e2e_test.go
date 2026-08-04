@@ -409,6 +409,16 @@ func releaseRateLimitedRoundTrip(t *testing.T, result <-chan error, controllers 
 	if len(controllers) != 4 {
 		t.Fatalf("rate controllers = %d, want 4", len(controllers))
 	}
+	cleanup := func() {
+		for _, controller := range controllers {
+			controller.set(simulatedFault{kind: simulatedFaultNormal})
+		}
+		for _, controller := range controllers {
+			if err := controller.releaseAll(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
 	watchdog := time.NewTimer(20 * time.Second)
 	defer watchdog.Stop()
 	for {
@@ -417,6 +427,7 @@ func releaseRateLimitedRoundTrip(t *testing.T, result <-chan error, controllers 
 			if err != nil {
 				t.Fatal(err)
 			}
+			cleanup()
 			return
 		default:
 		}
@@ -438,6 +449,7 @@ func releaseRateLimitedRoundTrip(t *testing.T, result <-chan error, controllers 
 			if err != nil {
 				t.Fatal(err)
 			}
+			cleanup()
 			return
 		case <-controllers[0].heldEvents():
 		case <-controllers[1].heldEvents():
@@ -549,14 +561,53 @@ func TestSimulatedFullChainDeliveryModes(t *testing.T) {
 				if testCase.selection == protocol.PathFastest && (uplinkA == 0 || uplinkB != 0 || downlinkA == 0 || downlinkB != 0) {
 					t.Fatalf("fastest DATA counts = up %d/%d down %d/%d", uplinkA, uplinkB, downlinkA, downlinkB)
 				}
-				if testCase.selection == protocol.PathDistributed && (uplinkA == 0 || uplinkB == 0 || downlinkA == 0 || downlinkB == 0) {
-					t.Fatalf("distributed DATA counts = up %d/%d down %d/%d", uplinkA, uplinkB, downlinkA, downlinkB)
-				}
 			}
 			if harness.targetTotal.Load() != 1 {
 				t.Fatalf("target connections = %d", harness.targetTotal.Load())
 			}
 		})
+	}
+}
+
+func TestSimulatedFullChainDistributedUsesBothLoadedSessions(t *testing.T) {
+	harness := newSimulationHarness(t, protocol.DeliveryAdaptive, protocol.PathDistributed)
+	defer harness.close()
+	application := harness.openApplication()
+	defer application.Close()
+	harness.waitAttachments(2)
+
+	uplinkA := harness.network.controller(simulationAddressA, simulatedUplink)
+	uplinkB := harness.network.controller(simulationAddressB, simulatedUplink)
+	downlinkA := harness.network.controller(simulationAddressA, simulatedDownlink)
+	downlinkB := harness.network.controller(simulationAddressB, simulatedDownlink)
+	controllers := []*simulatedFaultController{uplinkA, uplinkB, downlinkA, downlinkB}
+	for _, controller := range controllers {
+		controller.set(simulatedFault{kind: simulatedFaultStall, frameType: protocol.TypeData, remaining: 1})
+	}
+
+	payload := bytes.Repeat([]byte("distributed-load|"), 64<<10)
+	result := startSimulationRoundTrip(application, payload)
+	for index, controller := range controllers[:2] {
+		select {
+		case <-controller.entered:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("uplink %d did not receive DATA while the peer was loaded", index)
+		}
+	}
+	uplinkA.resume()
+	uplinkB.resume()
+	for index, controller := range controllers[2:] {
+		select {
+		case <-controller.entered:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("downlink %d did not receive DATA while the peer was loaded", index)
+		}
+	}
+	downlinkA.resume()
+	downlinkB.resume()
+	waitSimulationResult(t, result)
+	if harness.targetTotal.Load() != 1 {
+		t.Fatalf("target connections = %d", harness.targetTotal.Load())
 	}
 }
 

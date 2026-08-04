@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"math"
+	"sort"
 	"time"
 
 	"github.com/adrianceding/via/internal/flow"
@@ -50,6 +51,7 @@ const (
 	ApplicationRelayReadResult
 	ApplicationRelayWriteResult
 	ApplicationRelayCloseWriteResult
+	ApplicationRelaySendAdmitted
 	ApplicationRelaySendResult
 	ApplicationRelayRetryDeadline
 	ApplicationRelayNoProgressDeadline
@@ -61,27 +63,33 @@ const (
 	ApplicationRelayObserveProbeQuality
 	ApplicationRelaySetAttachmentLoad
 	ApplicationRelaySetStallPenalty
+	ApplicationRelaySetSessionQuality
+	ApplicationRelaySetSessionQualities
 )
 
 // ApplicationRelayEvent is one serial input to the application relay state owner.
 // FlowActions carries actions already emitted by the JOIN coordinator for the same flow.
 type ApplicationRelayEvent struct {
-	Kind           ApplicationRelayEventKind
-	FlowActions    []flow.FlowAction
-	Message        protocol.Message
-	Attachment     flow.AttachmentKey
-	Generation     uint64
-	Data           []byte
-	N              int
-	Err            error
-	AttemptOutcome flow.AttemptOutcome
-	ResetReason    protocol.ResetReason
-	RTT            time.Duration
-	Interval       time.Duration
-	Bytes          uint64
-	QueuedBytes    uint64
-	InFlightBytes  uint64
-	StallPenalty   time.Duration
+	Kind             ApplicationRelayEventKind
+	FlowActions      []flow.FlowAction
+	Message          protocol.Message
+	Attachment       flow.AttachmentKey
+	Generation       uint64
+	Data             []byte
+	N                int
+	Err              error
+	AttemptOutcome   flow.AttemptOutcome
+	ResetReason      protocol.ResetReason
+	RTT              time.Duration
+	Interval         time.Duration
+	Bytes            uint64
+	QueuedBytes      uint64
+	InFlightBytes    uint64
+	StallPenalty     time.Duration
+	WriteCompletedAt time.Time
+	ObservedAt       time.Time
+	Quality          policy.QualitySnapshot
+	SessionQualities map[flow.AttachmentKey]policy.QualitySnapshot
 }
 
 type ApplicationRelayActionKind uint8
@@ -104,6 +112,7 @@ const (
 	ApplicationRelayActionCancelResetDeadline
 	ApplicationRelayActionAttachmentPublished
 	ApplicationRelayActionAttachmentWithdrawn
+	ApplicationRelayActionDataCredit
 )
 
 // ApplicationRelayAction describes work without performing I/O. Write payloads
@@ -122,6 +131,9 @@ type ApplicationRelayAction struct {
 	Offset            uint64
 	FinalOffset       uint64
 	After             time.Duration
+	DataCreditBytes   uint64
+	WriteCompletedAt  time.Time
+	AcknowledgedAt    time.Time
 	data              []byte
 }
 
@@ -163,13 +175,28 @@ type applicationRelayPendingSend struct {
 	itemID            uint64
 	attemptGeneration uint64
 	resetGeneration   uint64
+	dataBytes         uint64
+	admissionResolved bool
 }
 
 type applicationRelayAttemptHistory struct {
-	generation uint64
-	end        uint64
-	fin        bool
-	attempted  []flow.AttachmentKey
+	generation  uint64
+	end         uint64
+	fin         bool
+	retryAfter  time.Duration
+	attempted   []flow.AttachmentKey
+	attempts    []applicationRelayAttempt
+	invalidated bool
+}
+
+type applicationRelayAttempt struct {
+	attachment       flow.AttachmentKey
+	start            uint64
+	end              uint64
+	writeSucceeded   bool
+	invalid          bool
+	writeCompletedAt time.Time
+	credited         []flow.ByteRange
 }
 
 type applicationRelayReservation struct {
@@ -218,13 +245,21 @@ type ApplicationRelay struct {
 	resetPending         int
 	attemptHistory       map[uint64]*applicationRelayAttemptHistory
 	retryAfter           time.Duration
+	now                  func() time.Time
 }
 
 func NewApplicationRelay(flowID protocol.FlowID, config policy.Config, machine *flow.Flow) (*ApplicationRelay, error) {
+	return NewApplicationRelayWithClock(flowID, config, machine, time.Now)
+}
+
+func NewApplicationRelayWithClock(flowID protocol.FlowID, config policy.Config, machine *flow.Flow, now func() time.Time) (*ApplicationRelay, error) {
 	if flowID == (protocol.FlowID{}) || machine == nil {
 		return nil, ErrInvalidApplicationRelay
 	}
-	sender, err := policy.New(flowID, config)
+	if now == nil {
+		return nil, ErrInvalidApplicationRelay
+	}
+	sender, err := policy.NewWithClock(flowID, config, now)
 	if err != nil {
 		return nil, err
 	}
@@ -244,6 +279,7 @@ func NewApplicationRelay(flowID protocol.FlowID, config policy.Config, machine *
 		deferredControls: make(map[flow.AttachmentKey]protocol.Message, flow.MaxAttachments),
 		reservations:     make(map[flow.AttachmentKey]applicationRelayReservation, MaxApplicationRelayReservations),
 		attemptHistory:   make(map[uint64]*applicationRelayAttemptHistory, MaxApplicationRelayAttemptItems),
+		now:              now,
 	}, nil
 }
 
@@ -325,6 +361,8 @@ func (relay *ApplicationRelay) Handle(event ApplicationRelayEvent) ([]Applicatio
 		err = relay.handleApplicationWrite(event, &actions)
 	case ApplicationRelayCloseWriteResult:
 		err = relay.handleApplicationCloseWrite(event, &actions)
+	case ApplicationRelaySendAdmitted:
+		err = relay.handleSendAdmitted(event)
 	case ApplicationRelaySendResult:
 		err = relay.handleSendResult(event, &actions)
 	case ApplicationRelayRetryDeadline:
@@ -347,6 +385,10 @@ func (relay *ApplicationRelay) Handle(event ApplicationRelayEvent) ([]Applicatio
 		err = ignoreWithdrawnAttachmentTelemetry(relay.setAttachmentLoad(event))
 	case ApplicationRelaySetStallPenalty:
 		err = ignoreWithdrawnAttachmentTelemetry(relay.setStallPenalty(event))
+	case ApplicationRelaySetSessionQuality:
+		err = ignoreWithdrawnAttachmentTelemetry(relay.setSessionQuality(event))
+	case ApplicationRelaySetSessionQualities:
+		err = relay.policy.SetQualitySnapshots(event.SessionQualities)
 	default:
 		return nil, ErrInvalidApplicationRelayEvent
 	}
@@ -590,9 +632,13 @@ func (relay *ApplicationRelay) handleSendResult(event ApplicationRelayEvent, act
 	if outcome < flow.AttemptSucceeded || outcome > flow.AttemptTimedOut {
 		return ErrInvalidApplicationRelayEvent
 	}
+	if err := relay.resolveSendAdmission(event.Generation, nil); err != nil {
+		return err
+	}
 	delete(relay.pendingSends, event.Generation)
 	switch pending.kind {
 	case applicationRelayPendingAttempt:
+		relay.recordAttemptResult(pending, outcome, event.WriteCompletedAt)
 		return relay.applyFlowEvent(flow.FlowEvent{
 			Kind: flow.FlowAttemptResult, ItemID: pending.itemID,
 			AttemptGeneration: pending.attemptGeneration,
@@ -620,6 +666,26 @@ func (relay *ApplicationRelay) handleSendResult(event ApplicationRelayEvent, act
 		}
 	}
 	return nil
+}
+
+func (relay *ApplicationRelay) handleSendAdmitted(event ApplicationRelayEvent) error {
+	return relay.resolveSendAdmission(event.Generation, &event.Quality)
+}
+
+func (relay *ApplicationRelay) resolveSendAdmission(generation uint64, quality *policy.QualitySnapshot) error {
+	pending, ok := relay.pendingSends[generation]
+	if !ok || generation == 0 || pending.kind != applicationRelayPendingAttempt || pending.dataBytes == 0 || pending.admissionResolved {
+		return nil
+	}
+	if err := relay.policy.ResolveAssigned(pending.attachment, pending.dataBytes); err != nil {
+		return ignoreWithdrawnAttachmentTelemetry(err)
+	}
+	pending.admissionResolved = true
+	relay.pendingSends[generation] = pending
+	if quality == nil {
+		return nil
+	}
+	return ignoreWithdrawnAttachmentTelemetry(relay.policy.SetQualitySnapshot(pending.attachment, *quality))
 }
 
 func (relay *ApplicationRelay) applyLifecycleEvent(kind flow.LifecycleEventKind, generation uint64, reason protocol.ResetReason, actions *[]ApplicationRelayAction) error {
@@ -657,6 +723,8 @@ func (relay *ApplicationRelay) consumeFlowActions(flowActions []flow.FlowAction,
 			err = relay.placeTxItem(action.TxItem, actions)
 		case flow.FlowActionTxAttempt:
 			err = relay.emitAttempt(action.TxAttempt, actions)
+		case flow.FlowActionTxAcknowledged:
+			err = relay.consumeAcknowledgedRanges(action.ACKRanges, actions)
 		case flow.FlowActionRx:
 			err = relay.consumeRxAction(action.Rx, actions)
 		case flow.FlowActionLifecycle:
@@ -709,8 +777,12 @@ func (relay *ApplicationRelay) placeTxItem(item flow.TxItem, actions *[]Applicat
 	}
 	var result error
 	for _, placement := range placements {
-		if relay.retryAfter == 0 || placement.RetryAfter < relay.retryAfter {
-			relay.retryAfter = placement.RetryAfter
+		retryAfter := placement.RetryAfter
+		if relay.retryAfter == 0 || retryAfter < relay.retryAfter {
+			relay.retryAfter = retryAfter
+		}
+		if history.retryAfter == 0 || retryAfter < history.retryAfter {
+			history.retryAfter = retryAfter
 		}
 		if applicationRelayAttemptedAttachment(history.attempted, placement.Attachment) {
 			continue
@@ -740,6 +812,7 @@ func (relay *ApplicationRelay) emitAttempt(attempt flow.TxAttempt, actions *[]Ap
 		if err != nil {
 			return err
 		}
+		relay.recordAttemptStart(item, attempt.Attachment)
 		return relay.emitEncodedData(encoded, item.DataLen(), attempt.Attachment, applicationRelayPendingSend{
 			kind: applicationRelayPendingAttempt, attachment: attempt.Attachment,
 			itemID: item.ItemID, attemptGeneration: item.AttemptGeneration,
@@ -922,6 +995,7 @@ func (relay *ApplicationRelay) emitEncodedData(encoded []byte, dataBytes int, at
 	if err != nil {
 		return err
 	}
+	pending.dataBytes = uint64(dataBytes)
 	relay.pendingSends[generation] = pending
 	*actions = append(*actions, ApplicationRelayAction{
 		Kind: ApplicationRelayActionSendMessage, Generation: generation, Attachment: attachment,
@@ -1066,11 +1140,24 @@ func (relay *ApplicationRelay) setStallPenalty(event ApplicationRelayEvent) erro
 	return quality.SetStallPenalty(event.StallPenalty)
 }
 
+func (relay *ApplicationRelay) setSessionQuality(event ApplicationRelayEvent) error {
+	return relay.policy.SetQualitySnapshot(event.Attachment, event.Quality)
+}
+
 func (relay *ApplicationRelay) currentRetryAfter() time.Duration {
 	if relay.retryAfter > 0 {
 		return relay.retryAfter
 	}
 	var after time.Duration
+	acknowledged := relay.machine.TxAcknowledgedOffset()
+	for _, history := range relay.attemptHistory {
+		if history.retryAfter > 0 && (history.fin || history.end > acknowledged) && (after == 0 || history.retryAfter < after) {
+			after = history.retryAfter
+		}
+	}
+	if after > 0 {
+		return after
+	}
 	for _, attachment := range relay.policy.Snapshot().Attachments {
 		retry := attachment.Quality.RetryEstimate
 		if retry > 0 && (after == 0 || retry < after) {
@@ -1101,7 +1188,10 @@ func (relay *ApplicationRelay) beginAttemptGeneration(item flow.TxItem) (*applic
 	previous := append([]flow.AttachmentKey(nil), history.attempted...)
 	if item.AttemptGeneration != history.generation {
 		history.generation = item.AttemptGeneration
+		history.retryAfter = 0
 		history.attempted = nil
+		history.attempts = nil
+		history.invalidated = item.AttemptGeneration > 1
 	}
 	if item.Kind == flow.TxItemFIN {
 		history.end = item.FinalOffset
@@ -1111,6 +1201,101 @@ func (relay *ApplicationRelay) beginAttemptGeneration(item flow.TxItem) (*applic
 		history.fin = false
 	}
 	return history, previous, nil
+}
+
+func (relay *ApplicationRelay) recordAttemptStart(item flow.TxItem, attachment flow.AttachmentKey) {
+	if item.Kind != flow.TxItemData {
+		return
+	}
+	history := relay.attemptHistory[item.ItemID]
+	if history == nil || history.generation != item.AttemptGeneration || len(history.attempts) >= flow.MaxAttachments {
+		return
+	}
+	attempt := applicationRelayAttempt{
+		attachment: attachment,
+		start:      item.Offset,
+		end:        item.Offset + uint64(item.DataLen()),
+	}
+	for index := range history.attempts {
+		current := &history.attempts[index]
+		if current.start < attempt.end && attempt.start < current.end {
+			current.invalid = true
+			attempt.invalid = true
+		}
+	}
+	history.attempts = append(history.attempts, attempt)
+}
+
+func (relay *ApplicationRelay) recordAttemptResult(pending applicationRelayPendingSend, outcome flow.AttemptOutcome, completedAt time.Time) {
+	history := relay.attemptHistory[pending.itemID]
+	if history == nil || history.generation != pending.attemptGeneration {
+		return
+	}
+	for index := range history.attempts {
+		attempt := &history.attempts[index]
+		if attempt.attachment != pending.attachment {
+			continue
+		}
+		if outcome != flow.AttemptSucceeded {
+			attempt.invalid = true
+			return
+		}
+		if completedAt.IsZero() {
+			completedAt = relay.now()
+		}
+		attempt.writeSucceeded = true
+		attempt.writeCompletedAt = completedAt
+		return
+	}
+}
+
+func (relay *ApplicationRelay) consumeAcknowledgedRanges(ranges []flow.ByteRange, actions *[]ApplicationRelayAction) error {
+	if len(ranges) == 0 {
+		return nil
+	}
+	itemIDs := make([]uint64, 0, len(relay.attemptHistory))
+	for itemID := range relay.attemptHistory {
+		itemIDs = append(itemIDs, itemID)
+	}
+	sort.Slice(itemIDs, func(left, right int) bool { return itemIDs[left] < itemIDs[right] })
+	acknowledgedAt := relay.now()
+	for _, itemID := range itemIDs {
+		history := relay.attemptHistory[itemID]
+		for index := range history.attempts {
+			attempt := &history.attempts[index]
+			if attempt.invalid || !attempt.writeSucceeded || attempt.writeCompletedAt.IsZero() {
+				continue
+			}
+			for _, acknowledged := range ranges {
+				start := acknowledged.Start
+				if start < attempt.start {
+					start = attempt.start
+				}
+				end := acknowledged.End
+				if end > attempt.end {
+					end = attempt.end
+				}
+				for _, credited := range attempt.credited {
+					if credited.Start <= start && start < credited.End {
+						start = credited.End
+					}
+				}
+				if start >= end {
+					continue
+				}
+				credited := flow.ByteRange{Start: start, End: end}
+				attempt.credited = append(attempt.credited, credited)
+				*actions = append(*actions, ApplicationRelayAction{
+					Kind:             ApplicationRelayActionDataCredit,
+					Attachment:       attempt.attachment,
+					DataCreditBytes:  credited.End - credited.Start,
+					WriteCompletedAt: attempt.writeCompletedAt,
+					AcknowledgedAt:   acknowledgedAt,
+				})
+			}
+		}
+	}
+	return nil
 }
 
 func (relay *ApplicationRelay) pruneAttemptHistory(acknowledged uint64, includeFIN bool) {

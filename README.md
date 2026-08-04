@@ -16,7 +16,7 @@ Via is a multipath TCP relay for Linux. Applications connect through a local SOC
 ## Features
 
 - Discovers and uses multiple network interfaces, with optional name filters and dynamic interface changes.
-- Supports adaptive and redundant delivery and can recover existing flows after path failures.
+- Supports adaptive and redundant delivery and can recover existing flows after path failures. Adaptive `fastest` selection uses measured delay, DATA capacity, shared load, and switch hysteresis; `distributed` selection aggregates eligible paths according to measured capacity and load.
 - Optional SOCKS5 username/password authentication; clients authenticate to the server with a PSK.
 - Embedded read-only Web Manager for paths, sessions, flows, traffic, and connection status.
 - Chinese and English Web Manager interface with a persistent language switcher.
@@ -84,6 +84,8 @@ status:
 ```
 
 When `basic_auth` is configured, the page, static assets, JSON API, and health endpoint all require credentials. Basic Auth over plain HTTP does not encrypt those credentials.
+
+Session status separates Probe RTT and stall from DATA capacity, queue, and in-flight load. Capacity samples become stale after a bounded RTT-derived interval; stale values remain visible for diagnosis but placement falls back to the default capacity. The Manager retains at most 120 throughput samples and displays at most 12 individual session series while the aggregate includes every active session.
 
 ## Security Boundary
 

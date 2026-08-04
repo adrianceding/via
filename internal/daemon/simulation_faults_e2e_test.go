@@ -3,6 +3,7 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -82,6 +83,8 @@ func setSimulationPathQualities(t *testing.T, harness *simulationHarness) {
 		if host == simulationAddressB.String() {
 			rtt = 500 * time.Millisecond
 		}
+		session.runtime.observeProbe(rtt)
+		session.runtime.setStallPenalty(0)
 		harness.client.notifyProbeQuality(session, rtt)
 	}
 	instance := simulationClientFlow(t, harness)
@@ -114,7 +117,14 @@ func setSimulationPathQualities(t *testing.T, harness *simulationHarness) {
 		if host == simulationAddressB.String() {
 			rtt = 500 * time.Millisecond
 		}
-		serverInstance.observeProbe(attachment, rtt)
+		session.runtime.observeProbe(rtt)
+		session.runtime.setStallPenalty(0)
+		if err := serverInstance.handle(servercore.RelayEvent{
+			Kind: servercore.RelaySetSessionQuality, Attachment: attachment,
+			Quality: session.qualitySnapshot(),
+		}); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
@@ -131,6 +141,8 @@ func setSimulationSessionQuality(t *testing.T, harness *simulationHarness, addre
 		session.probeMu.Lock()
 		session.probeSRTT = rtt
 		session.probeMu.Unlock()
+		session.runtime.observeProbe(rtt)
+		session.runtime.setStallPenalty(0)
 		break
 	}
 	harness.server.sessionsMu.RLock()
@@ -146,6 +158,8 @@ func setSimulationSessionQuality(t *testing.T, harness *simulationHarness, addre
 		session.probeMu.Lock()
 		session.probeSRTT = rtt
 		session.probeMu.Unlock()
+		session.runtime.observeProbe(rtt)
+		session.runtime.setStallPenalty(0)
 		return
 	}
 	t.Fatalf("missing simulated server session for %s", address)
@@ -557,7 +571,7 @@ func TestSimulatedFullChainConcurrentFlows(t *testing.T) {
 		group.Add(1)
 		go func() {
 			defer group.Done()
-			payload := bytes.Repeat([]byte(fmt.Sprintf("flow-%d|", index)), 16<<10)
+			payload := bytes.Repeat(fmt.Appendf(nil, "flow-%d|", index), 16<<10)
 			errorsByFlow <- simulationRoundTrip(application, payload)
 		}()
 	}
@@ -570,5 +584,151 @@ func TestSimulatedFullChainConcurrentFlows(t *testing.T) {
 	}
 	if harness.targetTotal.Load() != count {
 		t.Fatalf("target connections = %d, want %d", harness.targetTotal.Load(), count)
+	}
+}
+
+func TestSimulatedFullChainCanceledFlowDoesNotBlockSharedSession(t *testing.T) {
+	harness := newSimulationHarness(t, protocol.DeliveryAdaptive, protocol.PathFastest)
+	defer harness.close()
+	harness.enumerator.set(simulatedInterface(1, "sim-a", simulationAddressA))
+	harness.tickPaths()
+	harness.waitSessions(1)
+
+	first := harness.openApplication()
+	canceled := simulationClientFlow(t, harness)
+	second := harness.openApplication()
+	defer first.Close()
+	defer second.Close()
+	harness.waitAttachments(2)
+
+	controller := harness.network.controller(simulationAddressA, simulatedUplink)
+	controller.set(simulatedFault{kind: simulatedFaultStall, frameType: protocol.TypeData, remaining: 1})
+	firstResult := startSimulationRoundTrip(first, bytes.Repeat([]byte("canceled-flow|"), 64<<10))
+	select {
+	case <-controller.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first Flow DATA did not enter shared session writer")
+	}
+	secondResult := startSimulationRoundTrip(second, bytes.Repeat([]byte("surviving-flow|"), 64<<10))
+	var session *wireSession
+	for _, candidate := range harness.client.readySessions() {
+		session = candidate
+	}
+	if session == nil {
+		t.Fatal("missing shared client session")
+	}
+	waitFor(t, 5*time.Second, func() bool {
+		snapshot := session.runtime.snapshot()
+		return snapshot.InFlightData != 0 && snapshot.QueuedDataPayload != 0 && snapshot.ActiveDataFlows != 0
+	}, "second Flow queued behind shared session writer")
+
+	canceled.close()
+	select {
+	case err := <-firstResult:
+		if err == nil {
+			t.Fatal("canceled Flow completed unexpectedly")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("canceled Flow did not terminate")
+	}
+	if session.runtime.snapshot().Closed {
+		t.Fatal("Flow cancellation closed the shared session runtime")
+	}
+
+	controller.resume()
+	waitSimulationResult(t, secondResult)
+	if session.runtime.snapshot().Closed {
+		t.Fatal("shared session runtime closed after surviving Flow completed")
+	}
+}
+
+func TestSimulatedFullChainControlACKPrecedesQueuedData(t *testing.T) {
+	targetReady := make(chan struct{})
+	sendResponse := make(chan struct{})
+	targetResult := make(chan error, 1)
+	response := bytes.Repeat([]byte("control-priority-response|"), 1024)
+	harness := newSimulationHarnessWithTarget(t, protocol.DeliveryAdaptive, protocol.PathFastest,
+		func(_ *simulationHarness, connection net.Conn) {
+			close(targetReady)
+			<-sendResponse
+			if err := writeAll(connection, response); err != nil {
+				targetResult <- err
+				return
+			}
+			_, err := io.Copy(io.Discard, connection)
+			targetResult <- err
+		})
+	defer harness.close()
+	harness.enumerator.set(simulatedInterface(1, "sim-a", simulationAddressA))
+	harness.tickPaths()
+	harness.waitSessions(1)
+	application := harness.openApplication()
+	defer application.Close()
+	harness.waitAttachments(1)
+	select {
+	case <-targetReady:
+	case <-time.After(5 * time.Second):
+		t.Fatal("control-priority target did not become ready")
+	}
+
+	controller := harness.network.controller(simulationAddressA, simulatedUplink)
+	controller.set(simulatedFault{kind: simulatedFaultStall, frameType: protocol.TypeData, remaining: 1})
+	upload := bytes.Repeat([]byte("queued-data|"), 64<<10)
+	uploadResult := make(chan error, 1)
+	go func() {
+		err := writeAll(application, upload)
+		if tcp, ok := application.(*net.TCPConn); ok {
+			err = errors.Join(err, tcp.CloseWrite())
+		}
+		uploadResult <- err
+	}()
+	select {
+	case <-controller.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first upload DATA did not enter simulated stall")
+	}
+	close(sendResponse)
+	received := make([]byte, len(response))
+	if _, err := io.ReadFull(application, received); err != nil || !bytes.Equal(received, response) {
+		t.Fatalf("control-priority response bytes=%d/%d err=%v", len(received), len(response), err)
+	}
+
+	var session *wireSession
+	for _, candidate := range harness.client.readySessions() {
+		session = candidate
+	}
+	if session == nil {
+		t.Fatal("missing control-priority client session")
+	}
+	waitFor(t, 5*time.Second, func() bool {
+		session.runtime.mu.Lock()
+		controlQueued := len(session.runtime.controlQueue) != 0
+		session.runtime.mu.Unlock()
+		return controlQueued && session.runtime.snapshot().DataQueueFrames != 0
+	}, "ACK and DATA queued behind active write")
+
+	controller.set(simulatedFault{kind: simulatedFaultHold, remaining: -1})
+	waitFor(t, 5*time.Second, func() bool {
+		types := controller.heldTypes()
+		hasACK := false
+		for _, frameType := range types {
+			if frameType == protocol.TypeACK {
+				hasACK = true
+			}
+			if frameType == protocol.TypeData {
+				return hasACK
+			}
+		}
+		return false
+	}, "ACK selected before queued DATA")
+	controller.set(simulatedFault{kind: simulatedFaultNormal})
+	if err := controller.releaseAll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-uploadResult; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-targetResult; err != nil {
+		t.Fatal(err)
 	}
 }

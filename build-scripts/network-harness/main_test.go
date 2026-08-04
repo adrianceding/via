@@ -130,6 +130,23 @@ func TestTransferHeaderRejectsMalformedFields(t *testing.T) {
 	}
 }
 
+func TestWriteResultFilePersistsPositiveDuration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "duration")
+	if err := writeResultFile(path, 125*time.Millisecond); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "125000000\n" {
+		t.Fatalf("duration file = %q", data)
+	}
+	if err := writeResultFile(path, 0); err == nil {
+		t.Fatal("zero duration was accepted")
+	}
+}
+
 func errorsIsUnexpectedEOF(err error) bool {
 	return err == io.EOF || err == io.ErrUnexpectedEOF
 }
@@ -150,13 +167,7 @@ func TestPatternDetectsExactCorruptionOffset(t *testing.T) {
 
 func TestSessionsReadyRequiresNamedReadyPathsAndMeasuredFastest(t *testing.T) {
 	var sessions sessionList
-	sessions.Items = make([]struct {
-		Interface string `json:"interface"`
-		State     uint8  `json:"state"`
-		Quality   struct {
-			SmoothedRTTMicros uint64 `json:"smoothed_rtt_micros"`
-		} `json:"quality"`
-	}, 2)
+	sessions.Items = make([]sessionStatus, 2)
 	sessions.Items[0].Interface = "vianet-a"
 	sessions.Items[0].State = 3
 	sessions.Items[0].Quality.SmoothedRTTMicros = 100
@@ -169,6 +180,58 @@ func TestSessionsReadyRequiresNamedReadyPathsAndMeasuredFastest(t *testing.T) {
 	sessions.Items[1].State = 4
 	if sessionsReady(sessions, 2, []string{"vianet-a", "vianet-b"}, "vianet-a") {
 		t.Fatal("backoff path was counted as ready")
+	}
+}
+
+func TestSelectSessionWrittenUsesInterfaceOrRemoteHost(t *testing.T) {
+	sessions := sessionList{Items: make([]sessionStatus, 2)}
+	sessions.Items[0].Interface = "vianet-a"
+	sessions.Items[0].RemoteEndpoint = "10.201.0.2:40000"
+	sessions.Items[0].Quality.WrittenDataPayloadBytes = 100
+	sessions.Items[1].Interface = "vianet-b"
+	sessions.Items[1].RemoteEndpoint = "10.202.0.2:40001"
+	sessions.Items[1].Quality.WrittenDataPayloadBytes = 200
+
+	if written, matches := selectSessionWritten(sessions, "vianet-b", ""); written != 200 || matches != 1 {
+		t.Fatalf("interface selection = %d/%d", written, matches)
+	}
+	if written, matches := selectSessionWritten(sessions, "", "10.201.0.2"); written != 100 || matches != 1 {
+		t.Fatalf("remote selection = %d/%d", written, matches)
+	}
+	if written, matches := selectSessionWritten(sessions, "missing", ""); written != 0 || matches != 0 {
+		t.Fatalf("missing selection = %d/%d", written, matches)
+	}
+}
+
+func TestObserveFlowWindowValidatesOffsetsAndCountsFullWindow(t *testing.T) {
+	flows := flowList{Items: []flowStatus{
+		{UnacknowledgedBytes: 320 << 10, TxAllocatedOffset: 640 << 10, TxAcknowledged: 320 << 10},
+		{UnacknowledgedBytes: 64 << 10, TxAllocatedOffset: 96 << 10, TxAcknowledged: 32 << 10},
+	}}
+	observation, err := observeFlowWindow(flows, 320<<10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if observation.ActiveFlows != 2 || observation.FullWindowFlows != 1 || observation.MaximumUnacknowledged != 320<<10 {
+		t.Fatalf("observation = %+v", observation)
+	}
+
+	flows.Items[1].UnacknowledgedBytes++
+	if _, err := observeFlowWindow(flows, 320<<10); err == nil {
+		t.Fatal("inconsistent flow offsets were accepted")
+	}
+}
+
+func TestFlowWindowSummaryRetainsBoundedAggregate(t *testing.T) {
+	summary := flowWindowSummary{WindowBytes: 320 << 10}
+	var streak uint64
+	summary.add(flowWindowObservation{ActiveFlows: 1, FullWindowFlows: 1, MaximumUnacknowledged: 320 << 10}, false, 1, &streak)
+	summary.add(flowWindowObservation{ActiveFlows: 1, FullWindowFlows: 1, MaximumUnacknowledged: 320 << 10}, false, 2, &streak)
+	summary.add(flowWindowObservation{ActiveFlows: 1, MaximumUnacknowledged: 64 << 10}, true, 0, &streak)
+	if summary.Samples != 3 || summary.ActiveSamples != 3 || summary.FullWindowSamples != 2 || summary.MaximumUnacknowledged != 320<<10 ||
+		summary.ACKProgressSamples != 1 || summary.OneSessionProgress != 1 || summary.BothSessionsProgress != 1 ||
+		summary.FullWindowNoProgress != 2 || summary.LongestFullWindowStall != 2 {
+		t.Fatalf("summary = %+v", summary)
 	}
 }
 

@@ -20,6 +20,13 @@ var (
 	ErrFrameDeadline    = errors.New("transport: frame read deadline exceeded")
 )
 
+const tcpWriteBufferBytes = 128 << 10
+
+type tcpWriteBufferConnection interface {
+	SetWriteBuffer(int) error
+	Close() error
+}
+
 type TCPConfig struct {
 	FrameTotal      time.Duration
 	FrameNoProgress time.Duration
@@ -132,6 +139,14 @@ func (dialer *tcpDialer) Dial(ctx context.Context) (Connection, error) {
 	if err != nil {
 		return nil, err
 	}
+	tcpConnection, ok := connection.(*net.TCPConn)
+	if !ok {
+		_ = connection.Close()
+		return nil, ErrInvalidTCPConfig
+	}
+	if err := configureTCPWriteBuffer(tcpConnection); err != nil {
+		return nil, err
+	}
 	return newTCPConnection(connection, dialer.factory.config, dialer.factory.capabilities, dialer.limits, time.Now), nil
 }
 
@@ -162,7 +177,18 @@ func (listener *tcpListener) Accept(ctx context.Context) (Connection, error) {
 		}
 		return nil, err
 	}
+	if err := configureTCPWriteBuffer(connection); err != nil {
+		return nil, err
+	}
 	return newTCPConnection(connection, listener.factory.config, listener.factory.capabilities, listener.limits, time.Now), nil
+}
+
+func configureTCPWriteBuffer(connection tcpWriteBufferConnection) error {
+	if err := connection.SetWriteBuffer(tcpWriteBufferBytes); err != nil {
+		_ = connection.Close()
+		return err
+	}
+	return nil
 }
 
 func (listener *tcpListener) Close() error { return listener.listener.Close() }

@@ -149,12 +149,52 @@ func TestWireProbeRateAndGenerationAreBounded(t *testing.T) {
 	}
 }
 
+func TestWireProbePublishesSessionQualitySnapshot(t *testing.T) {
+	session, err := newWireSession(context.Background(), 1, blockingWireConnection{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Unix(200, 0)
+	probe, ok, expired := session.startProbe(start)
+	if !ok || expired {
+		t.Fatalf("probe = %#v, ok=%t, expired=%t", probe, ok, expired)
+	}
+	replacement, ok, expired := session.startProbe(start.Add(probeTimeout))
+	if !ok || !expired {
+		t.Fatalf("probe timeout = %#v, ok=%t expired=%t", replacement, ok, expired)
+	}
+	if snapshot := session.qualitySnapshot(); snapshot.StallPenalty != probeTimeout {
+		t.Fatalf("stalled session quality = %#v", snapshot)
+	}
+	if _, ok := session.completeProbe(probe.Token, start.Add(probeTimeout+25*time.Millisecond)); ok {
+		t.Fatal("timed-out probe acknowledgement was accepted")
+	}
+	latest, ok, expired := session.startProbe(start.Add(2 * probeTimeout))
+	if !ok || !expired {
+		t.Fatalf("latest probe = %#v, ok=%t, expired=%t", latest, ok, expired)
+	}
+	rtt, ok := session.completeProbe(latest.Token, start.Add(2*probeTimeout+25*time.Millisecond))
+	if !ok || rtt != 25*time.Millisecond {
+		t.Fatalf("replacement RTT = %v, ok=%t", rtt, ok)
+	}
+	snapshot := session.qualitySnapshot()
+	if snapshot.SRTT != 25*time.Millisecond || snapshot.StallPenalty != 0 || snapshot.ProbeSamples != 1 {
+		t.Fatalf("recovered session quality = %#v", snapshot)
+	}
+}
+
 type blockingWireConnection struct{}
 
-func (blockingWireConnection) Capabilities() transport.Capabilities { return transport.Capabilities{} }
-func (blockingWireConnection) QueueLimits() transport.QueueLimits   { return transport.V1QueueLimits() }
-func (blockingWireConnection) LocalEndpoint() string                { return "127.0.0.1:1" }
-func (blockingWireConnection) RemoteEndpoint() string               { return "127.0.0.1:2" }
+func (blockingWireConnection) Capabilities() transport.Capabilities {
+	capabilities, err := transport.NewCapabilities(transport.CapabilitySpec{MaxEncodedFrame: protocol.MaxFrameSize})
+	if err != nil {
+		panic(err)
+	}
+	return capabilities
+}
+func (blockingWireConnection) QueueLimits() transport.QueueLimits { return transport.V1QueueLimits() }
+func (blockingWireConnection) LocalEndpoint() string              { return "127.0.0.1:1" }
+func (blockingWireConnection) RemoteEndpoint() string             { return "127.0.0.1:2" }
 func (blockingWireConnection) ReadFrame(context.Context) ([]byte, error) {
 	return nil, net.ErrClosed
 }

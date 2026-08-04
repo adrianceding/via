@@ -362,7 +362,7 @@ func (daemon *clientDaemon) executeSessionActions(actions []clientcore.SessionMa
 				}})
 				continue
 			}
-			session.status = daemon.statusObserver
+			session.setStatusObserver(daemon.statusObserver)
 			daemon.wg.Add(1)
 			daemon.sessionWorkers.Add(1)
 			go func(action clientcore.SessionManagerAction) {
@@ -463,7 +463,6 @@ func (daemon *clientDaemon) readClientSession(session *wireSession) {
 			}
 		case protocol.ProbeACK:
 			if rtt, ok := session.completeProbe(typed.Token, time.Now()); ok {
-				daemon.statusObserver.observeSessionProbe(session.generation, rtt)
 				daemon.notifyProbeQuality(session, rtt)
 			}
 		case protocol.OpenResult:
@@ -489,8 +488,6 @@ func (daemon *clientDaemon) probeClientSession(session *wireSession) {
 	probe := func() bool {
 		message, ok, expired := session.startProbe(time.Now())
 		if expired {
-			_, stall := session.probeQuality()
-			daemon.statusObserver.setSessionStallPenalty(session.generation, stall)
 			daemon.notifyProbeStallPenalty(session, probeTimeout)
 		}
 		return !ok || session.send(message) == nil
@@ -530,10 +527,8 @@ func (daemon *clientDaemon) notifyProbeQuality(session *wireSession, rtt time.Du
 		if instance != nil {
 			instance.tryEmitSessionQuality(session.generation, smoothed, stall)
 			instance.tryEmitQuality(clientcore.ApplicationRelayEvent{
-				Kind: clientcore.ApplicationRelaySetStallPenalty, Attachment: attachment,
-			})
-			instance.tryEmitQuality(clientcore.ApplicationRelayEvent{
-				Kind: clientcore.ApplicationRelayObserveProbeQuality, Attachment: attachment, RTT: rtt,
+				Kind: clientcore.ApplicationRelaySetSessionQuality, Attachment: attachment,
+				Quality: session.qualitySnapshot(),
 			})
 		}
 	}
@@ -551,7 +546,8 @@ func (daemon *clientDaemon) notifyProbeStallPenalty(session *wireSession, penalt
 			rtt, _ := session.probeQuality()
 			instance.tryEmitSessionQuality(session.generation, rtt, penalty)
 			instance.tryEmitQuality(clientcore.ApplicationRelayEvent{
-				Kind: clientcore.ApplicationRelaySetStallPenalty, Attachment: attachment, StallPenalty: penalty,
+				Kind: clientcore.ApplicationRelaySetSessionQuality, Attachment: attachment,
+				Quality: session.qualitySnapshot(),
 			})
 		}
 	}

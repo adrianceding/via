@@ -160,6 +160,9 @@ func TestFlowCumulativeACKAndSelectiveACKDeadlineSemantics(t *testing.T) {
 	if !hasFlowAction(actions, FlowActionCancelRetryDeadline) || !hasFlowAction(actions, FlowActionCancelNoProgressDeadline) {
 		t.Fatalf("deadline cancellation actions = %#v", actions)
 	}
+	if !hasFlowAction(actions, FlowActionTxAcknowledged) {
+		t.Fatalf("ACK coverage action = %#v", actions)
+	}
 }
 
 func TestFlowNoProgressDeadlineEntersResetting(t *testing.T) {

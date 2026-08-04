@@ -518,6 +518,212 @@ run_transfer() {
 	wait_target_exact
 }
 
+LAST_TRANSFER_NANOS=0
+
+run_timed_transfer() {
+	local label="$1"
+	local mode="$2"
+	local size="$3"
+	local upload=0
+	local download=0
+	case "$mode" in
+		upload) upload="$size" ;;
+		download) download="$size" ;;
+		*) echo "test-network: 非法计时方向: $mode" >&2; return 1 ;;
+	esac
+	next_request_id
+	EXPECTED_TARGET_CONNECTIONS=$((EXPECTED_TARGET_CONNECTIONS + 1))
+	local log="$ARTIFACT_DIR/app-${NEXT_REQUEST_ID}-${label}.log"
+	local result="$ARTIFACT_DIR/app-${NEXT_REQUEST_ID}-${label}.duration"
+	rm -f "$result"
+	echo "test-network: $label ($mode, $size bytes, timed)"
+	if ! run_in_namespace_timeout 90s "$CLIENT_NS" "$HARNESS_BINARY" app \
+		--socks "$SOCKS_ENDPOINT" --target "$TARGET_ENDPOINT" --mode "$mode" \
+		--id "$NEXT_REQUEST_ID" --seed "$((NEXT_REQUEST_ID * 17))" \
+		--upload-bytes "$upload" --download-bytes "$download" --timeout 80s \
+		--result-file "$result" >"$log" 2>&1; then
+		cat "$log" >&2
+		return 1
+	fi
+	wait_target_exact
+	LAST_TRANSFER_NANOS="$(cat "$result")"
+	if [[ ! "$LAST_TRANSFER_NANOS" =~ ^[1-9][0-9]*$ ]]; then
+		echo "test-network: 非法传输耗时: $LAST_TRANSFER_NANOS" >&2
+		return 1
+	fi
+}
+
+server_session_written() {
+	local remote_host="$1"
+	run_in_namespace_timeout 10s "$SERVER_NS" "$HARNESS_BINARY" session-written \
+		--url "http://127.0.0.1:18082/api/v1/sessions" --remote-host "$remote_host"
+}
+
+assert_distributed_aggregation() {
+	local size=$((16 << 20))
+	clear_all_netem
+	set_path_a_netem rate 5mbit
+	set_path_b_netem rate 5mbit
+
+	sudo -n ip -n "$CLIENT_NS" link set "$CLIENT_B" down
+	wait_client_ready 1 "$CLIENT_A"
+	run_timed_transfer aggregate-single-a download "$size"
+	local single_a="$LAST_TRANSFER_NANOS"
+	sudo -n ip -n "$CLIENT_NS" link set "$CLIENT_B" up
+	configure_client_route_b
+	wait_server_ready 2
+	wait_client_ready 2 "$CLIENT_A" "$CLIENT_B"
+
+	sudo -n ip -n "$CLIENT_NS" link set "$CLIENT_A" down
+	wait_client_ready 1 "$CLIENT_B"
+	run_timed_transfer aggregate-single-b download "$size"
+	local single_b="$LAST_TRANSFER_NANOS"
+	sudo -n ip -n "$CLIENT_NS" link set "$CLIENT_A" up
+	configure_client_route_a
+	wait_server_ready 2
+	wait_client_ready 2 "$CLIENT_A" "$CLIENT_B"
+	start_client adaptive-distributed-aggregation-dual $'delivery:\n  mode: adaptive\n  path_selection: distributed'
+
+	local before_a before_b after_a after_b delta_a delta_b total fastest
+	before_a="$(server_session_written "$CLIENT_A_ADDRESS")"
+	before_b="$(server_session_written "$CLIENT_B_ADDRESS")"
+	local window_summary="$ARTIFACT_DIR/aggregate-dual-window.json"
+	rm -f "$window_summary"
+	run_in_namespace_timeout 90s "$SERVER_NS" "$HARNESS_BINARY" sample-flow-window \
+		--url "http://127.0.0.1:18082/api/v1/flows" \
+		--sessions-url "http://127.0.0.1:18082/api/v1/sessions" \
+		--stop-file "$ARTIFACT_DIR/app-$((NEXT_REQUEST_ID + 1))-aggregate-dual.duration" \
+		--result-file "$window_summary" --window-bytes $((320 << 10)) --interval 50ms --timeout 80s &
+	local window_sampler_pid=$!
+	run_timed_transfer aggregate-dual download "$size"
+	wait "$window_sampler_pid"
+	echo "test-network: 双路 Flow 窗口 $(cat "$window_summary")"
+	local dual="$LAST_TRANSFER_NANOS"
+	after_a="$(server_session_written "$CLIENT_A_ADDRESS")"
+	after_b="$(server_session_written "$CLIENT_B_ADDRESS")"
+	delta_a=$((after_a - before_a))
+	delta_b=$((after_b - before_b))
+	total=$((delta_a + delta_b))
+	fastest="$single_a"
+	((single_b < fastest)) && fastest="$single_b"
+	echo "test-network: 聚合耗时 A=${single_a}ns B=${single_b}ns dual=${dual}ns，DATA A=${delta_a} B=${delta_b}"
+	if ((dual * 100 > fastest * 75)); then
+		echo "test-network: 双路耗时超过最快单路的 75%" >&2
+		return 1
+	fi
+	if ((total < size || delta_a * 100 < total * 30 || delta_b * 100 < total * 30)); then
+		echo "test-network: 双路 DATA 分配未达到每路至少 30%" >&2
+		return 1
+	fi
+	clear_all_netem
+}
+
+assert_fastest_capacity_shift() {
+	local initial_size=$((8 << 20))
+	local learning_size=$((4 << 20))
+	local followup_size=$((4 << 20))
+	clear_all_netem
+	set_path_a_netem delay 2ms rate 10mbit
+	set_path_b_netem delay 12ms rate 5mbit
+	wait_fastest_a
+	run_transfer fastest-capacity-warmup download "$learning_size"
+	wait_fastest_a
+
+	local before_a before_b after_a after_b delta_a delta_b total
+	before_a="$(server_session_written "$CLIENT_A_ADDRESS")"
+	before_b="$(server_session_written "$CLIENT_B_ADDRESS")"
+	run_transfer fastest-capacity-initial download "$initial_size"
+	after_a="$(server_session_written "$CLIENT_A_ADDRESS")"
+	after_b="$(server_session_written "$CLIENT_B_ADDRESS")"
+	delta_a=$((after_a - before_a))
+	delta_b=$((after_b - before_b))
+	total=$((delta_a + delta_b))
+	echo "test-network: fastest 10/5 Mbit DATA A=${delta_a} B=${delta_b}"
+	if ((total < initial_size || delta_a * 100 < total * 75)); then
+		echo "test-network: 10 Mbit/s 路径未承载至少 75% DATA" >&2
+		return 1
+	fi
+
+	set_path_a_netem delay 2ms rate 2mbit
+	run_transfer fastest-capacity-learning download "$learning_size"
+	before_a="$(server_session_written "$CLIENT_A_ADDRESS")"
+	before_b="$(server_session_written "$CLIENT_B_ADDRESS")"
+	run_transfer fastest-capacity-after-shift download "$followup_size"
+	after_a="$(server_session_written "$CLIENT_A_ADDRESS")"
+	after_b="$(server_session_written "$CLIENT_B_ADDRESS")"
+	delta_a=$((after_a - before_a))
+	delta_b=$((after_b - before_b))
+	total=$((delta_a + delta_b))
+	echo "test-network: fastest 2/5 Mbit 后续 DATA A=${delta_a} B=${delta_b}"
+	if ((total < followup_size || delta_b <= delta_a)); then
+		echo "test-network: 原 5 Mbit/s 路径未在容量重学习后成为主要路径" >&2
+		return 1
+	fi
+	clear_all_netem
+}
+
+assert_single_session_flow_fairness() {
+	local size=$((2 << 20))
+	clear_all_netem
+	set_path_a_netem rate 2mbit
+	sudo -n ip -n "$CLIENT_NS" link set "$CLIENT_B" down
+	wait_client_ready 1 "$CLIENT_A"
+
+	local pids=()
+	local logs=()
+	local progress_files=()
+	local result_files=()
+	local index request_id log progress result
+	for index in 0 1; do
+		next_request_id
+		request_id="$NEXT_REQUEST_ID"
+		EXPECTED_TARGET_CONNECTIONS=$((EXPECTED_TARGET_CONNECTIONS + 1))
+		log="$ARTIFACT_DIR/app-${request_id}-single-session-fairness.log"
+		progress="$ARTIFACT_DIR/app-${request_id}.progress"
+		result="$ARTIFACT_DIR/app-${request_id}.duration"
+		rm -f "$progress" "$result"
+		logs+=("$log")
+		progress_files+=("$progress")
+		result_files+=("$result")
+		run_in_namespace_timeout 90s "$CLIENT_NS" "$HARNESS_BINARY" app \
+			--socks "$SOCKS_ENDPOINT" --target "$TARGET_ENDPOINT" --mode download \
+			--id "$request_id" --seed "$((request_id * 17))" \
+			--upload-bytes 0 --download-bytes "$size" --timeout 80s \
+			--progress-file "$progress" --result-file "$result" >"$log" 2>&1 &
+		pids+=("$!")
+	done
+
+	for ((attempt = 0; attempt < 400; attempt++)); do
+		if [[ -f "${progress_files[0]}" && -f "${progress_files[1]}" ]]; then
+			break
+		fi
+		if [[ -f "${result_files[0]}" || -f "${result_files[1]}" ]]; then
+			echo "test-network: 一个 Flow 完成后另一个才首次推进" >&2
+			return 1
+		fi
+		sleep 0.05
+	done
+	if [[ ! -f "${progress_files[0]}" || ! -f "${progress_files[1]}" ]]; then
+		echo "test-network: 单 session 双 Flow 未在 watchdog 内同时推进" >&2
+		return 1
+	fi
+	local failed=0
+	for index in "${!pids[@]}"; do
+		if ! wait "${pids[index]}"; then
+			cat "${logs[index]}" >&2
+			failed=1
+		fi
+	done
+	[[ $failed -eq 0 ]]
+	wait_target_exact
+
+	sudo -n ip -n "$CLIENT_NS" link set "$CLIENT_B" up
+	configure_client_route_b
+	wait_server_ready 2
+	wait_client_ready 2 "$CLIENT_A" "$CLIENT_B"
+	clear_all_netem
+}
+
 reject_socks_access() {
 	local label="$1"
 	local username="$2"
@@ -722,8 +928,19 @@ wait_client_ready 2 "$CLIENT_A" "$CLIENT_B"
 run_transfer fastest-after-link-up bidirectional
 clear_all_netem
 
-echo "test-network: 自适应分散发送、地址删除与恢复"
-start_client adaptive-distributed $'delivery:\n  mode: adaptive\n  path_selection: distributed\n  constraints:\n    max_delivery_delay: 80ms\n    max_delay_gap: 30ms\n    constraint_fallback: fastest'
+echo "test-network: 5/10 Mbit/s fastest 选择与运行中降速"
+start_client adaptive-fastest-capacity $'delivery:\n  mode: adaptive\n  path_selection: fastest'
+assert_fastest_capacity_shift
+
+echo "test-network: 无约束自适应分散发送性能与公平"
+start_client adaptive-distributed-aggregation $'delivery:\n  mode: adaptive\n  path_selection: distributed'
+echo "test-network: 5 Mbit/s 单路基线与双路聚合阈值"
+assert_distributed_aggregation
+echo "test-network: 单限速 session 的双 Flow 公平进度"
+assert_single_session_flow_fairness
+
+echo "test-network: 带时延约束的自适应分散发送、地址删除与恢复"
+start_client adaptive-distributed-constrained $'delivery:\n  mode: adaptive\n  path_selection: distributed\n  constraints:\n    max_delivery_delay: 80ms\n    max_delay_gap: 30ms\n    constraint_fallback: fastest'
 run_transfer distributed-baseline download
 run_multiple_flows distributed-multiple 8
 

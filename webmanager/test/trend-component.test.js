@@ -9,6 +9,7 @@ test('trend component renders options without deferring the first paint', async 
   assert.ok(component.includes('const currentSeries = chart.getOption().series'));
   assert.ok(component.includes('selectionBySeriesID(currentSeries, selected)'));
   assert.ok(component.includes('toggleTrendIsolation(currentSeries, legendSelection, seriesName)'));
+  assert.ok(component.includes("label: t('trend.aggregate')"));
   assert.ok(!component.includes("emit('filter'"));
-  assert.ok(component.includes('watch([() => props.trends, locale], render)'));
+  assert.ok(component.includes('watch([() => props.aggregate, () => props.trends, locale], render)'));
 });

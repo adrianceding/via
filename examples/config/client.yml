@@ -30,14 +30,14 @@ socks_listen: "127.0.0.1:1080"
 #   username: local-user
 #   password: replace-with-a-strong-password
 
-# 可选：省略时默认使用自适应发送，并优先选择最快线路。
-# When omitted, adaptive delivery over the fastest path is used by default.
+# 可选：省略时默认使用自适应发送，并按时延、实测 DATA 容量和共享负载选择最快线路；切换带有迟滞。
+# When omitted, adaptive delivery chooses the fastest path using delay, measured DATA capacity, shared load, and switch hysteresis.
 # delivery:
 #   mode: adaptive
 #   path_selection: fastest
 
-# 可选：分散发送示例。两个时延限制均可单独省略；范围为 10ms 到 10s。
-# Distributed delivery example. Either delay limit may be omitted; valid values range from 10ms to 10s.
+# 可选：分散发送按新鲜 DATA 容量和共享负载聚合合格线路。两个时延限制均可单独省略；范围为 10ms 到 10s。
+# Distributed delivery aggregates eligible paths by fresh DATA capacity and shared load. Either delay limit may be omitted; valid values range from 10ms to 10s.
 # constraint_fallback 可选 fastest 或 pause。
 # constraint_fallback may be fastest or pause.
 # delivery:

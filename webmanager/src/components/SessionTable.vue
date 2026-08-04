@@ -3,7 +3,7 @@ import { computed } from 'vue';
 import { useI18n } from 'vue-i18n';
 
 import { sessionMatchesFilter } from '../filters.js';
-import { formatBytes, formatMicros } from '../format.js';
+import { formatBytes, formatMicros, formatRate } from '../format.js';
 import { sortSessions } from '../quality.js';
 import { sessionStates } from '../status.js';
 import CopyIdentifierButton from './CopyIdentifierButton.vue';
@@ -30,6 +30,33 @@ function stateClass(state) {
   if (state === 3) return 'good';
   if ([1, 2, 4].includes(state)) return 'warning';
   return 'neutral';
+}
+
+function formatCapacity(value) {
+  const capacity = Number(value);
+  return Number.isFinite(capacity) && capacity > 0 ? formatRate(capacity) : '--';
+}
+
+function formatSampleAge(value) {
+  const milliseconds = Number(value);
+  if (!Number.isFinite(milliseconds) || milliseconds < 0) return '--';
+  if (milliseconds < 1000) return `${Math.round(milliseconds)} ms`;
+  return `${(milliseconds / 1000).toFixed(milliseconds < 10_000 ? 1 : 0)} s`;
+}
+
+function dataSampleText(quality) {
+  if (quality?.data_sample_fresh) {
+    return quality.data_sample_age_ms == null
+      ? t('sessions.dataFresh')
+      : t('sessions.dataFreshAge', { age: formatSampleAge(quality.data_sample_age_ms) });
+  }
+  if (quality?.data_sample_age_ms == null) return t('sessions.dataUnavailable');
+  return t('sessions.dataStaleAge', { age: formatSampleAge(quality.data_sample_age_ms) });
+}
+
+function dataSampleClass(quality) {
+  if (quality?.data_sample_fresh) return 'good';
+  return quality?.data_sample_age_ms == null ? 'neutral' : 'warning';
 }
 </script>
 
@@ -77,7 +104,13 @@ function stateClass(state) {
             <td :data-label="t('sessions.smoothedRtt')">{{ formatMicros(session.quality?.smoothed_rtt_micros) }}</td>
             <td :data-label="t('sessions.retry')">{{ formatMicros(session.quality?.retry_micros) }}</td>
             <td :data-label="t('sessions.stall')">{{ formatMicros(session.quality?.stall_penalty_micros) }}</td>
-            <td :data-label="t('sessions.queue')">{{ formatBytes(session.quality?.queued_bytes) }} / {{ formatBytes(session.quality?.in_flight_bytes) }}</td>
+            <td :data-label="t('sessions.queue')">
+              <div class="metric-lines session-quality-lines">
+                <span><small>{{ t('sessions.capacity') }}</small>{{ formatCapacity(session.quality?.capacity_bytes_sec) }}</span>
+                <span><small>{{ t('sessions.dataSample') }}</small><strong class="data-sample-state" :class="dataSampleClass(session.quality)">{{ dataSampleText(session.quality) }}</strong></span>
+                <span><small>{{ t('sessions.queue') }}</small>{{ formatBytes(session.quality?.queued_bytes) }} / {{ formatBytes(session.quality?.in_flight_bytes) }}</span>
+              </div>
+            </td>
             <td :data-label="client ? t('sessions.reconnect') : t('sessions.transport')">{{ client ? String(session.reconnects || 0) : (session.transport || '--') }}</td>
           </tr>
         </tbody>

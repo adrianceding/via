@@ -18,6 +18,18 @@ test('session table merges connection identifiers without horizontal overflow', 
   ]) {
     assert.ok(component.includes(`:title="t('${titleKey}')"`), `missing session header description: ${titleKey}`);
   }
+  for (const field of [
+    'capacity_bytes_sec',
+    'data_sample_fresh',
+    'data_sample_age_ms',
+    'queued_bytes',
+    'in_flight_bytes',
+  ]) {
+    assert.ok(component.includes(field), `missing DATA quality field: ${field}`);
+  }
+  for (const messageKey of ['sessions.capacity', 'sessions.dataSample', 'sessions.dataFresh', 'sessions.dataStaleAge', 'sessions.dataUnavailable']) {
+    assert.ok(component.includes(`t('${messageKey}'`), `missing DATA quality message: ${messageKey}`);
+  }
   assert.equal(component.match(/:data-label=/g)?.length, 8);
   assert.ok(styles.includes('content: attr(data-label);'));
   assert.ok(styles.includes('.sessions-table { min-width: 100%; }'));

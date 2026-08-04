@@ -1,5 +1,7 @@
 const TREND_SLOTS = 120;
 
+import { formatRate } from './format.js';
+
 function escapeHTML(value) {
   return String(value || '').replace(/[&<>"']/g, (character) => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
@@ -15,10 +17,15 @@ export function toggleTrendIsolation(series, selectedByID, selectedName) {
   return Object.fromEntries(series.map((item) => [item.id, isolated || item.name === selectedName]));
 }
 
-export function buildTrendOption(trends, legendSelection = {}, fallbackLabel = 'Connection') {
+export function buildTrendOption(
+  trends,
+  legendSelection = {},
+  fallbackLabel = 'Connection',
+  axisLabel = 'DATA throughput (bytes/s)',
+) {
   const labels = Array.from({ length: TREND_SLOTS }, (_value, index) => index - TREND_SLOTS + 1);
   const series = trends.slice(0, 12).map((trend) => {
-    const samples = trend.samples.slice(-TREND_SLOTS).map((value) => value / 1000);
+    const samples = trend.samples.slice(-TREND_SLOTS).map((value) => Number(value));
     return {
       id: trend.id,
       name: trend.label || fallbackLabel,
@@ -42,12 +49,12 @@ export function buildTrendOption(trends, legendSelection = {}, fallbackLabel = '
       trigger: 'axis',
       formatter: (parameters) => parameters.map((parameter) => {
         const item = seriesByID.get(parameter.seriesId);
-        const value = parameter.data == null ? '--' : `${Number(parameter.data).toFixed(2)} ms`;
+        const value = parameter.data == null ? '--' : formatRate(parameter.data);
         return `${escapeHTML(parameter.seriesName)}<br>${value}<br>${escapeHTML(item?.localEndpoint || '--')} → ${escapeHTML(item?.remoteEndpoint || '--')}`;
       }).join('<br><br>'),
     },
     xAxis: { type: 'category', boundaryGap: false, data: labels, axisLabel: { show: false }, axisTick: { show: false } },
-    yAxis: { type: 'value', min: 0, name: 'RTT (ms)', nameTextStyle: { color: '#65706b' }, splitNumber: 3 },
+    yAxis: { type: 'value', min: 0, name: axisLabel, nameTextStyle: { color: '#65706b' }, splitNumber: 3 },
     series,
   };
 }

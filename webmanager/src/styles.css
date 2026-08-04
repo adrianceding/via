@@ -219,6 +219,12 @@ small { display: block; margin-top: 3px; color: var(--text-muted); font-size: 11
 .metric-lines { display: flex; flex-wrap: wrap; gap: 8px 14px; }
 .metric-lines > span { min-width: 0; font-variant-numeric: tabular-nums; }
 .metric-lines small { margin: 0 0 2px; font-size: 10px; }
+.session-quality-lines { gap: 5px 10px; }
+.session-quality-lines > span { flex: 1 1 100%; }
+.data-sample-state { font-size: inherit; font-weight: 650; }
+.data-sample-state.good { color: var(--green); }
+.data-sample-state.warning { color: var(--amber); }
+.data-sample-state.neutral { color: var(--text-muted); }
 
 .interface-list { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; padding: 0 18px 18px; }
 .interface-item { min-width: 0; padding: 14px; background: var(--surface-muted); border: 1px solid var(--border); border-radius: 5px; }

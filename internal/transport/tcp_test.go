@@ -14,6 +14,9 @@ import (
 )
 
 func TestTCPFactoryCapabilitiesAndConfiguration(t *testing.T) {
+	if tcpWriteBufferBytes < protocol.MaxFrameSize || uint64(tcpWriteBufferBytes) >= V1OutputQueueByteLimit {
+		t.Fatalf("TCP write buffer = %d, want at least one frame and less than the output queue", tcpWriteBufferBytes)
+	}
 	if _, err := NewTCPFactory(TCPConfig{}); !errors.Is(err, ErrInvalidTCPConfig) {
 		t.Fatalf("zero config error = %v", err)
 	}
@@ -57,6 +60,25 @@ func TestTCPFactoryCapabilitiesAndConfiguration(t *testing.T) {
 		RemoteEndpoint: "127.0.0.1:9443", InterfaceName: "bad\x00name", QueueLimits: V1QueueLimits(),
 	}); !errors.Is(err, ErrInvalidTCPConfig) {
 		t.Fatalf("invalid interface name error = %v", err)
+	}
+}
+
+func TestConfigureTCPWriteBufferSetsBoundAndClosesOnFailure(t *testing.T) {
+	connection := &writeBufferConnection{}
+	if err := configureTCPWriteBuffer(connection); err != nil {
+		t.Fatal(err)
+	}
+	if connection.size != tcpWriteBufferBytes || connection.closed {
+		t.Fatalf("configured connection = %+v", connection)
+	}
+
+	setErr := errors.New("set write buffer")
+	connection = &writeBufferConnection{setErr: setErr}
+	if err := configureTCPWriteBuffer(connection); !errors.Is(err, setErr) {
+		t.Fatalf("configuration error = %v", err)
+	}
+	if !connection.closed {
+		t.Fatal("failed connection was not closed")
 	}
 }
 
@@ -342,6 +364,22 @@ func TestTCPCloseUnblocksReadAndWrite(t *testing.T) {
 func newTestTCPConnection(t *testing.T, conn net.Conn) *tcpConnection {
 	t.Helper()
 	return newTCPConnection(conn, DefaultTCPConfig(), testCapabilities(t), V1QueueLimits(), time.Now)
+}
+
+type writeBufferConnection struct {
+	size   int
+	setErr error
+	closed bool
+}
+
+func (connection *writeBufferConnection) SetWriteBuffer(size int) error {
+	connection.size = size
+	return connection.setErr
+}
+
+func (connection *writeBufferConnection) Close() error {
+	connection.closed = true
+	return nil
 }
 
 func testCapabilities(t *testing.T) Capabilities {

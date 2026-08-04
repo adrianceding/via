@@ -3,6 +3,7 @@ package daemon
 import (
 	"crypto/rand"
 	"io"
+	"math"
 	"net"
 	"net/netip"
 	"sync"
@@ -47,6 +48,7 @@ type runtimeStatus struct {
 	flows       map[protocol.FlowID]runtimeFlowStatus
 	flowTraffic map[protocol.FlowID]runtimeFlowTraffic
 	sessions    map[string]statusapi.Session
+	runtime     map[uint64]sessionRuntimeSnapshot
 	connections map[uint64]string
 	interfaces  map[int]struct{}
 }
@@ -117,6 +119,7 @@ func newRuntimeStatusWithClock(repository *statusapi.Repository, maxFlows int, r
 		flows:       make(map[protocol.FlowID]runtimeFlowStatus, maxFlows),
 		flowTraffic: make(map[protocol.FlowID]runtimeFlowTraffic, maxFlows),
 		sessions:    make(map[string]statusapi.Session, statusapi.MaxSessions),
+		runtime:     make(map[uint64]sessionRuntimeSnapshot, statusapi.MaxSessions),
 		connections: make(map[uint64]string, statusapi.MaxSessions),
 		interfaces:  make(map[int]struct{}, statusapi.MaxInterfaces),
 	}
@@ -259,6 +262,10 @@ func (observer *runtimeStatus) upsertSessionObservation(observation runtimeSessi
 		LastProbeAt: previous.LastProbeAt, Reconnects: previous.Reconnects,
 		Quality: previous.Quality, Fastest: previous.Fastest,
 	}
+	if runtimeSnapshot, exists := observer.runtime[observation.generation]; exists {
+		entry.Quality = statusQualityFromRuntime(runtimeSnapshot, entry.Quality)
+		delete(observer.runtime, observation.generation)
+	}
 	if observation.connectionID != "" {
 		entry.ConnectionID = observation.connectionID
 		observer.connections[observation.generation] = observation.connectionID
@@ -281,6 +288,84 @@ func (observer *runtimeStatus) upsertSessionObservation(observation runtimeSessi
 	observer.mu.Unlock()
 	observer.publishSessionUpdates(updates, id)
 	observer.repository.TryRecord(statusapi.Event{Kind: statusapi.EventUpsertSession, Session: entry})
+}
+
+func (observer *runtimeStatus) observeSessionRuntime(generation uint64, snapshot sessionRuntimeSnapshot) {
+	if observer == nil || generation == 0 {
+		return
+	}
+	id := observer.hasher.SessionID(generation)
+	observer.mu.Lock()
+	entry, exists := observer.sessions[id]
+	if !exists {
+		if snapshot.Closed || len(observer.runtime) >= statusapi.MaxSessions {
+			observer.mu.Unlock()
+			return
+		}
+		observer.runtime[generation] = snapshot
+		observer.mu.Unlock()
+		return
+	}
+	previousProbeSamples := entry.Quality.ProbeSamples
+	entry.Quality = statusQualityFromRuntime(snapshot, entry.Quality)
+	if snapshot.Quality.ProbeSamples > previousProbeSamples {
+		entry.LastProbeAt = observer.now()
+	}
+	observer.sessions[id] = entry
+	updates := observer.recomputeFastestLocked()
+	entry = observer.sessions[id]
+	observer.mu.Unlock()
+	observer.publishSessionUpdates(updates, id)
+	observer.repository.TryRecord(statusapi.Event{Kind: statusapi.EventUpsertSession, Session: entry})
+}
+
+func statusQualityFromRuntime(snapshot sessionRuntimeSnapshot, previous statusapi.Quality) statusapi.Quality {
+	quality := snapshot.Quality
+	result := previous
+	result.SmoothedRTTMicros = durationMicros(quality.SRTT)
+	result.RetryMicros = durationMicros(quality.RetryEstimate)
+	result.CapacityBytesSec = finiteRate(quality.CapacityBytesSec)
+	result.QueuedBytes = quality.QueuedBytes
+	result.InFlightBytes = quality.InFlightBytes
+	result.StallPenaltyMicros = durationMicros(quality.StallPenalty)
+	result.DataSampleFresh = quality.DataSampleFresh
+	result.DataSampleAgeMillis = nil
+	if quality.DataSamples != 0 && quality.DataSampleAge >= 0 {
+		age := uint64(quality.DataSampleAge / time.Millisecond)
+		result.DataSampleAgeMillis = &age
+	}
+	result.LastDataCapacityBytesSec = finiteRate(quality.LastDataCapacity)
+	result.ScheduledDataPayloadBytes = snapshot.ScheduledData
+	result.WrittenDataPayloadBytes = snapshot.WrittenData
+	result.EligibleAckedDataPayloadBytes = snapshot.EligibleAckedData
+	result.DataQueueFrames = snapshot.DataQueueFrames
+	result.ActiveDataFlows = uint32(maxInt(snapshot.ActiveDataFlows, 0))
+	result.ProbeSamples = quality.ProbeSamples
+	return result
+}
+
+func durationMicros(value time.Duration) uint64 {
+	if value <= 0 {
+		return 0
+	}
+	return uint64(value / time.Microsecond)
+}
+
+func finiteRate(value float64) uint64 {
+	if value <= 0 || math.IsNaN(value) || math.IsInf(value, 0) || value >= float64(^uint64(0)) {
+		if value >= float64(^uint64(0)) {
+			return ^uint64(0)
+		}
+		return 0
+	}
+	return uint64(value)
+}
+
+func maxInt(value, minimum int) int {
+	if value < minimum {
+		return minimum
+	}
+	return value
 }
 
 func (observer *runtimeStatus) observeSessionProbe(generation uint64, rtt time.Duration) {
@@ -356,6 +441,7 @@ func (observer *runtimeStatus) removeSession(generation uint64) {
 		}
 		observer.publishResourcesLocked()
 	}
+	delete(observer.runtime, generation)
 	updates := observer.recomputeFastestLocked()
 	observer.mu.Unlock()
 	observer.repository.TryRecord(statusapi.Event{Kind: statusapi.EventRemoveSession, SessionID: id})

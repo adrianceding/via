@@ -186,6 +186,25 @@ func TestTxACKReleasesOnlyCumulativePrefix(t *testing.T) {
 	}
 }
 
+func TestTxACKWithCoverageReturnsOnlyNewLogicalRanges(t *testing.T) {
+	tx := NewTx()
+	if _, err := tx.Append([]byte("abcdefgh")); err != nil {
+		t.Fatal(err)
+	}
+	if progress, got, err := tx.ApplyACKWithCoverage(2, []ByteRange{{Start: 5, End: 7}}); err != nil || !progress || !reflect.DeepEqual(got, []ByteRange{{End: 2}, {Start: 5, End: 7}}) {
+		t.Fatalf("first coverage = %t, %v, %v", progress, got, err)
+	}
+	if progress, got, err := tx.ApplyACKWithCoverage(2, []ByteRange{{Start: 6, End: 8}}); err != nil || !progress || !reflect.DeepEqual(got, []ByteRange{{Start: 7, End: 8}}) {
+		t.Fatalf("second coverage = %t, %v, %v", progress, got, err)
+	}
+	if progress, got, err := tx.ApplyACKWithCoverage(8, nil); err != nil || !progress || !reflect.DeepEqual(got, []ByteRange{{Start: 2, End: 5}}) {
+		t.Fatalf("cumulative coverage = %t, %v, %v", progress, got, err)
+	}
+	if progress, got, err := tx.ApplyACKWithCoverage(8, nil); err != nil || progress || len(got) != 0 {
+		t.Fatalf("duplicate coverage = %t, %v, %v", progress, got, err)
+	}
+}
+
 func TestTxMergesSelectiveACKKnowledgeWithinFixedLimit(t *testing.T) {
 	tx := NewTx()
 	if _, err := tx.Append(make([]byte, 64)); err != nil {

@@ -314,7 +314,7 @@ func (daemon *serverDaemon) serveConnection(generation uint64, connection transp
 		return
 	}
 	defer session.close()
-	session.status = daemon.statusObserver
+	session.setStatusObserver(daemon.statusObserver)
 	localAddress, localOK := endpointIP(connection.LocalEndpoint())
 	sessionRegistered := false
 	if localOK {
@@ -377,7 +377,6 @@ func (daemon *serverDaemon) dispatch(session *wireSession, message protocol.Mess
 		return session.send(protocol.ProbeACK{Token: typed.Token})
 	case protocol.ProbeACK:
 		if rtt, ok := session.completeProbe(typed.Token, time.Now()); ok {
-			daemon.statusObserver.observeSessionProbe(session.generation, rtt)
 			daemon.notifyServerProbeQuality(session, rtt)
 		}
 		return nil
@@ -408,8 +407,6 @@ func (daemon *serverDaemon) probeServerSession(session *wireSession) {
 	probe := func() bool {
 		message, ok, expired := session.startProbe(time.Now())
 		if expired {
-			_, stall := session.probeQuality()
-			daemon.statusObserver.setSessionStallPenalty(session.generation, stall)
 			daemon.notifyServerProbeStallPenalty(session, probeTimeout)
 		}
 		return !ok || session.send(message) == nil
@@ -437,8 +434,10 @@ func (daemon *serverDaemon) notifyServerProbeQuality(session *wireSession, rtt t
 	for flowID, attachment := range session.allAttachments() {
 		instance := daemon.flow(servercore.FlowKey{PrincipalID: session.principal, FlowID: flowID})
 		if instance != nil {
-			instance.setStallPenalty(attachment, 0)
-			instance.observeProbe(attachment, rtt)
+			_ = instance.handle(servercore.RelayEvent{
+				Kind: servercore.RelaySetSessionQuality, Attachment: attachment,
+				Quality: session.qualitySnapshot(),
+			})
 		}
 	}
 }
@@ -450,7 +449,10 @@ func (daemon *serverDaemon) notifyServerProbeStallPenalty(session *wireSession, 
 	for flowID, attachment := range session.allAttachments() {
 		instance := daemon.flow(servercore.FlowKey{PrincipalID: session.principal, FlowID: flowID})
 		if instance != nil {
-			instance.setStallPenalty(attachment, penalty)
+			_ = instance.handle(servercore.RelayEvent{
+				Kind: servercore.RelaySetSessionQuality, Attachment: attachment,
+				Quality: session.qualitySnapshot(),
+			})
 		}
 	}
 }
@@ -908,7 +910,15 @@ func (daemon *serverDaemon) waitForFlowDrain(maximum time.Duration) {
 }
 
 func (daemon *serverDaemon) startWorker(work func()) bool {
-	if daemon == nil || work == nil {
+	if work == nil || !daemon.reserveWorker() {
+		return false
+	}
+	daemon.runReservedWorker(work)
+	return true
+}
+
+func (daemon *serverDaemon) reserveWorker() bool {
+	if daemon == nil {
 		return false
 	}
 	daemon.workersMu.Lock()
@@ -921,18 +931,23 @@ func (daemon *serverDaemon) startWorker(work func()) bool {
 	}
 	daemon.workers++
 	daemon.workersMu.Unlock()
+	return true
+}
+
+func (daemon *serverDaemon) runReservedWorker(work func()) {
 	go func() {
-		defer func() {
-			daemon.workersMu.Lock()
-			daemon.workers--
-			if daemon.workers == 0 {
-				daemon.workersCond.Broadcast()
-			}
-			daemon.workersMu.Unlock()
-		}()
+		defer daemon.releaseWorker()
 		work()
 	}()
-	return true
+}
+
+func (daemon *serverDaemon) releaseWorker() {
+	daemon.workersMu.Lock()
+	daemon.workers--
+	if daemon.workers == 0 {
+		daemon.workersCond.Broadcast()
+	}
+	daemon.workersMu.Unlock()
 }
 
 func (daemon *serverDaemon) waitWorkers() {

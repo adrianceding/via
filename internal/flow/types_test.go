@@ -18,7 +18,7 @@ func TestCheckedEnd(t *testing.T) {
 }
 
 func TestFixedLimits(t *testing.T) {
-	if SendWindowSize != 256<<10 || ReceiveWindowSize != 256<<10 {
+	if SendWindowSize != 320<<10 || ReceiveWindowSize != 320<<10 {
 		t.Fatal("fixed byte windows changed")
 	}
 	if MaxReplaySegments != 128 || MaxReassemblyRanges != 128 || MaxAttachments != 64 {

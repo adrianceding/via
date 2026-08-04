@@ -13,11 +13,15 @@ import (
 )
 
 const (
-	MaxAttachments     = flow.MaxAttachments
-	StableACKCount     = 8
-	StableAcknowledged = 64 << 10
-	MinimumConstraint  = protocol.MinimumDeliveryConstraint
-	MaximumConstraint  = protocol.MaximumDeliveryConstraint
+	MaxAttachments             = flow.MaxAttachments
+	StableACKCount             = 8
+	StableAcknowledged         = 64 << 10
+	MinimumConstraint          = protocol.MinimumDeliveryConstraint
+	MaximumConstraint          = protocol.MaximumDeliveryConstraint
+	fastestImprovementPercent  = 15
+	fastestImprovementAbsolute = 5 * time.Millisecond
+	fastestChallengeDuration   = 300 * time.Millisecond
+	fastestHoldDownDuration    = time.Second
 )
 
 var (
@@ -93,52 +97,78 @@ type AttachmentSnapshot struct {
 }
 
 type Snapshot struct {
-	Config       Config
-	State        AdaptiveState
-	ReturnState  AdaptiveState
-	Transition   Transition
-	Pending      bool
-	StableACKs   uint64
-	StableBytes  uint64
-	Preferred    flow.AttachmentKey
-	HasPreferred bool
-	Attachments  []AttachmentSnapshot
+	Config         Config
+	State          AdaptiveState
+	ReturnState    AdaptiveState
+	Transition     Transition
+	Pending        bool
+	StableACKs     uint64
+	StableBytes    uint64
+	Preferred      flow.AttachmentKey
+	HasPreferred   bool
+	Incumbent      flow.AttachmentKey
+	HasIncumbent   bool
+	Candidate      flow.AttachmentKey
+	HasCandidate   bool
+	IncumbentSince time.Time
+	CandidateSince time.Time
+	HoldDownUntil  time.Time
+	Attachments    []AttachmentSnapshot
 }
 
 type StatusSnapshot struct {
-	State        AdaptiveState
-	Transition   Transition
-	Attachments  int
-	Preferred    flow.AttachmentKey
-	HasPreferred bool
+	State          AdaptiveState
+	Transition     Transition
+	Attachments    int
+	Preferred      flow.AttachmentKey
+	HasPreferred   bool
+	Incumbent      flow.AttachmentKey
+	HasIncumbent   bool
+	Candidate      flow.AttachmentKey
+	HasCandidate   bool
+	IncumbentSince time.Time
+	CandidateSince time.Time
+	HoldDownUntil  time.Time
 }
 
 type attachmentState struct {
-	quality  *Quality
-	assigned uint64
+	quality         *Quality
+	qualitySnapshot QualitySnapshot
+	hasSnapshot     bool
+	assigned        uint64
 }
 
 type Policy struct {
-	flowID      protocol.FlowID
-	config      Config
-	state       AdaptiveState
-	returnState AdaptiveState
-	transition  Transition
-	pending     bool
-	stableACKs  uint64
-	stableBytes uint64
-	attachments map[flow.AttachmentKey]*attachmentState
+	flowID         protocol.FlowID
+	config         Config
+	now            func() time.Time
+	state          AdaptiveState
+	returnState    AdaptiveState
+	transition     Transition
+	pending        bool
+	stableACKs     uint64
+	stableBytes    uint64
+	attachments    map[flow.AttachmentKey]*attachmentState
+	incumbent      flow.AttachmentKey
+	hasIncumbent   bool
+	incumbentSince time.Time
+	candidate      flow.AttachmentKey
+	hasCandidate   bool
+	candidateSince time.Time
+	holdDownUntil  time.Time
 }
 
 func New(flowID protocol.FlowID, config Config) (*Policy, error) {
+	return NewWithClock(flowID, config, time.Now)
+}
+
+func NewWithClock(flowID protocol.FlowID, config Config, now func() time.Time) (*Policy, error) {
 	normalized, err := config.normalize()
-	if err != nil || flowID == (protocol.FlowID{}) {
+	if err != nil || flowID == (protocol.FlowID{}) || now == nil {
 		return nil, ErrInvalidPolicy
 	}
 	return &Policy{
-		flowID:      flowID,
-		config:      normalized,
-		state:       AdaptiveSingle,
+		flowID: flowID, config: normalized, now: now, state: AdaptiveSingle,
 		attachments: make(map[flow.AttachmentKey]*attachmentState, MaxAttachments),
 	}, nil
 }
@@ -174,6 +204,12 @@ func (policy *Policy) RemoveAttachment(attachment flow.AttachmentKey) {
 		return
 	}
 	delete(policy.attachments, attachment)
+	if policy.hasIncumbent && policy.incumbent == attachment {
+		policy.clearIncumbent()
+	}
+	if policy.hasCandidate && policy.candidate == attachment {
+		policy.clearCandidate()
+	}
 	policy.resetStable()
 	if len(policy.attachments) == 0 && policy.state != AdaptiveWaiting {
 		policy.returnState = policy.state
@@ -204,6 +240,46 @@ func (policy *Policy) Quality(attachment flow.AttachmentKey) (*Quality, error) {
 		return nil, ErrUnknownAttachment
 	}
 	return state.quality, nil
+}
+
+func (policy *Policy) SetQualitySnapshot(attachment flow.AttachmentKey, snapshot QualitySnapshot) error {
+	state, ok := policy.attachments[attachment]
+	if !ok {
+		return ErrUnknownAttachment
+	}
+	state.qualitySnapshot = snapshot
+	state.hasSnapshot = true
+	return nil
+}
+
+func (policy *Policy) SetQualitySnapshots(snapshots map[flow.AttachmentKey]QualitySnapshot) error {
+	if len(snapshots) != len(policy.attachments) {
+		return ErrUnknownAttachment
+	}
+	for attachment := range snapshots {
+		if _, ok := policy.attachments[attachment]; !ok {
+			return ErrUnknownAttachment
+		}
+	}
+	for attachment, state := range policy.attachments {
+		next := snapshots[attachment]
+		state.qualitySnapshot = next
+		state.hasSnapshot = true
+	}
+	return nil
+}
+
+func (policy *Policy) ResolveAssigned(attachment flow.AttachmentKey, bytes uint64) error {
+	state, ok := policy.attachments[attachment]
+	if !ok {
+		return ErrUnknownAttachment
+	}
+	if bytes >= state.assigned {
+		state.assigned = 0
+	} else {
+		state.assigned -= bytes
+	}
+	return nil
 }
 
 func (policy *Policy) PlaceNew(request PlacementRequest) []Placement {
@@ -283,9 +359,19 @@ func (policy *Policy) Snapshot() Snapshot {
 		Pending:     policy.pending,
 		StableACKs:  policy.stableACKs,
 		StableBytes: policy.stableBytes,
+		Incumbent:   policy.incumbent, HasIncumbent: policy.hasIncumbent,
+		Candidate: policy.candidate, HasCandidate: policy.hasCandidate,
+		IncumbentSince: policy.incumbentSince, CandidateSince: policy.candidateSince,
+		HoldDownUntil: policy.holdDownUntil,
 	}
 	if candidates := policy.candidates(0, nil); len(candidates) != 0 {
-		snapshot.Preferred = candidates[0].attachment
+		preferred := candidates[0].attachment
+		if policy.config.Selection == protocol.PathFastest && policy.hasIncumbent {
+			if _, exists := policy.attachments[policy.incumbent]; exists {
+				preferred = policy.incumbent
+			}
+		}
+		snapshot.Preferred = preferred
 		snapshot.HasPreferred = true
 	}
 	keys := policy.sortedAttachments()
@@ -293,7 +379,7 @@ func (policy *Policy) Snapshot() Snapshot {
 		state := policy.attachments[attachment]
 		snapshot.Attachments = append(snapshot.Attachments, AttachmentSnapshot{
 			Attachment: attachment,
-			Quality:    state.quality.Snapshot(),
+			Quality:    policy.qualitySnapshot(state),
 			Assigned:   state.assigned,
 		})
 	}
@@ -306,17 +392,27 @@ func (policy *Policy) StatusSnapshot() StatusSnapshot {
 	}
 	status := StatusSnapshot{
 		State: policy.state, Transition: policy.transition, Attachments: len(policy.attachments),
+		Incumbent: policy.incumbent, HasIncumbent: policy.hasIncumbent,
+		Candidate: policy.candidate, HasCandidate: policy.hasCandidate,
+		IncumbentSince: policy.incumbentSince, CandidateSince: policy.candidateSince,
+		HoldDownUntil: policy.holdDownUntil,
 	}
 	var bestEstimate time.Duration
 	var bestTie uint64
 	for attachment, state := range policy.attachments {
-		estimate := state.quality.DeliveryEstimate(0)
+		estimate := deliveryEstimate(policy.qualitySnapshot(state), 0)
 		tie := stableTie(policy.flowID, attachment)
 		if !status.HasPreferred || estimate < bestEstimate || estimate == bestEstimate && tie < bestTie {
 			status.Preferred = attachment
 			status.HasPreferred = true
 			bestEstimate = estimate
 			bestTie = tie
+		}
+	}
+	if policy.config.Selection == protocol.PathFastest && policy.hasIncumbent {
+		if _, exists := policy.attachments[policy.incumbent]; exists {
+			status.Preferred = policy.incumbent
+			status.HasPreferred = true
 		}
 	}
 	return status
@@ -328,11 +424,12 @@ func (policy *Policy) placeAll(attempted []flow.AttachmentKey, payloadBytes uint
 	placements := make([]Placement, 0, len(keys))
 	for _, attachment := range keys {
 		if _, exists := excluded[attachment]; !exists {
-			quality := policy.attachments[attachment].quality
+			quality := policy.qualitySnapshot(policy.attachments[attachment])
+			estimatedDelivery := deliveryEstimate(quality, payloadBytes)
 			placements = append(placements, Placement{
 				Attachment:        attachment,
-				RetryAfter:        quality.Snapshot().RetryEstimate,
-				EstimatedDelivery: quality.DeliveryEstimate(payloadBytes),
+				RetryAfter:        boundedRetryAfter(quality.RetryEstimate, estimatedDelivery),
+				EstimatedDelivery: estimatedDelivery,
 			})
 		}
 	}
@@ -345,7 +442,11 @@ func (policy *Policy) placeOne(request PlacementRequest, excluded map[flow.Attac
 		return nil
 	}
 	if policy.config.Selection == protocol.PathFastest {
-		return []Placement{policy.placementFor(candidates[0])}
+		chosen := candidates[0]
+		if len(excluded) == 0 {
+			chosen = policy.selectFastest(candidates)
+		}
+		return []Placement{policy.placementFor(chosen)}
 	}
 	filtered := policy.applyConstraints(candidates)
 	if len(filtered) == 0 {
@@ -370,11 +471,20 @@ func (policy *Policy) placeOne(request PlacementRequest, excluded map[flow.Attac
 }
 
 func (policy *Policy) placementFor(candidate candidate) Placement {
+	quality := policy.qualitySnapshot(policy.attachments[candidate.attachment])
 	return Placement{
 		Attachment:        candidate.attachment,
-		RetryAfter:        policy.attachments[candidate.attachment].quality.Snapshot().RetryEstimate,
+		RetryAfter:        boundedRetryAfter(quality.RetryEstimate, candidate.estimate),
 		EstimatedDelivery: candidate.estimate,
 	}
+}
+
+func boundedRetryAfter(retryEstimate, estimatedDelivery time.Duration) time.Duration {
+	retryAfter := max(retryEstimate, estimatedDelivery)
+	if retryAfter > MaximumRetryEstimate {
+		return MaximumRetryEstimate
+	}
+	return retryAfter
 }
 
 type candidate struct {
@@ -390,10 +500,10 @@ func (policy *Policy) candidates(payloadBytes uint64, excluded map[flow.Attachme
 		if _, exists := excluded[attachment]; exists {
 			continue
 		}
-		snapshot := state.quality.Snapshot()
+		snapshot := policy.qualitySnapshot(state)
 		result = append(result, candidate{
 			attachment: attachment,
-			estimate:   state.quality.DeliveryEstimate(payloadBytes),
+			estimate:   deliveryEstimate(snapshot, payloadBytes),
 			capacity:   snapshot.CapacityBytesSec,
 			tie:        stableTie(policy.flowID, attachment),
 		})
@@ -424,12 +534,18 @@ func (policy *Policy) applyConstraints(candidates []candidate) []candidate {
 }
 
 func (policy *Policy) virtualFinish(candidate candidate, payloadBytes uint64) float64 {
-	capacity := candidate.capacity
+	snapshot := policy.qualitySnapshot(policy.attachments[candidate.attachment])
+	capacity := snapshot.CapacityBytesSec
 	if !finitePositive(capacity) {
 		capacity = defaultCapacity
 	}
 	assigned := policy.attachments[candidate.attachment].assigned
-	return candidate.estimate.Seconds() + float64(saturatingSum(assigned, payloadBytes))/capacity
+	base := snapshot.SRTT
+	if base == 0 {
+		base = InitialRetryEstimate
+	}
+	return base.Seconds() + snapshot.StallPenalty.Seconds() +
+		float64(saturatingSum(snapshot.QueuedBytes, snapshot.InFlightBytes, assigned, payloadBytes))/capacity
 }
 
 func (policy *Policy) normalizeAssigned() {
@@ -448,6 +564,87 @@ func (policy *Policy) normalizeAssigned() {
 	for _, state := range policy.attachments {
 		state.assigned -= minimum
 	}
+}
+
+func (policy *Policy) selectFastest(candidates []candidate) candidate {
+	best := candidates[0]
+	now := policy.currentNow()
+	if !policy.hasIncumbent {
+		policy.setIncumbent(best.attachment, now, false)
+		return best
+	}
+	incumbentIndex := -1
+	for index, candidate := range candidates {
+		if candidate.attachment == policy.incumbent {
+			incumbentIndex = index
+			break
+		}
+	}
+	if incumbentIndex < 0 {
+		policy.setIncumbent(best.attachment, now, false)
+		return best
+	}
+	incumbent := candidates[incumbentIndex]
+	if best.attachment == incumbent.attachment || !fastestImprovement(incumbent.estimate, best.estimate) {
+		policy.clearCandidate()
+		return incumbent
+	}
+	if !policy.hasCandidate || policy.candidate != best.attachment {
+		policy.candidate = best.attachment
+		policy.hasCandidate = true
+		policy.candidateSince = now
+		return incumbent
+	}
+	if now.Before(policy.candidateSince) {
+		policy.candidateSince = now
+		return incumbent
+	}
+	if now.Sub(policy.candidateSince) < fastestChallengeDuration || now.Before(policy.holdDownUntil) {
+		return incumbent
+	}
+	policy.setIncumbent(best.attachment, now, true)
+	return best
+}
+
+func fastestImprovement(incumbent, candidate time.Duration) bool {
+	if incumbent <= candidate || incumbent <= 0 {
+		return false
+	}
+	improvement := incumbent - candidate
+	return improvement >= fastestImprovementAbsolute &&
+		float64(improvement) >= float64(incumbent)*fastestImprovementPercent/100
+}
+
+func (policy *Policy) setIncumbent(attachment flow.AttachmentKey, now time.Time, normalSwitch bool) {
+	policy.incumbent = attachment
+	policy.hasIncumbent = true
+	policy.incumbentSince = now
+	policy.clearCandidate()
+	if normalSwitch {
+		policy.holdDownUntil = now.Add(fastestHoldDownDuration)
+	} else {
+		policy.holdDownUntil = time.Time{}
+	}
+}
+
+func (policy *Policy) clearIncumbent() {
+	policy.incumbent = flow.AttachmentKey{}
+	policy.hasIncumbent = false
+	policy.incumbentSince = time.Time{}
+	policy.holdDownUntil = time.Time{}
+}
+
+func (policy *Policy) clearCandidate() {
+	policy.candidate = flow.AttachmentKey{}
+	policy.hasCandidate = false
+	policy.candidateSince = time.Time{}
+}
+
+func (policy *Policy) currentNow() time.Time {
+	if policy == nil || policy.now == nil {
+		return time.Now()
+	}
+	return policy.now()
 }
 
 func (policy *Policy) sortedAttachments() []flow.AttachmentKey {
@@ -472,6 +669,16 @@ func (policy *Policy) sortedAttachments() []flow.AttachmentKey {
 func (policy *Policy) resetStable() {
 	policy.stableACKs = 0
 	policy.stableBytes = 0
+}
+
+func (policy *Policy) qualitySnapshot(state *attachmentState) QualitySnapshot {
+	if state == nil {
+		return QualitySnapshot{CapacityBytesSec: defaultCapacity, RetryEstimate: InitialRetryEstimate}
+	}
+	if state.hasSnapshot {
+		return state.qualitySnapshot
+	}
+	return state.quality.Snapshot()
 }
 
 func attemptedSet(attempted []flow.AttachmentKey) map[flow.AttachmentKey]struct{} {
