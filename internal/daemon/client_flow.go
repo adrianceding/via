@@ -509,14 +509,14 @@ func (instance *clientFlow) refreshSessionQualities(kind clientcore.ApplicationR
 		clientcore.ApplicationRelaySendAdmitted:
 		return nil
 	}
-	attachments := instance.relay.Snapshot().Policy.Attachments
+	attachments := instance.relay.Attachments()
 	qualities := make(map[flow.AttachmentKey]policy.QualitySnapshot, len(attachments))
 	for _, attachment := range attachments {
-		session := instance.host.session(attachment.Attachment.SessionGeneration)
+		session := instance.host.session(attachment.SessionGeneration)
 		if session == nil {
 			return nil
 		}
-		qualities[attachment.Attachment] = session.qualitySnapshot()
+		qualities[attachment] = session.qualitySnapshot()
 	}
 	_, err := instance.relay.Handle(clientcore.ApplicationRelayEvent{
 		Kind: clientcore.ApplicationRelaySetSessionQualities, SessionQualities: qualities,

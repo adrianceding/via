@@ -379,6 +379,98 @@ func TestRepositoryRunPreservesFIFOAcrossRejectedBatchEvent(t *testing.T) {
 	}
 }
 
+func TestRepositoryRunCoalescesSessionQualityUntilPublicationTick(t *testing.T) {
+	now := time.Unix(9_000, 0).UTC()
+	repository, err := NewRepositoryWithClock(DefaultLimits(), func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial := validTestSession(1)
+	if err := repository.apply(Event{Kind: EventUpsertSession, Session: initial}, now); err != nil {
+		t.Fatal(err)
+	}
+	repository.publish(now)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	publicationTicks := make(chan time.Time, 1)
+	done := make(chan error, 1)
+	go func() { done <- repository.run(ctx, nil, publicationTicks) }()
+
+	latest := initial
+	for capacity := uint64(100); capacity <= 500; capacity += 100 {
+		quality := initial
+		quality.Quality.CapacityBytesSec = capacity
+		if !repository.TryRecord(Event{Kind: EventUpsertSession, Session: quality}) {
+			t.Fatalf("quality event at capacity %d rejected", capacity)
+		}
+		latest = quality
+	}
+
+	waitForStatus(t, time.Second, func() bool {
+		return len(repository.events) == 0
+	}, "repository to consume coalesced session quality")
+	if got := repository.Snapshot().Sessions[0].Quality.CapacityBytesSec; got != 0 {
+		t.Fatalf("quality published before tick = %d", got)
+	}
+
+	publicationAt := now.Add(100 * time.Millisecond)
+	publicationTicks <- publicationAt
+	waitForStatus(t, time.Second, func() bool {
+		snapshot := repository.Snapshot()
+		return len(snapshot.Sessions) == 1 && snapshot.Sessions[0].Quality.CapacityBytesSec == latest.Quality.CapacityBytesSec &&
+			snapshot.GeneratedAt == publicationAt
+	}, "coalesced session quality publication")
+
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRepositoryRunPublishesSessionControlChangesImmediately(t *testing.T) {
+	now := time.Unix(10_000, 0).UTC()
+	repository, err := NewRepositoryWithClock(DefaultLimits(), func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial := validTestSession(1)
+	if err := repository.apply(Event{Kind: EventUpsertSession, Session: initial}, now); err != nil {
+		t.Fatal(err)
+	}
+	repository.publish(now)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- repository.run(ctx, nil, make(chan time.Time)) }()
+
+	backoff := initial
+	backoff.State = SessionBackoff
+	backoff.Reason = ReasonPathRemoved
+	if !repository.TryRecord(Event{Kind: EventUpsertSession, Session: backoff}) {
+		t.Fatal("control event rejected")
+	}
+	waitForStatus(t, time.Second, func() bool {
+		snapshot := repository.Snapshot()
+		return len(snapshot.Sessions) == 1 && snapshot.Sessions[0].State == SessionBackoff &&
+			snapshot.Sessions[0].Reason == ReasonPathRemoved
+	}, "session control publication")
+
+	fastest := backoff
+	fastest.Fastest = true
+	if !repository.TryRecord(Event{Kind: EventUpsertSession, Session: fastest}) {
+		t.Fatal("fastest marker event rejected")
+	}
+	waitForStatus(t, time.Second, func() bool {
+		snapshot := repository.Snapshot()
+		return len(snapshot.Sessions) == 1 && snapshot.Sessions[0].Fastest
+	}, "session fastest marker publication")
+
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func waitForStatus(t *testing.T, maximum time.Duration, condition func() bool, description string) {
 	t.Helper()
 	deadline := time.Now().Add(maximum)

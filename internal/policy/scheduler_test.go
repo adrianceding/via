@@ -2,6 +2,7 @@ package policy
 
 import (
 	"errors"
+	"math/rand"
 	"reflect"
 	"testing"
 
@@ -137,5 +138,57 @@ func TestSchedulerRejectsConflictingFINSlot(t *testing.T) {
 	}
 	if err := scheduler.Enqueue(Descriptor{Kind: DescriptorFIN, FlowID: flowID, ItemID: 2, Generation: 1}); !errors.Is(err, ErrDescriptorConflict) {
 		t.Fatalf("conflicting FIN error = %v", err)
+	}
+}
+
+func TestSchedulerDescriptorCountTracksQueueContents(t *testing.T) {
+	random := rand.New(rand.NewSource(42))
+	flowCount := 4
+	scheduler, err := NewScheduler(flowCount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	flowIDs := make([]protocol.FlowID, flowCount)
+	for index := range flowIDs {
+		flowIDs[index] = protocol.FlowID{byte(index + 1)}
+	}
+	var nextItem uint64 = 1
+	for step := 0; step < 20000; step++ {
+		flowID := flowIDs[random.Intn(flowCount)]
+		switch random.Intn(6) {
+		case 0, 1:
+			_ = scheduler.Enqueue(Descriptor{Kind: DescriptorData, FlowID: flowID, ItemID: nextItem, Generation: 1, Bytes: 16})
+			nextItem++
+		case 2:
+			_ = scheduler.Enqueue(Descriptor{Kind: DescriptorData, FlowID: flowID, ItemID: nextItem, Generation: 1, Bytes: 16})
+			nextItem++
+			_ = scheduler.Enqueue(Descriptor{Kind: DescriptorData, FlowID: flowID, ItemID: nextItem, Generation: 1, Bytes: 16})
+			nextItem++
+		case 3:
+			_ = scheduler.Enqueue(Descriptor{Kind: DescriptorACK, FlowID: flowID, ItemID: nextItem, Generation: 1})
+			nextItem++
+		case 4:
+			if _, ok := scheduler.Next(); ok {
+				// A descriptor was consumed; the counter must already reflect it.
+			}
+		case 5:
+			if random.Intn(2) == 0 {
+				scheduler.DropFlow(flowID)
+			} else {
+				if random.Intn(2) == 0 {
+					_ = scheduler.Enqueue(Descriptor{Kind: DescriptorReset, FlowID: flowID, ItemID: nextItem, Generation: 1})
+					nextItem++
+				} else if len(scheduler.queues) != 0 {
+					scheduler.Cancel(flowID, nextItem-1, 1)
+				}
+			}
+		}
+		expected := 0
+		for _, queue := range scheduler.queues {
+			expected += queue.count()
+		}
+		if got := scheduler.Snapshot().Descriptors; got != expected {
+			t.Fatalf("step %d descriptor count = %d, want %d", step, got, expected)
+		}
 	}
 }

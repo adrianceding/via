@@ -220,6 +220,16 @@ func (policy *Policy) RemoveAttachment(attachment flow.AttachmentKey) {
 
 func (policy *Policy) SetPending(pending bool) { policy.pending = pending }
 
+// Attachments returns the current attachment keys in stable order without
+// building a full policy snapshot. Callers that only need the key set for
+// refresh loops should prefer this over Snapshot.
+func (policy *Policy) Attachments() []flow.AttachmentKey {
+	if policy == nil {
+		return nil
+	}
+	return policy.sortedAttachments()
+}
+
 func (policy *Policy) State() AdaptiveState {
 	if policy == nil {
 		return AdaptiveWaiting

@@ -261,6 +261,79 @@ func TestSessionRuntimeDropsIncompleteDataWindowAcrossIdleGap(t *testing.T) {
 	}
 }
 
+func TestSessionRuntimeThrottlesDiagnosticNotifications(t *testing.T) {
+	now := time.Unix(1_000, 0).UTC()
+	connection := newRuntimeTestConnection()
+	runtime, err := newSessionRuntimeWithClock(context.Background(), connection, nil, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.close(transport.ErrClosed)
+	var notifications int32
+	runtime.setSnapshotObserver(func(sessionRuntimeSnapshot) { notifications++ })
+
+	first, err := runtime.admit(context.Background(), runtimeRequestData(1, 1, []byte("a")), protocol.FlowID{1}, 1, 1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	connection.waitEntered(t)
+	if got := notifications; got != 2 {
+		t.Fatalf("initial notifications = %d, want 2", got)
+	}
+
+	now = now.Add(50 * time.Millisecond)
+	second, err := runtime.admit(context.Background(), runtimeRequestData(2, 1, []byte("b")), protocol.FlowID{2}, 2, 1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := notifications; got != 2 {
+		t.Fatalf("throttled notifications = %d, want 2", got)
+	}
+
+	now = now.Add(50 * time.Millisecond)
+	third, err := runtime.admit(context.Background(), runtimeRequestData(3, 1, []byte("c")), protocol.FlowID{3}, 3, 1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := notifications; got != 3 {
+		t.Fatalf("interval notifications = %d, want 3", got)
+	}
+
+	connection.release()
+	for _, request := range []*sessionRuntimeRequest{first, second, third} {
+		if err := runtime.wait(context.Background(), request); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := notifications; got != 3 {
+		t.Fatalf("post-write notifications = %d, want 3", got)
+	}
+
+	runtime.close(transport.ErrClosed)
+	if got := notifications; got != 4 {
+		t.Fatalf("terminal notifications = %d, want 4", got)
+	}
+}
+
+func TestSessionRuntimeTerminalCloseAlwaysNotifiesObserver(t *testing.T) {
+	now := time.Unix(2_000, 0).UTC()
+	connection := newRuntimeTestConnection()
+	runtime, err := newSessionRuntimeWithClock(context.Background(), connection, nil, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	var closed bool
+	runtime.setSnapshotObserver(func(snapshot sessionRuntimeSnapshot) {
+		if snapshot.Closed {
+			closed = true
+		}
+	})
+	runtime.close(transport.ErrClosed)
+	if !closed {
+		t.Fatal("terminal close did not notify observer")
+	}
+}
+
 type runtimeTestConnection struct {
 	mu        sync.Mutex
 	writes    []transport.WriteRequest

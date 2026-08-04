@@ -262,17 +262,34 @@ func (repository *Repository) run(ctx context.Context, ticks, publicationTicks <
 }
 
 func (repository *Repository) eventRequiresImmediatePublication(event Event) bool {
-	if event.Kind != EventUpsertFlow {
+	switch event.Kind {
+	case EventUpsertFlow:
+		current, exists := repository.state.flows[event.Flow.IDHash]
+		return !exists || !sameFlowControlState(current, event.Flow)
+	case EventUpsertSession:
+		current, exists := repository.state.sessions[event.Session.IDHash]
+		return !exists || !sameSessionControlState(current, event.Session)
+	default:
 		return true
 	}
-	current, exists := repository.state.flows[event.Flow.IDHash]
-	return !exists || !sameFlowControlState(current, event.Flow)
 }
 
 func sameFlowControlState(left, right Flow) bool {
 	return left.IDHash == right.IDHash && left.TargetType == right.TargetType && left.TargetHash == right.TargetHash &&
 		left.DeliveryMode == right.DeliveryMode && left.PathSelection == right.PathSelection &&
 		left.AdaptiveState == right.AdaptiveState && left.State == right.State && left.Reason == right.Reason
+}
+
+// sameSessionControlState reports whether two session events differ only in
+// diagnostic quality fields. Identity, connection, addressing, state and the
+// derived fastest marker publish immediately; quality samples coalesce onto the
+// publication tick.
+func sameSessionControlState(left, right Session) bool {
+	return left.IDHash == right.IDHash && left.ConnectionID == right.ConnectionID &&
+		left.Transport == right.Transport && left.Interface == right.Interface &&
+		left.LocalAddress == right.LocalAddress && left.LocalEndpoint == right.LocalEndpoint &&
+		left.RemoteEndpoint == right.RemoteEndpoint && left.PrincipalHash == right.PrincipalHash &&
+		left.State == right.State && left.Reason == right.Reason && left.Fastest == right.Fastest
 }
 
 func (repository *Repository) Snapshot() Snapshot {

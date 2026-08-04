@@ -283,6 +283,15 @@ func (relay *Relay) AdaptiveState() policy.AdaptiveState {
 	return relay.policy.State()
 }
 
+// Attachments returns the published attachment keys in stable order without
+// building a full snapshot. Used by refresh loops that only need the key set.
+func (relay *Relay) Attachments() []flow.AttachmentKey {
+	if relay == nil || relay.policy == nil {
+		return nil
+	}
+	return relay.policy.Attachments()
+}
+
 func (relay *Relay) StatusSnapshot() (flow.StatusSnapshot, policy.StatusSnapshot) {
 	if relay == nil || relay.machine == nil || relay.policy == nil {
 		return flow.StatusSnapshot{LifecycleState: flow.Reset}, policy.StatusSnapshot{State: policy.AdaptiveWaiting}

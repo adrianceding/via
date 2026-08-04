@@ -307,13 +307,22 @@ func (observer *runtimeStatus) observeSessionRuntime(generation uint64, snapshot
 		return
 	}
 	previousProbeSamples := entry.Quality.ProbeSamples
+	previousStall := entry.Quality.StallPenaltyMicros
+	previousRTT := entry.Quality.SmoothedRTTMicros
+	previousState := entry.State
 	entry.Quality = statusQualityFromRuntime(snapshot, entry.Quality)
 	if snapshot.Quality.ProbeSamples > previousProbeSamples {
 		entry.LastProbeAt = observer.now()
 	}
 	observer.sessions[id] = entry
-	updates := observer.recomputeFastestLocked()
-	entry = observer.sessions[id]
+	// The fastest marker depends only on stall, smoothed RTT and session state.
+	// Quality-only updates (capacity, queue depth, counters) cannot move it, so
+	// skip the full recomputation unless one of those inputs changed.
+	var updates []statusapi.Session
+	if entry.State != previousState || entry.Quality.StallPenaltyMicros != previousStall || entry.Quality.SmoothedRTTMicros != previousRTT {
+		updates = observer.recomputeFastestLocked()
+		entry = observer.sessions[id]
+	}
 	observer.mu.Unlock()
 	observer.publishSessionUpdates(updates, id)
 	observer.repository.TryRecord(statusapi.Event{Kind: statusapi.EventUpsertSession, Session: entry})

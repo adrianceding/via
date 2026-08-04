@@ -22,6 +22,10 @@ const (
 	sessionRuntimeTerminal
 	dataCapacityWindowBytes = 64 << 10
 	dataCapacityWindowTime  = 250 * time.Millisecond
+	// snapshotNotifyInterval bounds diagnostic observer notifications. Data-plane
+	// snapshot reads are unaffected; only notifications to the status observer are
+	// throttled, and terminal closure always notifies.
+	snapshotNotifyInterval = 100 * time.Millisecond
 )
 
 type sessionRuntimeRequest struct {
@@ -82,6 +86,7 @@ type sessionRuntime struct {
 	dataWindowLastACK time.Time
 	dataWindowBytes   uint64
 	eligibleAckedData uint64
+	lastNotify        time.Time
 	wake              chan struct{}
 	done              chan struct{}
 	workerDone        chan struct{}
@@ -159,6 +164,25 @@ func (runtime *sessionRuntime) notifySnapshot(snapshot sessionRuntimeSnapshot) {
 	}
 }
 
+// snapshotIfNotifyDueLocked reports whether the diagnostic observer is due for a
+// snapshot and, when due, returns a fresh snapshot. The caller must hold the
+// lock. Terminal closure bypasses throttling so the final state is always
+// observed.
+func (runtime *sessionRuntime) snapshotIfNotifyDueLocked() (sessionRuntimeSnapshot, bool) {
+	if runtime.closed {
+		return runtime.snapshotLocked(), true
+	}
+	if runtime.onSnapshot == nil {
+		return sessionRuntimeSnapshot{}, false
+	}
+	now := runtime.now()
+	if !runtime.lastNotify.IsZero() && now.Sub(runtime.lastNotify) < snapshotNotifyInterval {
+		return sessionRuntimeSnapshot{}, false
+	}
+	runtime.lastNotify = now
+	return runtime.snapshotLocked(), true
+}
+
 func (runtime *sessionRuntime) admit(ctx context.Context, request transport.WriteRequest, flowID protocol.FlowID, itemID, attemptGeneration uint64, dataPayload uint64) (*sessionRuntimeRequest, error) {
 	if runtime == nil || ctx == nil {
 		return nil, ErrWireProtocol
@@ -221,9 +245,11 @@ func (runtime *sessionRuntime) admit(ctx context.Context, request transport.Writ
 	runtime.updateQualityLoadLocked()
 	runtime.requests[queued.id] = queued
 	runtime.signalLocked()
-	snapshot := runtime.snapshotLocked()
+	snapshot, notify := runtime.snapshotIfNotifyDueLocked()
 	runtime.mu.Unlock()
-	runtime.notifySnapshot(snapshot)
+	if notify {
+		runtime.notifySnapshot(snapshot)
+	}
 	return queued, nil
 }
 
@@ -274,9 +300,11 @@ func (runtime *sessionRuntime) cancelQueued(request *sessionRuntimeRequest, err 
 	runtime.updateQualityLoadLocked()
 	runtime.finishLocked(request, err)
 	runtime.signalLocked()
-	snapshot := runtime.snapshotLocked()
+	snapshot, notify := runtime.snapshotIfNotifyDueLocked()
 	runtime.mu.Unlock()
-	runtime.notifySnapshot(snapshot)
+	if notify {
+		runtime.notifySnapshot(snapshot)
+	}
 	return true
 }
 
@@ -364,9 +392,11 @@ func (runtime *sessionRuntime) selectNext() *sessionRuntimeRequest {
 	runtime.updateQualityLoadLocked()
 	request.state = sessionRuntimeSelected
 	runtime.selected = request
-	snapshot := runtime.snapshotLocked()
+	snapshot, notify := runtime.snapshotIfNotifyDueLocked()
 	runtime.mu.Unlock()
-	runtime.notifySnapshot(snapshot)
+	if notify {
+		runtime.notifySnapshot(snapshot)
+	}
 	return request
 }
 
@@ -390,9 +420,11 @@ func (runtime *sessionRuntime) completeWrite(request *sessionRuntimeRequest, err
 	}
 	runtime.updateQualityLoadLocked()
 	runtime.finishLocked(request, err)
-	snapshot := runtime.snapshotLocked()
+	snapshot, notify := runtime.snapshotIfNotifyDueLocked()
 	runtime.mu.Unlock()
-	runtime.notifySnapshot(snapshot)
+	if notify {
+		runtime.notifySnapshot(snapshot)
+	}
 	if err != nil {
 		runtime.close(err)
 		if runtime.onFailure != nil {
@@ -407,9 +439,11 @@ func (runtime *sessionRuntime) observeProbe(rtt time.Duration) {
 	}
 	runtime.mu.Lock()
 	_ = runtime.quality.ObserveProbe(rtt)
-	snapshot := runtime.snapshotLocked()
+	snapshot, notify := runtime.snapshotIfNotifyDueLocked()
 	runtime.mu.Unlock()
-	runtime.notifySnapshot(snapshot)
+	if notify {
+		runtime.notifySnapshot(snapshot)
+	}
 }
 
 func (runtime *sessionRuntime) setStallPenalty(penalty time.Duration) {
@@ -418,9 +452,11 @@ func (runtime *sessionRuntime) setStallPenalty(penalty time.Duration) {
 	}
 	runtime.mu.Lock()
 	_ = runtime.quality.SetStallPenalty(penalty)
-	snapshot := runtime.snapshotLocked()
+	snapshot, notify := runtime.snapshotIfNotifyDueLocked()
 	runtime.mu.Unlock()
-	runtime.notifySnapshot(snapshot)
+	if notify {
+		runtime.notifySnapshot(snapshot)
+	}
 }
 
 func (runtime *sessionRuntime) observeDataCredit(acknowledgedBytes uint64, writeCompletedAt, acknowledgedAt time.Time) {
@@ -444,9 +480,11 @@ func (runtime *sessionRuntime) observeDataCredit(acknowledgedBytes uint64, write
 	runtime.dataWindowBytes = saturatingUint64(runtime.dataWindowBytes, acknowledgedBytes)
 	runtime.eligibleAckedData = saturatingUint64(runtime.eligibleAckedData, acknowledgedBytes)
 	if runtime.dataWindowBytes < dataCapacityWindowBytes && runtime.now().Sub(runtime.dataWindowStart) < dataCapacityWindowTime {
-		snapshot := runtime.snapshotLocked()
+		snapshot, notify := runtime.snapshotIfNotifyDueLocked()
 		runtime.mu.Unlock()
-		runtime.notifySnapshot(snapshot)
+		if notify {
+			runtime.notifySnapshot(snapshot)
+		}
 		return
 	}
 	interval := runtime.dataWindowLastACK.Sub(runtime.dataWindowStart)
@@ -456,9 +494,11 @@ func (runtime *sessionRuntime) observeDataCredit(acknowledgedBytes uint64, write
 	runtime.dataWindowStart = time.Time{}
 	runtime.dataWindowLastACK = time.Time{}
 	runtime.dataWindowBytes = 0
-	snapshot := runtime.snapshotLocked()
+	snapshot, notify := runtime.snapshotIfNotifyDueLocked()
 	runtime.mu.Unlock()
-	runtime.notifySnapshot(snapshot)
+	if notify {
+		runtime.notifySnapshot(snapshot)
+	}
 }
 
 func (runtime *sessionRuntime) close(err error) {

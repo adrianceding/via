@@ -47,6 +47,16 @@ func (queue *schedulerQueue) empty() bool {
 	return len(queue.data) == 0 && queue.ack == nil && queue.fin == nil && queue.finACK == nil && queue.reset == nil
 }
 
+func (queue *schedulerQueue) count() int {
+	count := len(queue.data)
+	for _, descriptor := range []*Descriptor{queue.ack, queue.fin, queue.finACK, queue.reset} {
+		if descriptor != nil {
+			count++
+		}
+	}
+	return count
+}
+
 type SchedulerSnapshot struct {
 	Flows       int
 	Descriptors int
@@ -54,9 +64,10 @@ type SchedulerSnapshot struct {
 }
 
 type Scheduler struct {
-	maxFlows int
-	queues   map[protocol.FlowID]*schedulerQueue
-	order    []protocol.FlowID
+	maxFlows    int
+	queues      map[protocol.FlowID]*schedulerQueue
+	order       []protocol.FlowID
+	descriptors int
 }
 
 func NewScheduler(maxFlows int) (*Scheduler, error) {
@@ -83,21 +94,38 @@ func (scheduler *Scheduler) Enqueue(descriptor Descriptor) error {
 	var err error
 	switch descriptor.Kind {
 	case DescriptorData:
-		err = enqueueData(queue, descriptor)
+		var added bool
+		added, err = enqueueData(queue, descriptor)
+		if added {
+			scheduler.descriptors++
+		}
 	case DescriptorACK:
 		copy := descriptor
+		if queue.ack == nil {
+			scheduler.descriptors++
+		}
 		queue.ack = &copy
 	case DescriptorFIN:
-		err = setSingleDescriptor(&queue.fin, descriptor)
+		var added bool
+		added, err = setSingleDescriptor(&queue.fin, descriptor)
+		if added {
+			scheduler.descriptors++
+		}
 	case DescriptorFINACK:
-		err = setSingleDescriptor(&queue.finACK, descriptor)
+		var added bool
+		added, err = setSingleDescriptor(&queue.finACK, descriptor)
+		if added {
+			scheduler.descriptors++
+		}
 	case DescriptorReset:
 		copy := descriptor
+		before := queue.count()
 		queue.data = nil
 		queue.ack = nil
 		queue.fin = nil
 		queue.finACK = nil
 		queue.reset = &copy
+		scheduler.descriptors += 1 - before
 	}
 	if err != nil && queue.empty() {
 		scheduler.removeFlow(descriptor.FlowID)
@@ -112,6 +140,7 @@ func (scheduler *Scheduler) Next() (Descriptor, bool) {
 	flowID := scheduler.order[0]
 	queue := scheduler.queues[flowID]
 	descriptor := popDescriptor(queue)
+	scheduler.descriptors--
 	copy(scheduler.order, scheduler.order[1:])
 	scheduler.order = scheduler.order[:len(scheduler.order)-1]
 	if queue.empty() {
@@ -141,12 +170,14 @@ func (scheduler *Scheduler) Cancel(flowID protocol.FlowID, itemID, generation ui
 		}
 		copy(queue.data[index:], queue.data[index+1:])
 		queue.data = queue.data[:len(queue.data)-1]
+		scheduler.descriptors--
 		removed = true
 		break
 	}
 	for _, slot := range []**Descriptor{&queue.ack, &queue.fin, &queue.finACK, &queue.reset} {
 		if *slot != nil && (*slot).ItemID == itemID && (*slot).Generation == generation {
 			*slot = nil
+			scheduler.descriptors--
 			removed = true
 		}
 	}
@@ -160,16 +191,11 @@ func (scheduler *Scheduler) Snapshot() SchedulerSnapshot {
 	if scheduler == nil {
 		return SchedulerSnapshot{}
 	}
-	snapshot := SchedulerSnapshot{Flows: len(scheduler.queues), Order: append([]protocol.FlowID(nil), scheduler.order...)}
-	for _, queue := range scheduler.queues {
-		snapshot.Descriptors += len(queue.data)
-		for _, descriptor := range []*Descriptor{queue.ack, queue.fin, queue.finACK, queue.reset} {
-			if descriptor != nil {
-				snapshot.Descriptors++
-			}
-		}
+	return SchedulerSnapshot{
+		Flows:       len(scheduler.queues),
+		Descriptors: scheduler.descriptors,
+		Order:       append([]protocol.FlowID(nil), scheduler.order...),
 	}
-	return snapshot
 }
 
 func validateDescriptor(descriptor Descriptor) error {
@@ -186,36 +212,39 @@ func validateDescriptor(descriptor Descriptor) error {
 	return nil
 }
 
-func enqueueData(queue *schedulerQueue, descriptor Descriptor) error {
+func enqueueData(queue *schedulerQueue, descriptor Descriptor) (bool, error) {
 	for index, current := range queue.data {
 		if current.ItemID != descriptor.ItemID {
 			continue
 		}
 		if descriptor.Generation < current.Generation {
-			return nil
+			return false, nil
 		}
 		queue.data[index] = descriptor
-		return nil
+		return false, nil
 	}
 	if len(queue.data) >= MaxDescriptorsPerFlow {
-		return ErrDescriptorLimit
+		return false, ErrDescriptorLimit
 	}
 	queue.data = append(queue.data, descriptor)
-	return nil
+	return true, nil
 }
 
-func setSingleDescriptor(slot **Descriptor, descriptor Descriptor) error {
+func setSingleDescriptor(slot **Descriptor, descriptor Descriptor) (bool, error) {
 	if *slot != nil {
 		if (*slot).ItemID != descriptor.ItemID {
-			return ErrDescriptorConflict
+			return false, ErrDescriptorConflict
 		}
 		if descriptor.Generation < (*slot).Generation {
-			return nil
+			return false, nil
 		}
+		copy := descriptor
+		*slot = &copy
+		return false, nil
 	}
 	copy := descriptor
 	*slot = &copy
-	return nil
+	return true, nil
 }
 
 func popDescriptor(queue *schedulerQueue) Descriptor {
@@ -246,6 +275,10 @@ func popDescriptor(queue *schedulerQueue) Descriptor {
 }
 
 func (scheduler *Scheduler) removeFlow(flowID protocol.FlowID) {
+	queue := scheduler.queues[flowID]
+	if queue != nil {
+		scheduler.descriptors -= queue.count()
+	}
 	delete(scheduler.queues, flowID)
 	for index, current := range scheduler.order {
 		if current == flowID {
