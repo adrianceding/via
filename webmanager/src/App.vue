@@ -1,15 +1,19 @@
 <script setup>
-import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
+import { computeActiveSection, computeNavigateTop } from './app-nav.js';
 
+import AggregationPanel from './components/AggregationPanel.vue';
 import ConnectionFocus from './components/ConnectionFocus.vue';
-import EmptyTrend from './components/EmptyTrend.vue';
 import FilterBar from './components/FilterBar.vue';
 import FlowSection from './components/FlowSection.vue';
 import InterfaceList from './components/InterfaceList.vue';
+import LimitsPanel from './components/LimitsPanel.vue';
 import OverviewMetrics from './components/OverviewMetrics.vue';
+import RecoveryPanel from './components/RecoveryPanel.vue';
 import RuntimeHeader from './components/RuntimeHeader.vue';
 import SessionTable from './components/SessionTable.vue';
+import TrafficCharts from './components/TrafficCharts.vue';
 import {
   flowMatchesFilter,
   interfaceMatchesFilter,
@@ -37,8 +41,8 @@ const flowTab = ref(initialView.flowTab);
 const sessionSort = ref(initialView.sessionSort);
 const paused = ref(false);
 const currentTime = ref(Date.now());
+const activeSection = ref('overview');
 let ageTimer = null;
-const SessionTrend = defineAsyncComponent(() => import('./components/SessionTrend.vue'));
 
 const freshness = computed(() => describeFreshness(controller.lastSuccessAt.value, currentTime.value, paused.value));
 const freshnessLabel = computed(() => t(`freshness.${freshness.value.state}`, { count: freshness.value.ageSeconds }));
@@ -50,7 +54,6 @@ const visibleInterfaces = computed(() => controller.snapshot.value.interfaces.fi
 const visibleSessionIDs = computed(() => new Set(visibleSessions.value.map((session) => session.connection_id || session.id)));
 const visibleTrends = computed(() => controller.trends.value.filter((trend) => visibleSessionIDs.value.has(trend.id)
   && (!normalizedQuery.value || `${trend.label} ${trend.id} ${trend.localEndpoint} ${trend.remoteEndpoint}`.toLowerCase().includes(normalizedQuery.value))));
-const visibleAggregateTrend = computed(() => !normalizedQuery.value && !onlyAnomalies.value ? controller.aggregateTrend.value : null);
 const anomalyCount = computed(() => controller.snapshot.value.sessions.filter(isSessionAbnormal).length
   + controller.snapshot.value.flows.filter(isFlowAbnormal).length
   + controller.snapshot.value.terminals.filter(isTerminalAbnormal).length
@@ -72,6 +75,13 @@ const healthReasons = computed(() => controller.health.value.reasons.map((reason
 const runtimeTitle = computed(() => t('header.title', {
   role: t(roles[controller.snapshot.value.summary.role] || 'status.role.runtime'),
 }));
+const navSections = computed(() => [
+  { id: 'overview', label: t('nav.overview') },
+  { id: 'sessions', label: t('nav.sessions') },
+  { id: 'flows', label: t('nav.flows') },
+  { id: 'limits', label: t('nav.limits') },
+]);
+const roleLabel = computed(() => t(roles[controller.snapshot.value.summary.role] || 'status.role.runtime'));
 
 function refreshNow() {
   void poller.refreshNow();
@@ -99,6 +109,29 @@ function changeLocale(nextLocale) {
   document.title = t('app.title');
 }
 
+function updateActiveSection() {
+  const sections = navSections.value
+    .map((section) => {
+      const el = document.getElementById(section.id);
+      return el ? { id: section.id, top: el.getBoundingClientRect().top } : null;
+    })
+    .filter(Boolean);
+  activeSection.value = computeActiveSection(sections, {
+    scrollY: window.scrollY,
+    innerHeight: window.innerHeight,
+    scrollHeight: document.documentElement.scrollHeight,
+  });
+}
+
+function navigateTo(sectionID) {
+  const target = document.getElementById(sectionID);
+  if (!target) return;
+  window.scrollTo({
+    top: computeNavigateTop(target.getBoundingClientRect().top, window.scrollY),
+    behavior: 'smooth',
+  });
+}
+
 watch([query, onlyAnomalies, flowTab, sessionSort], () => {
   const search = serializeViewState({
     query: query.value,
@@ -112,73 +145,122 @@ watch([query, onlyAnomalies, flowTab, sessionSort], () => {
 onMounted(() => {
   void poller.start();
   ageTimer = setInterval(() => { currentTime.value = Date.now(); }, 1000);
+  window.addEventListener('scroll', updateActiveSection, { passive: true });
+  updateActiveSection();
 });
 onBeforeUnmount(() => {
   poller.stop();
   clearInterval(ageTimer);
+  window.removeEventListener('scroll', updateActiveSection);
 });
 </script>
 
 <template>
-  <RuntimeHeader
-    :connection-label="connectionLabel"
-    :freshness-label="freshnessLabel"
-    :generated-at="controller.snapshot.value.summary.generated_at"
-    :health-level="healthLevel"
-    :health-reasons="healthReasons"
-    :locale="locale"
-    :paused="paused"
-    :refreshing="controller.refreshing.value"
-    :role="controller.snapshot.value.summary.role"
-    :title="runtimeTitle"
-    @change-locale="changeLocale"
-    @refresh="refreshNow"
-    @toggle-pause="togglePause"
-  />
-  <main class="manager-main">
-    <OverviewMetrics
-      :active-flows="controller.snapshot.value.flowTotal"
-      :rates="controller.rates.value"
-      :sessions="controller.snapshot.value.sessions"
-      :summary="controller.snapshot.value.summary"
-    />
-    <FilterBar
-      v-model:only-anomalies="onlyAnomalies"
-      v-model:query="query"
-      :anomaly-count="anomalyCount"
-      :share-url="currentViewURL"
-      :truncated="controller.snapshot.value.truncated"
-      @clear="clearFilters"
-    />
-    <ConnectionFocus
-      :sessions="visibleSessions"
-      :summary="controller.snapshot.value.summary"
-    />
-    <SessionTrend v-if="visibleTrends.length || visibleAggregateTrend" :aggregate="visibleAggregateTrend" :trends="visibleTrends" />
-    <EmptyTrend v-else />
-    <SessionTable
-      v-model:sort="sessionSort"
-      :only-anomalies="false"
-      query=""
-      :role="controller.snapshot.value.summary.role"
-      :sessions="visibleSessions"
-      :total="controller.snapshot.value.sessionTotal"
-      @filter="filterBy"
-    />
-    <FlowSection
-      v-model:active-tab="flowTab"
-      :flows="visibleFlows"
-      :flow-total="controller.snapshot.value.flowTotal"
-      :terminals="visibleTerminals"
-      :terminal-total="controller.snapshot.value.terminalTotal"
-      @filter="filterBy"
-    />
-    <InterfaceList
-      :filtered="Boolean(normalizedQuery) || onlyAnomalies"
-      :interfaces="visibleInterfaces"
-      :sessions="visibleSessions"
-      :total="controller.snapshot.value.interfaces.length"
-      @filter="filterBy"
-    />
-  </main>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="side-brand">
+        <span class="side-logo">V</span>
+        <span class="side-name">Via</span>
+      </div>
+      <nav class="side-nav">
+        <a
+          v-for="section in navSections"
+          :key="section.id"
+          class="side-link"
+          :class="{ active: activeSection === section.id }"
+          :href="`#${section.id}`"
+          @click.prevent="navigateTo(section.id)"
+        >{{ section.label }}</a>
+      </nav>
+      <div class="side-foot">
+        <div class="side-role">{{ roleLabel }} · tcp</div>
+        <div class="side-health">
+          <span class="dot" :class="healthLevel" />
+          <span>{{ connectionLabel }}</span>
+        </div>
+      </div>
+    </aside>
+    <div class="shell">
+      <RuntimeHeader
+        :connection-label="connectionLabel"
+        :freshness-label="freshnessLabel"
+        :generated-at="controller.snapshot.value.summary.generated_at"
+        :health-level="healthLevel"
+        :health-reasons="healthReasons"
+        :locale="locale"
+        :paused="paused"
+        :refreshing="controller.refreshing.value"
+        :role="controller.snapshot.value.summary.role"
+        :title="runtimeTitle"
+        @change-locale="changeLocale"
+        @refresh="refreshNow"
+        @toggle-pause="togglePause"
+      />
+      <main class="manager-main">
+        <section id="overview" class="main-section">
+          <OverviewMetrics
+            :active-flows="controller.snapshot.value.flowTotal"
+            :rates="controller.rates.value"
+            :sessions="controller.snapshot.value.sessions"
+            :summary="controller.snapshot.value.summary"
+          />
+          <FilterBar
+            v-model:only-anomalies="onlyAnomalies"
+            v-model:query="query"
+            :anomaly-count="anomalyCount"
+            :share-url="currentViewURL"
+            :truncated="controller.snapshot.value.truncated"
+            @clear="clearFilters"
+          />
+          <ConnectionFocus
+            :sessions="visibleSessions"
+            :summary="controller.snapshot.value.summary"
+          />
+          <AggregationPanel :sessions="visibleSessions" />
+          <TrafficCharts
+            :sessions="visibleSessions"
+            :trends="visibleTrends"
+          />
+        </section>
+        <section id="sessions" class="main-section">
+          <SessionTable
+            v-model:sort="sessionSort"
+            :only-anomalies="false"
+            query=""
+            :role="controller.snapshot.value.summary.role"
+            :sessions="visibleSessions"
+            :total="controller.snapshot.value.sessionTotal"
+            @filter="filterBy"
+          />
+          <InterfaceList
+            :filtered="Boolean(normalizedQuery) || onlyAnomalies"
+            :interfaces="visibleInterfaces"
+            :sessions="visibleSessions"
+            :total="controller.snapshot.value.interfaces.length"
+            @filter="filterBy"
+          />
+        </section>
+        <section id="flows" class="main-section">
+          <FlowSection
+            v-model:active-tab="flowTab"
+            :flows="visibleFlows"
+            :flow-total="controller.snapshot.value.flowTotal"
+            :terminals="visibleTerminals"
+            :terminal-total="controller.snapshot.value.terminalTotal"
+            @filter="filterBy"
+          />
+        </section>
+        <section id="limits" class="main-section">
+          <div class="panel-grid">
+            <LimitsPanel :summary="controller.snapshot.value.summary" />
+            <RecoveryPanel
+              :flows="visibleFlows"
+              :sessions="visibleSessions"
+              :terminals="visibleTerminals"
+            />
+          </div>
+        </section>
+      </main>
+    </div>
+  </div>
 </template>

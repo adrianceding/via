@@ -28,33 +28,28 @@ const generatedLabel = computed(() => {
 </script>
 
 <template>
-  <header class="runtime-header">
-    <div>
-      <p class="product-name">VIA</p>
-      <h1>{{ title }}</h1>
-    </div>
-    <div class="runtime-actions">
-        <div class="connection-state" :aria-label="`${connectionLabel}，${freshnessLabel}`" aria-live="polite">
-      <span class="health-dot" :class="healthLevel" aria-hidden="true" />
-      <div>
+  <header class="topbar">
+    <div class="topbar-title">{{ t('app.controlTitle') }}</div>
+    <div class="topbar-meta">
+      <span class="chip" :class="healthLevel">
+        <span class="dot" :class="healthLevel" aria-hidden="true" />
         <strong :title="healthReasons.join('; ')">{{ connectionLabel }}</strong>
         <time :datetime="generatedAt" :title="generatedLabel">{{ freshnessLabel }}</time>
-      </div>
-      </div>
+      </span>
       <label class="locale-control" :title="t('locale.label')">
-        <Languages :size="17" aria-hidden="true" />
+        <Languages :size="15" aria-hidden="true" />
         <span class="visually-hidden">{{ t('locale.label') }}</span>
         <select :value="locale" :aria-label="t('locale.label')" @change="$emit('change-locale', $event.target.value)">
           <option value="zh-CN">{{ t('locale.chinese') }}</option>
           <option value="en">{{ t('locale.english') }}</option>
         </select>
       </label>
-      <button class="header-icon-button" type="button" :disabled="refreshing" :title="t('header.refresh')" :aria-label="t('header.refresh')" @click="$emit('refresh')">
-        <RefreshCw :size="17" :class="{ spinning: refreshing }" aria-hidden="true" />
+      <button class="icon-btn" type="button" :disabled="refreshing" :title="t('header.refresh')" :aria-label="t('header.refresh')" @click="$emit('refresh')">
+        <RefreshCw :size="15" :class="{ spinning: refreshing }" aria-hidden="true" />
       </button>
-      <button class="header-icon-button" type="button" :title="paused ? t('header.resume') : t('header.pause')" :aria-label="paused ? t('header.resume') : t('header.pause')" @click="$emit('toggle-pause')">
-        <Play v-if="paused" :size="17" aria-hidden="true" />
-        <Pause v-else :size="17" aria-hidden="true" />
+      <button class="icon-btn" type="button" :title="paused ? t('header.resume') : t('header.pause')" :aria-label="paused ? t('header.resume') : t('header.pause')" @click="$emit('toggle-pause')">
+        <Play v-if="paused" :size="15" aria-hidden="true" />
+        <Pause v-else :size="15" aria-hidden="true" />
       </button>
     </div>
   </header>

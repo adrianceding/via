@@ -5,12 +5,14 @@ import (
 	"context"
 	"errors"
 	"net"
+	"net/netip"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/adrianceding/via/internal/auth"
 	"github.com/adrianceding/via/internal/protocol"
+	statusapi "github.com/adrianceding/via/internal/status"
 	"github.com/adrianceding/via/internal/transport"
 )
 
@@ -146,6 +148,67 @@ func TestWireProbeRateAndGenerationAreBounded(t *testing.T) {
 	session.probeMu.Unlock()
 	if _, ok, _ := session.startProbe(start.Add(3*probeInterval + probeTimeout + probeInterval)); ok {
 		t.Fatal("exhausted probe generation wrapped")
+	}
+}
+
+func TestWireReadCountsReceivedDataPayload(t *testing.T) {
+	repository, err := statusapi.NewRepository(statusapi.Limits{Interfaces: 1, Sessions: 1, Flows: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var statusKey [32]byte
+	statusKey[0] = 7
+	observer, err := newRuntimeStatusWithKey(repository, 1, 1, statusKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	observer.upsertSession(1, "tcp", "eth0", netip.MustParseAddr("192.0.2.1"), statusapi.SessionReady, statusapi.ReasonPathAdded)
+
+	left, right := newFramedConnectionPair()
+	session, err := newWireSession(context.Background(), 1, left)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.cancel()
+	session.status = observer
+
+	encoded, err := protocol.EncodeMessage(protocol.Data{FlowID: protocol.FlowID{1}, Offset: 0, Bytes: make([]byte, 512)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case right.outbound <- encoded:
+	default:
+		t.Fatal("could not queue encoded DATA frame")
+	}
+
+	message, err := session.read(context.Background())
+	if err != nil {
+		t.Fatalf("read() error = %v", err)
+	}
+	if _, ok := message.(protocol.Data); !ok {
+		t.Fatalf("read() message = %T, want Data", message)
+	}
+	id := observer.hasher.SessionID(1)
+	if got := observer.sessions[id].Quality.ReceivedDataPayloadBytes; got != 512 {
+		t.Fatalf("received payload = %d, want 512", got)
+	}
+
+	// 非 DATA 帧（例如 Probe）不得计入接收字节。
+	probe, err := protocol.EncodeMessage(protocol.Probe{Token: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case right.outbound <- probe:
+	default:
+		t.Fatal("could not queue encoded probe frame")
+	}
+	if _, err := session.read(context.Background()); err != nil {
+		t.Fatalf("read() probe error = %v", err)
+	}
+	if got := observer.sessions[id].Quality.ReceivedDataPayloadBytes; got != 512 {
+		t.Fatalf("probe changed received payload to %d, want 512", got)
 	}
 }
 

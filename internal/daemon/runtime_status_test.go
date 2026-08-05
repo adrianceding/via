@@ -94,6 +94,43 @@ func TestRuntimeStatusPublishesSessionRuntimeQuality(t *testing.T) {
 	}
 }
 
+func TestRuntimeStatusAccumulatesReceivedDataPayload(t *testing.T) {
+	repository, err := statusapi.NewRepository(statusapi.Limits{Interfaces: 1, Sessions: 1, Flows: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var statusKey [32]byte
+	statusKey[0] = 6
+	observer, err := newRuntimeStatusWithKey(repository, 1, 1, statusKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	observer.upsertSession(1, "tcp", "eth0", netip.MustParseAddr("192.0.2.1"), statusapi.SessionReady, statusapi.ReasonPathAdded)
+	id := observer.hasher.SessionID(1)
+
+	// 两次 DATA 接收累计到同一会话。
+	observer.observeSessionDataReceived(1, 100)
+	observer.observeSessionDataReceived(1, 250)
+	if got := observer.sessions[id].Quality.ReceivedDataPayloadBytes; got != 350 {
+		t.Fatalf("received payload = %d, want 350", got)
+	}
+
+	// 未注册的代次与零载荷必须安全忽略。
+	before := observer.sessions[id].Quality.ReceivedDataPayloadBytes
+	observer.observeSessionDataReceived(99, 100)
+	observer.observeSessionDataReceived(1, 0)
+	if got := observer.sessions[id].Quality.ReceivedDataPayloadBytes; got != before {
+		t.Fatalf("ignored observation changed payload from %d to %d", before, got)
+	}
+
+	// 会话移除后，迟到接收观察被忽略。
+	observer.removeSession(1)
+	observer.observeSessionDataReceived(1, 100)
+	if _, exists := observer.sessions[id]; exists {
+		t.Fatal("removed session was recreated by late receive observation")
+	}
+}
+
 func TestRuntimeStatusDropsLateClosedSnapshotAfterSessionRemoval(t *testing.T) {
 	repository, err := statusapi.NewRepository(statusapi.Limits{Interfaces: 1, Sessions: 1, Flows: 1})
 	if err != nil {
@@ -110,6 +147,117 @@ func TestRuntimeStatusDropsLateClosedSnapshotAfterSessionRemoval(t *testing.T) {
 	observer.observeSessionRuntime(1, sessionRuntimeSnapshot{Closed: true})
 	if _, exists := observer.runtime[1]; exists {
 		t.Fatal("late closed session snapshot was cached after removal")
+	}
+}
+
+func TestRuntimeStatusAccumulatesFlowRecoveryCountAndDuration(t *testing.T) {
+	now := time.Unix(3_000, 0).UTC()
+	repository, err := statusapi.NewRepository(statusapi.Limits{Interfaces: 1, Sessions: 1, Flows: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var statusKey [32]byte
+	statusKey[0] = 8
+	observer, err := newRuntimeStatusWithClock(repository, 1, 1, statusKey, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	flowID := protocol.FlowID{9}
+	correlationID := auth.CorrelationID{9}.String()
+	target := protocol.Target{DNSName: "target.example", Port: 443}
+	observe := func(state flow.LifecycleState, reason statusapi.TransitionReason) {
+		observer.upsertFlowObservation(flowID, target, protocol.DeliveryAdaptive, protocol.PathFastest, runtimeFlowObservation{
+			correlationID:     correlationID,
+			lifecycleState:    state,
+			adaptiveState:     policy.AdaptiveFull,
+			txAllocatedOffset: 100, txAcknowledged: 40, rxWrittenOffset: 60,
+		}, reason)
+	}
+
+	// Relaying 中不产生恢复计数。
+	observe(flow.Relaying, statusapi.ReasonStarted)
+	if got := observer.flows[flowID].entry.RecoveryCount; got != 0 {
+		t.Fatalf("initial recovery count = %d, want 0", got)
+	}
+
+	// 进入 Recovering 开始计时；恢复中重复观察不得重置起点。
+	now = now.Add(time.Second)
+	observe(flow.Recovering, statusapi.ReasonPathRemoved)
+	now = now.Add(3 * time.Second)
+	observe(flow.Recovering, statusapi.ReasonPathRemoved)
+
+	// 离开 Recovering 完成一次恢复并累计耗时 8s（3001s -> 3009s）。
+	now = now.Add(5 * time.Second)
+	observe(flow.Relaying, statusapi.ReasonPathAdded)
+	entry := observer.flows[flowID].entry
+	if entry.RecoveryCount != 1 || entry.RecoveryMicros != 8_000_000 {
+		t.Fatalf("recovery after first cycle = count %d, micros %d", entry.RecoveryCount, entry.RecoveryMicros)
+	}
+
+	// 第二次进入/离开再累计一次（3011s -> 3011.5s = 500ms）。
+	now = now.Add(2 * time.Second)
+	observe(flow.Recovering, statusapi.ReasonPathRemoved)
+	now = now.Add(500 * time.Millisecond)
+	observe(flow.Relaying, statusapi.ReasonPathAdded)
+	entry = observer.flows[flowID].entry
+	if entry.RecoveryCount != 2 || entry.RecoveryMicros != 8_500_000 {
+		t.Fatalf("recovery after second cycle = count %d, micros %d", entry.RecoveryCount, entry.RecoveryMicros)
+	}
+
+	// 终态记录携带累计恢复统计。
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- repository.Run(ctx, nil) }()
+	now = now.Add(time.Second)
+	observer.terminalFlow(flowID, statusapi.FlowClosed, statusapi.ReasonCompleted)
+	waitFor(t, time.Second, func() bool { return len(repository.Snapshot().Terminals) == 1 }, "flow terminal")
+	terminal := repository.Snapshot().Terminals[0]
+	if terminal.RecoveryCount != 2 || terminal.RecoveryMicros != 8_500_000 {
+		t.Fatalf("terminal recovery = count %d, micros %d", terminal.RecoveryCount, terminal.RecoveryMicros)
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRuntimeStatusPublishesResourceLimitsAndRejections(t *testing.T) {
+	now := time.Unix(4_000, 0).UTC()
+	repository, err := statusapi.NewRepository(statusapi.Limits{Interfaces: 1, Sessions: 1, Flows: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var statusKey [32]byte
+	statusKey[0] = 4
+	observer, err := newRuntimeStatusWithClock(repository, 1, 1, statusKey, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- repository.Run(ctx, nil) }()
+
+	observer.setResourceLimits(64, 128, 16, 8, 512)
+	observer.rejectSession()
+	observer.rejectSession()
+	observer.rejectFlow()
+	observer.rejectSOCKS()
+	observer.rejectSOCKS()
+	observer.rejectSOCKS()
+
+	waitFor(t, time.Second, func() bool {
+		snapshot := repository.Snapshot()
+		return snapshot.Resources.MaxSessions == 64 && snapshot.Rejected.Sessions == 2 &&
+			snapshot.Rejected.Flows == 1 && snapshot.Rejected.SOCKSConnections == 3
+	}, "resource limits and rejections")
+	snapshot := repository.Snapshot()
+	if snapshot.Resources.MaxFlows != 128 || snapshot.Resources.MaxSOCKSConnections != 16 ||
+		snapshot.Resources.MaxPendingTargetDials != 8 || snapshot.Resources.MaxTombstones != 512 {
+		t.Fatalf("max resources = %#v", snapshot.Resources)
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
 	}
 }
 

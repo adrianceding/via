@@ -39,13 +39,21 @@ export function createSessionTrendStore() {
           && previousWritten >= 0 && Number.isFinite(elapsedSeconds) && elapsedSeconds > 0
           && written >= previousWritten ? (written - previousWritten) / elapsedSeconds : null;
         const samples = rate == null ? [...(existing?.samples || [])] : [...(existing?.samples || []), rate].slice(-MAX_TREND_SAMPLES);
+        const received = Number(session.quality?.received_data_payload_bytes);
+        const previousReceived = existing?.lastRxWritten;
+        const rxRate = Number.isFinite(received) && received >= 0 && Number.isFinite(previousReceived)
+          && previousReceived >= 0 && Number.isFinite(elapsedSeconds) && elapsedSeconds > 0
+          && received >= previousReceived ? (received - previousReceived) / elapsedSeconds : null;
+        const rxSamples = rxRate == null ? [...(existing?.rxSamples || [])] : [...(existing?.rxSamples || []), rxRate].slice(-MAX_TREND_SAMPLES);
         trends.set(id, {
           id,
           label: session.interface || session.principal || '',
           localEndpoint: session.local_endpoint || session.local_address || '',
           remoteEndpoint: session.remote_endpoint || '',
           samples,
+          rxSamples,
           lastWritten: Number.isFinite(written) && written >= 0 ? written : null,
+          lastRxWritten: Number.isFinite(received) && received >= 0 ? received : null,
           lastAt: Number.isFinite(sampledAt) ? sampledAt : null,
         });
       });
@@ -74,7 +82,7 @@ export function createSessionTrendStore() {
     snapshot() {
       return [...trends.values()].map((trend) => ({
         id: trend.id, label: trend.label, localEndpoint: trend.localEndpoint, remoteEndpoint: trend.remoteEndpoint,
-        samples: [...trend.samples],
+        samples: [...trend.samples], rxSamples: [...(trend.rxSamples || [])],
       })).filter((trend) => trend.samples.length > 0);
     },
     aggregateSnapshot() {

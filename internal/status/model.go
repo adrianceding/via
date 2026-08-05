@@ -109,14 +109,27 @@ const (
 )
 
 type Resources struct {
-	Flows              uint64 `json:"flows"`
-	Sessions           uint64 `json:"sessions"`
-	SOCKSConnections   uint64 `json:"socks_connections"`
-	OpeningFlows       uint64 `json:"opening_flows"`
-	RecoveringFlows    uint64 `json:"recovering_flows"`
-	PendingTargetDials uint64 `json:"pending_target_dials"`
-	Tombstones         uint64 `json:"tombstones"`
-	ReservedBytes      uint64 `json:"reserved_bytes"`
+	Flows                 uint64 `json:"flows"`
+	Sessions              uint64 `json:"sessions"`
+	SOCKSConnections      uint64 `json:"socks_connections"`
+	OpeningFlows          uint64 `json:"opening_flows"`
+	RecoveringFlows       uint64 `json:"recovering_flows"`
+	PendingTargetDials    uint64 `json:"pending_target_dials"`
+	Tombstones            uint64 `json:"tombstones"`
+	ReservedBytes         uint64 `json:"reserved_bytes"`
+	MaxSessions           uint64 `json:"max_sessions,omitempty"`
+	MaxFlows              uint64 `json:"max_flows,omitempty"`
+	MaxSOCKSConnections   uint64 `json:"max_socks_connections,omitempty"`
+	MaxPendingTargetDials uint64 `json:"max_pending_target_dials,omitempty"`
+	MaxTombstones         uint64 `json:"max_tombstones,omitempty"`
+}
+
+// Rejected counts admission denials since daemon start. Each counter
+// saturates and is reset only on process restart.
+type Rejected struct {
+	Flows            uint64 `json:"flows"`
+	Sessions         uint64 `json:"sessions"`
+	SOCKSConnections uint64 `json:"socks_connections"`
 }
 
 type Counters struct {
@@ -149,6 +162,7 @@ type Quality struct {
 	ScheduledDataPayloadBytes     uint64  `json:"scheduled_data_payload_bytes"`
 	WrittenDataPayloadBytes       uint64  `json:"written_data_payload_bytes"`
 	EligibleAckedDataPayloadBytes uint64  `json:"eligible_acked_data_payload_bytes"`
+	ReceivedDataPayloadBytes      uint64  `json:"received_data_payload_bytes"`
 	DataQueueFrames               uint32  `json:"data_queue_frames"`
 	ActiveDataFlows               uint32  `json:"active_data_flows"`
 	ProbeSamples                  uint64  `json:"-"`
@@ -194,17 +208,21 @@ type Flow struct {
 	RxWrittenOffset       uint64                 `json:"rx_written_offset"`
 	RetransmittedBytes    uint64                 `json:"retransmitted_bytes"`
 	RedundantBytes        uint64                 `json:"redundant_bytes"`
+	RecoveryCount         uint64                 `json:"recovery_count,omitempty"`
+	RecoveryMicros        uint64                 `json:"recovery_micros,omitempty"`
 }
 
 type Terminal struct {
-	IDHash        string                 `json:"id"`
-	FlowID        string                 `json:"flow_id,omitempty"`
-	State         FlowState              `json:"state"`
-	Reason        TransitionReason       `json:"reason"`
-	DeliveryMode  protocol.DeliveryMode  `json:"delivery_mode,omitempty"`
-	PathSelection protocol.PathSelection `json:"path_selection,omitempty"`
-	StartedAt     time.Time              `json:"started_at,omitempty"`
-	FinishedAt    time.Time              `json:"finished_at"`
+	IDHash         string                 `json:"id"`
+	FlowID         string                 `json:"flow_id,omitempty"`
+	State          FlowState              `json:"state"`
+	Reason         TransitionReason       `json:"reason"`
+	DeliveryMode   protocol.DeliveryMode  `json:"delivery_mode,omitempty"`
+	PathSelection  protocol.PathSelection `json:"path_selection,omitempty"`
+	StartedAt      time.Time              `json:"started_at,omitempty"`
+	FinishedAt     time.Time              `json:"finished_at"`
+	RecoveryCount  uint64                 `json:"recovery_count,omitempty"`
+	RecoveryMicros uint64                 `json:"recovery_micros,omitempty"`
 }
 
 type Snapshot struct {
@@ -212,6 +230,7 @@ type Snapshot struct {
 	Role        Role        `json:"role,omitempty"`
 	Healthy     bool        `json:"healthy"`
 	Resources   Resources   `json:"resources"`
+	Rejected    Rejected    `json:"rejected"`
 	Counters    Counters    `json:"counters"`
 	Interfaces  []Interface `json:"interfaces,omitempty"`
 	Sessions    []Session   `json:"sessions,omitempty"`

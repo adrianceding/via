@@ -1,4 +1,4 @@
-const REFRESH_INTERVAL_MS = 3000;
+const REFRESH_INTERVAL_MS = 1000;
 
 export function createPoller(refresh, schedule = setTimeout, cancel = clearTimeout) {
   let stopped = false;

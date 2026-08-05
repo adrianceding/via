@@ -182,6 +182,10 @@ func newServerDaemon(configuration config.Server) (*serverDaemon, error) {
 	daemon.workersCond = sync.NewCond(&daemon.workersMu)
 	daemon.openWorkersCond = sync.NewCond(&daemon.openWorkersMu)
 	daemon.openWaitersCond = sync.NewCond(&daemon.openWaitersMu)
+	statusObserver.setResourceLimits(
+		configuration.Limits.Sessions, configuration.Limits.Flows, 0,
+		configuration.Limits.TargetDials, configuration.Limits.Tombstones,
+	)
 	if configuration.Status.Enabled {
 		statusHandler, handlerErr := statusapi.NewHandler(statusRepository, statusBasicAuth(configuration.Status)...)
 		if handlerErr != nil {
@@ -289,6 +293,7 @@ func (daemon *serverDaemon) acceptLoop() error {
 		select {
 		case daemon.sessionSlots <- struct{}{}:
 		default:
+			daemon.statusObserver.rejectSession()
 			_ = connection.Close()
 			continue
 		}
@@ -331,6 +336,9 @@ func (daemon *serverDaemon) serveConnection(generation uint64, connection transp
 	}
 	source, ok := remoteAddress(connection.RemoteEndpoint())
 	if !ok || !daemon.limiter.AllowAuth(time.Now(), source) {
+		if ok {
+			daemon.statusObserver.rejectSession()
+		}
 		return
 	}
 	select {
@@ -463,6 +471,7 @@ func (daemon *serverDaemon) handleOpen(session *wireSession, request protocol.Op
 	}
 	outcome := daemon.registry.HandleOpen(session.principal, request)
 	if outcome.GenerateCapability != nil && !daemon.limiter.AllowOpen(time.Now(), session.principal) {
+		daemon.statusObserver.rejectFlow()
 		failure := daemon.registry.RejectOpen(
 			outcome.GenerateCapability.Key, outcome.GenerateCapability.Generation, protocol.OpenResourceLimit,
 		)
@@ -675,6 +684,7 @@ func (daemon *serverDaemon) completeOpenDial(request protocol.Open, action serve
 func (daemon *serverDaemon) handleJoin(session *wireSession, request protocol.Join) error {
 	_, known := daemon.registry.Lookup(servercore.FlowKey{PrincipalID: session.principal, FlowID: request.FlowID})
 	if !daemon.limiter.AllowJoin(time.Now(), session.principal, request.FlowID, known) {
+		daemon.statusObserver.rejectFlow()
 		return session.send(protocol.JoinResult{FlowID: request.FlowID, Result: protocol.JoinFailure})
 	}
 	authorization, authorized := daemon.registry.AuthorizeJoin(session.principal, request.FlowID, request.Capability)

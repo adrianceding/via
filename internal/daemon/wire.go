@@ -276,6 +276,12 @@ func (session *wireSession) read(ctx context.Context) (protocol.Message, error) 
 		session.status.frameReceived(uint64(len(encoded)))
 	}
 	_, message, err := protocol.DecodeEncodedFrame(encoded)
+	if err != nil {
+		return nil, err
+	}
+	if data, ok := message.(protocol.Data); ok && session.status != nil {
+		session.status.observeSessionDataReceived(session.generation, uint64(len(data.Bytes)))
+	}
 	return message, err
 }
 

@@ -45,6 +45,7 @@ type EventKind uint8
 const (
 	EventSetHealth EventKind = iota + 1
 	EventSetResources
+	EventSetRejected
 	EventUpsertInterface
 	EventRemoveInterface
 	EventUpsertSession
@@ -58,6 +59,7 @@ type Event struct {
 	Kind           EventKind
 	Healthy        bool
 	Resources      Resources
+	Rejected       Rejected
 	Interface      Interface
 	InterfaceIndex int
 	Session        Session
@@ -80,6 +82,7 @@ type metricCounters struct {
 type repositoryState struct {
 	healthy    bool
 	resources  Resources
+	rejected   Rejected
 	interfaces map[int]Interface
 	sessions   map[string]Session
 	flows      map[string]Flow
@@ -315,6 +318,8 @@ func (repository *Repository) apply(event Event, now time.Time) error {
 		repository.state.healthy = event.Healthy
 	case EventSetResources:
 		repository.state.resources = event.Resources
+	case EventSetRejected:
+		repository.state.rejected = event.Rejected
 	case EventUpsertInterface:
 		value, err := normalizeInterface(event.Interface)
 		if err != nil {
@@ -369,6 +374,7 @@ func (repository *Repository) publish(now time.Time) {
 		Role:        repository.role,
 		Healthy:     repository.state.healthy,
 		Resources:   repository.state.resources,
+		Rejected:    repository.state.rejected,
 		Counters:    repository.counters(),
 		Interfaces:  make([]Interface, 0, len(repository.state.interfaces)),
 		Sessions:    make([]Session, 0, len(repository.state.sessions)),
@@ -437,7 +443,7 @@ func (repository *Repository) removeTerminal(id string) {
 
 func validEvent(event Event) bool {
 	switch event.Kind {
-	case EventSetHealth, EventSetResources:
+	case EventSetHealth, EventSetResources, EventSetRejected:
 		return true
 	case EventUpsertInterface:
 		_, err := normalizeInterface(event.Interface)

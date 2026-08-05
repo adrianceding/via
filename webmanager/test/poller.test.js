@@ -17,7 +17,7 @@ test('poller schedules only after the current refresh settles', async () => {
   finishRefresh();
   await started;
   assert.equal(scheduled.length, 1);
-  assert.equal(scheduled[0][1], 3000);
+  assert.equal(scheduled[0][1], 1000);
 });
 
 test('stopped poller does not schedule another refresh', async () => {
@@ -102,6 +102,6 @@ test('resume refreshes immediately and restores one timer', async () => {
   assert.equal(refreshes, 1);
   assert.equal(poller.paused, false);
   assert.equal(scheduled.length, 1);
-  assert.equal(scheduled[0][1], 3000);
+  assert.equal(scheduled[0][1], 1000);
   poller.stop();
 });

@@ -45,6 +45,7 @@ type runtimeStatus struct {
 
 	mu          sync.Mutex
 	resources   statusapi.Resources
+	rejections  statusapi.Rejected
 	flows       map[protocol.FlowID]runtimeFlowStatus
 	flowTraffic map[protocol.FlowID]runtimeFlowTraffic
 	sessions    map[string]statusapi.Session
@@ -54,8 +55,11 @@ type runtimeStatus struct {
 }
 
 type runtimeFlowStatus struct {
-	target protocol.Target
-	entry  statusapi.Flow
+	target          protocol.Target
+	entry           statusapi.Flow
+	recoveringSince time.Time
+	recoveryCount   uint64
+	recoveryMicros  uint64
 }
 
 type runtimeFlowTraffic struct {
@@ -288,6 +292,31 @@ func (observer *runtimeStatus) upsertSessionObservation(observation runtimeSessi
 	observer.mu.Unlock()
 	observer.publishSessionUpdates(updates, id)
 	observer.repository.TryRecord(statusapi.Event{Kind: statusapi.EventUpsertSession, Session: entry})
+}
+
+// observeSessionDataReceived accumulates received DATA payload bytes per wire
+// session. It is the receiving-direction counterpart of WrittenDataPayloadBytes
+// and is observed directly from the wire read path because receiving does not
+// traverse the session runtime. The update is local to the status entry and
+// deliberately does not publish a status event or recompute fastest: the next
+// throttled runtime snapshot carries the value out, bounding event volume.
+func (observer *runtimeStatus) observeSessionDataReceived(generation uint64, payloadBytes uint64) {
+	if observer == nil || generation == 0 || payloadBytes == 0 {
+		return
+	}
+	id := observer.hasher.SessionID(generation)
+	if id == "" {
+		return
+	}
+	observer.mu.Lock()
+	entry, exists := observer.sessions[id]
+	if !exists {
+		observer.mu.Unlock()
+		return
+	}
+	entry.Quality.ReceivedDataPayloadBytes += payloadBytes
+	observer.sessions[id] = entry
+	observer.mu.Unlock()
 }
 
 func (observer *runtimeStatus) observeSessionRuntime(generation uint64, snapshot sessionRuntimeSnapshot) {
@@ -602,6 +631,21 @@ func (observer *runtimeStatus) upsertFlowObservation(flowID protocol.FlowID, tar
 	if observation.txAllocatedOffset >= observation.txAcknowledged {
 		unacknowledged = observation.txAllocatedOffset - observation.txAcknowledged
 	}
+	// Recovery accounting: entering Recovering starts the timer; leaving it
+	// completes one recovery and accumulates its duration. The counters survive
+	// further Relaying/Recovering cycles and are carried into the terminal entry.
+	recoveringSince := previous.recoveringSince
+	recoveryCount := previous.recoveryCount
+	recoveryMicros := previous.recoveryMicros
+	enteringRecovery := state == statusapi.FlowRecovering && (!exists || previous.entry.State != statusapi.FlowRecovering)
+	leavingRecovery := exists && previous.entry.State == statusapi.FlowRecovering && state != statusapi.FlowRecovering
+	if enteringRecovery {
+		recoveringSince = now
+	} else if leavingRecovery && !recoveringSince.IsZero() {
+		recoveryCount++
+		recoveryMicros += uint64(now.Sub(recoveringSince) / time.Microsecond)
+		recoveringSince = time.Time{}
+	}
 	entry := statusapi.Flow{
 		FlowID: observation.correlationID, TargetType: statusTargetType(target),
 		DeliveryMode: mode, PathSelection: selection,
@@ -612,6 +656,7 @@ func (observer *runtimeStatus) upsertFlowObservation(flowID protocol.FlowID, tar
 		PreferredConnectionID: preferredConnectionID, UnacknowledgedBytes: unacknowledged,
 		TxAllocatedOffset: observation.txAllocatedOffset, TxAcknowledged: observation.txAcknowledged,
 		RxWrittenOffset: observation.rxWrittenOffset, RetransmittedBytes: traffic.retransmitted, RedundantBytes: traffic.redundant,
+		RecoveryCount: recoveryCount, RecoveryMicros: recoveryMicros,
 	}
 	if !exists && len(observer.flows) >= observer.maxFlows {
 		observer.mu.Unlock()
@@ -648,7 +693,10 @@ func (observer *runtimeStatus) upsertFlowObservation(flowID protocol.FlowID, tar
 		observer.adjustFlowState(previous.entry.State, -1)
 		observer.adjustFlowState(state, 1)
 	}
-	observer.flows[flowID] = runtimeFlowStatus{target: target, entry: entry}
+	observer.flows[flowID] = runtimeFlowStatus{
+		target: target, entry: entry,
+		recoveringSince: recoveringSince, recoveryCount: recoveryCount, recoveryMicros: recoveryMicros,
+	}
 	if observer.resources != resourcesBefore {
 		observer.publishResourcesLocked()
 	}
@@ -680,6 +728,7 @@ func (observer *runtimeStatus) terminalFlow(flowID protocol.FlowID, state status
 		IDHash: id, FlowID: previous.entry.FlowID, State: state, Reason: reason,
 		DeliveryMode: previous.entry.DeliveryMode, PathSelection: previous.entry.PathSelection,
 		StartedAt: previous.entry.StartedAt, FinishedAt: observer.now(),
+		RecoveryCount: previous.recoveryCount, RecoveryMicros: previous.recoveryMicros,
 	}})
 }
 
@@ -710,6 +759,50 @@ func (observer *runtimeStatus) setTombstones(value uint64) {
 	observer.mu.Lock()
 	observer.resources.Tombstones = value
 	observer.publishResourcesLocked()
+	observer.mu.Unlock()
+}
+
+// setResourceLimits records the configured admission ceilings once at startup.
+// The daemon passes its effective limits after construction; later calls are
+// allowed but not expected.
+func (observer *runtimeStatus) setResourceLimits(sessions, flows, socksConnections, pendingTargetDials, tombstones uint64) {
+	if observer == nil {
+		return
+	}
+	observer.mu.Lock()
+	observer.resources.MaxSessions = sessions
+	observer.resources.MaxFlows = flows
+	observer.resources.MaxSOCKSConnections = socksConnections
+	observer.resources.MaxPendingTargetDials = pendingTargetDials
+	observer.resources.MaxTombstones = tombstones
+	observer.publishResourcesLocked()
+	observer.mu.Unlock()
+}
+
+// rejectSession, rejectFlow and rejectSOCKS saturate the matching admission
+// denial counter and publish it immediately. They are safe to call from any
+// daemon path and are not throttled: denials are rare, control-plane events.
+func (observer *runtimeStatus) rejectSession() {
+	observer.reject(1, 0, 0)
+}
+
+func (observer *runtimeStatus) rejectFlow() {
+	observer.reject(0, 1, 0)
+}
+
+func (observer *runtimeStatus) rejectSOCKS() {
+	observer.reject(0, 0, 1)
+}
+
+func (observer *runtimeStatus) reject(sessions, flows, socks uint64) {
+	if observer == nil {
+		return
+	}
+	observer.mu.Lock()
+	observer.rejections.Sessions = adjustResource(observer.rejections.Sessions, int64(sessions))
+	observer.rejections.Flows = adjustResource(observer.rejections.Flows, int64(flows))
+	observer.rejections.SOCKSConnections = adjustResource(observer.rejections.SOCKSConnections, int64(socks))
+	observer.repository.TryRecord(statusapi.Event{Kind: statusapi.EventSetRejected, Rejected: observer.rejections})
 	observer.mu.Unlock()
 }
 

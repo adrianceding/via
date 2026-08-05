@@ -13,6 +13,36 @@ function session(id, written) {
   };
 }
 
+test('trend store samples received DATA separately for downlink', () => {
+  const store = createSessionTrendStore();
+  store.update([
+    { ...session('a', 100), quality: { written_data_payload_bytes: 100, received_data_payload_bytes: 200 } },
+  ], '2026-08-01T10:00:00Z');
+  store.update([
+    { ...session('a', 150), quality: { written_data_payload_bytes: 150, received_data_payload_bytes: 260 } },
+  ], '2026-08-01T10:00:01Z');
+
+  const series = store.snapshot()[0];
+  assert.equal(series.samples[0], 50);
+  assert.equal(series.rxSamples[0], 60);
+});
+
+test('trend store ignores missing or invalid received DATA counters', () => {
+  const store = createSessionTrendStore();
+  store.update([
+    { ...session('a', 100), quality: { written_data_payload_bytes: 100, received_data_payload_bytes: 200 } },
+    { ...session('b', 100), quality: { written_data_payload_bytes: 100, received_data_payload_bytes: Number.NaN } },
+  ], '2026-08-01T10:00:00Z');
+  store.update([
+    { ...session('a', 120), quality: { written_data_payload_bytes: 120, received_data_payload_bytes: 220 } },
+    { ...session('b', 120), quality: { written_data_payload_bytes: 120, received_data_payload_bytes: Number.NaN } },
+  ], '2026-08-01T10:00:01Z');
+
+  const byID = Object.fromEntries(store.snapshot().map((series) => [series.id, series]));
+  assert.deepEqual(byID.a.rxSamples, [20]);
+  assert.deepEqual(byID.b.rxSamples, []);
+});
+
 test('trend store bounds series and samples', () => {
   const store = createSessionTrendStore();
   for (let sampleIndex = 0; sampleIndex < 140; sampleIndex += 1) {

@@ -148,6 +148,10 @@ func newClientDaemon(configuration config.Client) (*clientDaemon, error) {
 		recoveringSlots:  make(chan struct{}, int(configuration.Limits.RecoveringFlows)),
 		statusRepository: statusRepository, statusObserver: statusObserver,
 	}
+	statusObserver.setResourceLimits(
+		configuration.Limits.Sessions, configuration.Limits.Flows, configuration.Limits.SOCKSConnections,
+		0, 0,
+	)
 	if configuration.Status.Enabled {
 		handler, handlerErr := statusapi.NewHandler(statusRepository, statusBasicAuth(configuration.Status)...)
 		if handlerErr != nil {
@@ -742,6 +746,7 @@ func (daemon *clientDaemon) acceptSOCKS() error {
 		select {
 		case daemon.socksSlots <- struct{}{}:
 		default:
+			daemon.statusObserver.rejectSOCKS()
 			_ = connection.Close()
 			continue
 		}
@@ -807,10 +812,12 @@ func (daemon *clientDaemon) serveSOCKS(connection net.Conn) {
 	select {
 	case daemon.flowSlots <- struct{}{}:
 	default:
+		daemon.statusObserver.rejectFlow()
 		_ = writeSOCKSReply(connection, socks5.ReplyGeneralFailure)
 		return
 	}
 	if !daemon.acquireOpening() {
+		daemon.statusObserver.rejectFlow()
 		<-daemon.flowSlots
 		_ = writeSOCKSReply(connection, socks5.ReplyGeneralFailure)
 		return
