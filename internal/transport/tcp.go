@@ -1,7 +1,6 @@
 package transport
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -376,9 +375,12 @@ func (connection *tcpConnection) WriteFrame(ctx context.Context, request WriteRe
 	case err := <-entry.result:
 		return err
 	case <-ctx.Done():
-		return ctx.Err()
+		if connection.cancelQueuedWrite(entry) {
+			return ctx.Err()
+		}
+		return <-entry.result
 	case <-connection.done:
-		return ErrClosed
+		return <-entry.result
 	}
 }
 
@@ -433,10 +435,29 @@ func (connection *tcpConnection) enqueue(entry *writeEntry) error {
 	if !connection.fitsLocked(entry.request.Class, entry.bytes) {
 		return ErrQueueFull
 	}
-	entry.request.Encoded = bytes.Clone(entry.request.Encoded)
+	// The WriteRequest contract already forbids the caller from mutating
+	// Encoded before WriteFrame returns; the writer goroutine is the only
+	// reader between enqueue and completion, so no defensive copy is needed.
 	connection.addLocked(entry)
 	connection.signalWriter()
 	return nil
+}
+
+func (connection *tcpConnection) cancelQueuedWrite(entry *writeEntry) bool {
+	connection.queueMu.Lock()
+	defer connection.queueMu.Unlock()
+	for index, queued := range connection.queue {
+		if queued != entry {
+			continue
+		}
+		copy(connection.queue[index:], connection.queue[index+1:])
+		connection.queue[len(connection.queue)-1] = nil
+		connection.queue = connection.queue[:len(connection.queue)-1]
+		connection.queueFrames--
+		connection.queueBytes -= entry.bytes
+		return true
+	}
+	return false
 }
 
 func (connection *tcpConnection) fitsLocked(class FrameClass, size uint64) bool {
@@ -640,6 +661,12 @@ func literalTCPAddr(endpoint string, allowZeroPort bool) (*net.TCPAddr, error) {
 }
 
 func interruptOnCancel(ctx context.Context, interrupt func()) func() {
+	// Fast path: a context that can never be cancelled (Done() == nil, e.g.
+	// context.Background) never fires the interrupt, so skip the AfterFunc
+	// registration and the per-call channel allocation entirely.
+	if ctx == nil || ctx.Done() == nil {
+		return func() {}
+	}
 	done := make(chan struct{})
 	stop := context.AfterFunc(ctx, func() {
 		interrupt()

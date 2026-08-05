@@ -303,6 +303,53 @@ func TestTCPIdleReadUsesCallerCancellationNotFrameDeadline(t *testing.T) {
 	}
 }
 
+func TestTCPSelectedWriteCancellationWaitsForWriter(t *testing.T) {
+	underlying := newBlockingConn()
+	connection := newTCPConnection(underlying, DefaultTCPConfig(), testCapabilities(t), V1QueueLimits(), time.Now)
+	t.Cleanup(func() { _ = connection.Close() })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		result <- connection.WriteFrame(ctx, WriteRequest{Class: FrameControl, Encoded: []byte{1}})
+	}()
+	waitSignal(t, underlying.writeStarted)
+	cancel()
+	select {
+	case err := <-result:
+		t.Fatalf("selected write returned before writer stopped: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(underlying.releaseWrites)
+	if err := waitResult(t, result); !errors.Is(err, context.Canceled) {
+		t.Fatalf("selected cancellation error = %v", err)
+	}
+}
+
+func TestTCPQueuedWriteCancellationRemovesEntry(t *testing.T) {
+	underlying := newBlockingConn()
+	connection := newTCPConnection(underlying, DefaultTCPConfig(), testCapabilities(t), V1QueueLimits(), time.Now)
+	t.Cleanup(func() { _ = connection.Close() })
+
+	first := asyncWrite(connection, FrameControl)
+	waitSignal(t, underlying.writeStarted)
+	ctx, cancel := context.WithCancel(context.Background())
+	queued := make(chan error, 1)
+	go func() {
+		queued <- connection.WriteFrame(ctx, WriteRequest{Class: FrameControl, Encoded: []byte{2}})
+	}()
+	waitQueueFrames(t, connection, 2)
+	cancel()
+	if err := waitResult(t, queued); !errors.Is(err, context.Canceled) {
+		t.Fatalf("queued cancellation error = %v", err)
+	}
+	waitQueueFrames(t, connection, 1)
+	close(underlying.releaseWrites)
+	if err := waitResult(t, first); err != nil {
+		t.Fatalf("first write = %v", err)
+	}
+}
+
 func TestTCPOutputQueuePreservesControlReserve(t *testing.T) {
 	underlying := newBlockingConn()
 	capabilities, err := NewCapabilities(CapabilitySpec{MaxEncodedFrame: 1, Reliable: true, Ordered: true})

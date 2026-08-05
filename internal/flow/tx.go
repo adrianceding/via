@@ -23,6 +23,7 @@ type TxItem struct {
 	Offset            uint64
 	FinalOffset       uint64
 	data              []byte
+	encoded           []byte
 }
 
 func (item TxItem) DataLen() int { return len(item.data) }
@@ -32,6 +33,16 @@ func (item TxItem) DataLen() int { return len(item.data) }
 func (item TxItem) AppendData(dst []byte) []byte { return append(dst, item.data...) }
 
 func (item TxItem) CopyData() []byte { return bytes.Clone(item.data) }
+
+// EncodedDataFrame returns a borrowed immutable frame when this item covers a
+// complete replay segment. Callers may retain and concurrently read the frame,
+// but must never modify it.
+func (item TxItem) EncodedDataFrame() ([]byte, bool) {
+	if item.Kind != TxItemData || len(item.encoded) == 0 {
+		return nil, false
+	}
+	return item.encoded[:len(item.encoded):len(item.encoded)], true
+}
 
 type TxAttempt struct {
 	Item       TxItem
@@ -55,6 +66,7 @@ type replaySegment struct {
 	id         uint64
 	start      uint64
 	data       []byte
+	encoded    []byte
 	generation uint64
 	current    ByteRange
 	attempts   map[AttachmentKey]attemptRecord
@@ -74,6 +86,8 @@ type finReplay struct {
 // Tx owns one flow's local sending direction. It performs no network I/O.
 type Tx struct {
 	state        TxState
+	flowID       protocol.FlowID
+	flowIDBound  bool
 	allocated    uint64
 	acknowledged uint64
 	nextItemID   uint64
@@ -103,10 +117,28 @@ func (t *Tx) AvailableWindow() uint64 {
 	return SendWindowSize - t.ReplayBytes()
 }
 
+func (t *Tx) BindFlowID(flowID protocol.FlowID) error {
+	if flowID == (protocol.FlowID{}) {
+		return ErrInvalidState
+	}
+	if t.flowIDBound {
+		if t.flowID == flowID {
+			return nil
+		}
+		return ErrInvalidState
+	}
+	if t.state != TxOpen || len(t.segments) != 0 || t.fin != nil {
+		return ErrInvalidState
+	}
+	t.flowID = flowID
+	t.flowIDBound = true
+	return nil
+}
+
 func (t *Tx) Discard() {
 	for _, segment := range t.segments {
-		clear(segment.data)
 		segment.data = nil
+		segment.encoded = nil
 		clear(segment.attempts)
 	}
 	clear(t.segments)
@@ -157,10 +189,23 @@ func (t *Tx) Append(data []byte) (TxItem, error) {
 	if err != nil {
 		return TxItem{}, err
 	}
+	var payload []byte
+	var encoded []byte
+	if t.flowIDBound {
+		encoded = make([]byte, protocol.DataFramePrefixSize+len(data))
+		copy(encoded[protocol.DataFramePrefixSize:], data)
+		if err := protocol.EncodeDataFrameInPlace(encoded, t.flowID, t.allocated); err != nil {
+			return TxItem{}, err
+		}
+		payload = encoded[protocol.DataFramePrefixSize:]
+	} else {
+		payload = bytes.Clone(data)
+	}
 	segment := &replaySegment{
 		id:         id,
 		start:      t.allocated,
-		data:       bytes.Clone(data),
+		data:       payload,
+		encoded:    encoded,
 		generation: 1,
 		current:    ByteRange{Start: t.allocated, End: end},
 		attempts:   make(map[AttachmentKey]attemptRecord),
@@ -366,13 +411,17 @@ func (t *Tx) allocateItemID() (uint64, error) {
 func (t *Tx) dataItem(segment *replaySegment, byteRange ByteRange) TxItem {
 	start := byteRange.Start - segment.start
 	end := byteRange.End - segment.start
-	return TxItem{
+	item := TxItem{
 		Kind:              TxItemData,
 		ItemID:            segment.id,
 		AttemptGeneration: segment.generation,
 		Offset:            byteRange.Start,
 		data:              segment.data[start:end:end],
 	}
+	if byteRange.Start == segment.start && byteRange.End == segment.end() && len(segment.encoded) != 0 {
+		item.encoded = segment.encoded
+	}
+	return item
 }
 
 func (t *Tx) finItem() TxItem {
@@ -444,6 +493,7 @@ func (t *Tx) releasePrefix(nextOffset uint64) {
 	segment := t.segments[0]
 	trim := nextOffset - segment.start
 	segment.data = segment.data[trim:len(segment.data):len(segment.data)]
+	segment.encoded = nil
 	segment.start = nextOffset
 	segment.current = ByteRange{}
 }

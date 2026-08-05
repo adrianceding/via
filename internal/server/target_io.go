@@ -24,6 +24,7 @@ type TargetIOExecutor struct {
 	connection net.Conn
 	closeOnce  sync.Once
 	closeErr   error
+	readBuffer []byte
 }
 
 func NewTargetIOExecutor(connection net.Conn) (*TargetIOExecutor, error) {
@@ -46,7 +47,10 @@ func (executor *TargetIOExecutor) Execute(action RelayAction) (event RelayEvent,
 		if action.MaxBytes < 1 || action.MaxBytes > MaxTargetReadBytes {
 			return RelayEvent{}, false, ErrInvalidTargetIOAction
 		}
-		buffer := make([]byte, action.MaxBytes)
+		if cap(executor.readBuffer) < action.MaxBytes {
+			executor.readBuffer = make([]byte, action.MaxBytes)
+		}
+		buffer := executor.readBuffer[:action.MaxBytes]
 		n, readErr := executor.connection.Read(buffer)
 		if n < 0 || n > len(buffer) {
 			return RelayEvent{

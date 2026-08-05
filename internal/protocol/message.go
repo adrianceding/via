@@ -10,6 +10,7 @@ import (
 const (
 	MaxPrincipalIDLength      = 64
 	MaxDataLength             = MaxPayloadSize - 16 - 8
+	DataFramePrefixSize       = HeaderSize + 16 + 8
 	MaxACKRanges              = 16
 	DeliveryConstraintsSize   = 17
 	MinimumDeliveryConstraint = 10 * time.Millisecond
@@ -229,11 +230,28 @@ func EncodeData[T DataSource](flowID FlowID, offset uint64, source T) ([]byte, e
 	if dataLength < 1 || dataLength > MaxDataLength {
 		return nil, invalidPayload(TypeData, "data length")
 	}
+	encoded := make([]byte, DataFramePrefixSize, DataFramePrefixSize+dataLength)
+	encoded = source.AppendData(encoded)
+	if len(encoded) != DataFramePrefixSize+dataLength {
+		return nil, invalidPayload(TypeData, "data source length")
+	}
+	if err := EncodeDataFrameInPlace(encoded, flowID, offset); err != nil {
+		return nil, err
+	}
+	return encoded, nil
+}
+
+// EncodeDataFrameInPlace writes a DATA header into a complete frame whose
+// payload already begins at DataFramePrefixSize. It never modifies the payload.
+func EncodeDataFrameInPlace(encoded []byte, flowID FlowID, offset uint64) error {
+	dataLength := len(encoded) - DataFramePrefixSize
+	if dataLength < 1 || dataLength > MaxDataLength {
+		return invalidPayload(TypeData, "data length")
+	}
 	if uint64(dataLength) > math.MaxUint64-offset {
-		return nil, invalidPayload(TypeData, "offset overflow")
+		return invalidPayload(TypeData, "offset overflow")
 	}
 	payloadLength := 24 + dataLength
-	encoded := make([]byte, HeaderSize+24, HeaderSize+payloadLength)
 	encoded[0] = 'V'
 	encoded[1] = 'I'
 	encoded[2] = Version
@@ -241,11 +259,7 @@ func EncodeData[T DataSource](flowID FlowID, offset uint64, source T) ([]byte, e
 	binary.BigEndian.PutUint32(encoded[4:8], uint32(payloadLength))
 	copy(encoded[8:24], flowID[:])
 	binary.BigEndian.PutUint64(encoded[24:32], offset)
-	encoded = source.AppendData(encoded)
-	if len(encoded) != HeaderSize+payloadLength {
-		return nil, invalidPayload(TypeData, "data source length")
-	}
-	return encoded, nil
+	return nil
 }
 
 type dataBytes []byte

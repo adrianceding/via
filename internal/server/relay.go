@@ -244,6 +244,9 @@ func NewRelayWithClock(flowID protocol.FlowID, config policy.Config, machine *fl
 		len(snapshot.Lifecycle.Published) != 0 || len(snapshot.Lifecycle.Provisional) != 0 {
 		return nil, ErrInvalidRelay
 	}
+	if err := machine.BindFlowID(flowID); err != nil {
+		return nil, ErrInvalidRelay
+	}
 	return &Relay{
 		flowID:           flowID,
 		machine:          machine,
@@ -662,9 +665,13 @@ func (relay *Relay) emitAttempt(attempt flow.TxAttempt, actions *[]RelayAction) 
 	item := attempt.Item
 	switch item.Kind {
 	case flow.TxItemData:
-		encoded, err := protocol.EncodeData(relay.flowID, item.Offset, item)
-		if err != nil {
-			return err
+		encoded, ok := item.EncodedDataFrame()
+		if !ok {
+			var err error
+			encoded, err = protocol.EncodeData(relay.flowID, item.Offset, item)
+			if err != nil {
+				return err
+			}
 		}
 		relay.recordAttemptStart(item, attempt.Attachment)
 		return relay.emitEncodedData(encoded, item.DataLen(), attempt.Attachment, relayPendingSend{

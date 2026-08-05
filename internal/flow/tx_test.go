@@ -82,6 +82,95 @@ func TestTxAppendIsContiguousImmutableAndBounded(t *testing.T) {
 	}
 }
 
+func TestTxBoundFlowReusesCompleteEncodedFrame(t *testing.T) {
+	tx := NewTx()
+	flowID := protocol.FlowID{1, 2, 3}
+	if err := tx.BindFlowID(flowID); err != nil {
+		t.Fatal(err)
+	}
+	input := []byte("payload")
+	item, err := tx.Append(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, ok := item.EncodedDataFrame()
+	if !ok {
+		t.Fatal("complete DATA item has no encoded frame")
+	}
+	input[0] = 'X'
+	_, message, err := protocol.DecodeEncodedFrame(encoded)
+	data, dataOK := message.(protocol.Data)
+	if err != nil || !dataOK || data.FlowID != flowID || data.Offset != 0 || string(data.Bytes) != "payload" {
+		t.Fatalf("encoded DATA = %#v, %v", message, err)
+	}
+	retry, ok := tx.RetryDue()
+	if !ok {
+		t.Fatal("complete retry unavailable")
+	}
+	retryEncoded, ok := retry.EncodedDataFrame()
+	if !ok || &retryEncoded[0] != &encoded[0] {
+		t.Fatal("complete retry did not reuse encoded frame")
+	}
+	tx.Discard()
+	_, message, err = protocol.DecodeEncodedFrame(encoded)
+	data, dataOK = message.(protocol.Data)
+	if err != nil || !dataOK || string(data.Bytes) != "payload" {
+		t.Fatalf("discard changed escaped frame: %#v, %v", message, err)
+	}
+}
+
+func TestTxBindFlowIDIsIdempotentAndMustPrecedeData(t *testing.T) {
+	tx := NewTx()
+	flowID := protocol.FlowID{1}
+	if err := tx.BindFlowID(flowID); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.BindFlowID(flowID); err != nil {
+		t.Fatalf("same FlowID rebind: %v", err)
+	}
+	if err := tx.BindFlowID(protocol.FlowID{2}); !errors.Is(err, ErrInvalidState) {
+		t.Fatalf("different FlowID rebind error = %v", err)
+	}
+
+	unbound := NewTx()
+	if _, err := unbound.Append([]byte("data")); err != nil {
+		t.Fatal(err)
+	}
+	if err := unbound.BindFlowID(flowID); !errors.Is(err, ErrInvalidState) {
+		t.Fatalf("late FlowID bind error = %v", err)
+	}
+}
+
+func TestTxBoundFlowFallsBackAfterPartialACK(t *testing.T) {
+	tx := NewTx()
+	if err := tx.BindFlowID(protocol.FlowID{1}); err != nil {
+		t.Fatal(err)
+	}
+	item, err := tx.Append([]byte("abcd"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, ok := item.EncodedDataFrame()
+	if !ok {
+		t.Fatal("complete DATA item has no encoded frame")
+	}
+	if _, err := tx.ApplyACK(2, nil); err != nil {
+		t.Fatal(err)
+	}
+	retry, ok := tx.RetryDue()
+	if !ok || retry.Offset != 2 || string(retry.CopyData()) != "cd" {
+		t.Fatalf("partial retry = %+v, %t", retry, ok)
+	}
+	if _, ok := retry.EncodedDataFrame(); ok {
+		t.Fatal("partial retry reused complete encoded frame")
+	}
+	_, message, err := protocol.DecodeEncodedFrame(encoded)
+	data, dataOK := message.(protocol.Data)
+	if err != nil || !dataOK || data.Offset != 0 || string(data.Bytes) != "abcd" {
+		t.Fatalf("partial ACK changed escaped frame: %#v, %v", message, err)
+	}
+}
+
 func TestTxReplaySegmentLimit(t *testing.T) {
 	tx := NewTx()
 	for index := 0; index < MaxReplaySegments; index++ {

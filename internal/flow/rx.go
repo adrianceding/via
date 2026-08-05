@@ -128,9 +128,6 @@ func (r *Receiver) Discard() {
 		r.ranges[index] = receiveRange{}
 	}
 	r.ranges = nil
-	if r.pendingWrite != nil {
-		clear(r.pendingWrite.data)
-	}
 	r.pendingWrite = nil
 	r.pendingClose = 0
 	r.state = RxComplete

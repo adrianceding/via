@@ -336,6 +336,49 @@ func TestEncodeDataBuildsOneOwnedFrame(t *testing.T) {
 	}
 }
 
+func TestEncodeDataFrameInPlace(t *testing.T) {
+	flowID := FlowID{1, 2, 3}
+	payload := []byte("payload")
+	encoded := make([]byte, DataFramePrefixSize+len(payload))
+	copy(encoded[DataFramePrefixSize:], payload)
+	if err := EncodeDataFrameInPlace(encoded, flowID, 17); err != nil {
+		t.Fatal(err)
+	}
+	if encoded[3] != byte(TypeData) || binary.BigEndian.Uint32(encoded[4:8]) != uint32(24+len(payload)) ||
+		!bytes.Equal(encoded[8:24], flowID[:]) || binary.BigEndian.Uint64(encoded[24:32]) != 17 ||
+		!bytes.Equal(encoded[DataFramePrefixSize:], payload) {
+		t.Fatalf("in-place DATA frame = %x", encoded)
+	}
+	if allocations := testing.AllocsPerRun(100, func() {
+		if err := EncodeDataFrameInPlace(encoded, flowID, 17); err != nil {
+			t.Fatal(err)
+		}
+	}); allocations != 0 {
+		t.Fatalf("EncodeDataFrameInPlace allocations = %.0f, want 0", allocations)
+	}
+}
+
+func TestEncodeDataFrameInPlaceRejectsInvalidFrame(t *testing.T) {
+	for name, test := range map[string]struct {
+		encoded []byte
+		offset  uint64
+	}{
+		"missing payload": {encoded: make([]byte, DataFramePrefixSize)},
+		"too large":       {encoded: make([]byte, DataFramePrefixSize+MaxDataLength+1)},
+		"offset overflow": {encoded: make([]byte, DataFramePrefixSize+1), offset: math.MaxUint64},
+	} {
+		t.Run(name, func(t *testing.T) {
+			before := bytes.Clone(test.encoded)
+			if err := EncodeDataFrameInPlace(test.encoded, FlowID{1}, test.offset); !errors.Is(err, ErrInvalidPayload) {
+				t.Fatalf("error = %v, want invalid payload", err)
+			}
+			if !bytes.Equal(test.encoded, before) {
+				t.Fatal("invalid frame was partially modified")
+			}
+		})
+	}
+}
+
 type testDataSource struct {
 	data []byte
 }

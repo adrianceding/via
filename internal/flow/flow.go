@@ -107,6 +107,15 @@ func NewFlow() *Flow {
 	}
 }
 
+// BindFlowID associates this flow with its wire identity before local DATA is
+// accepted. Rebinding the same identity is idempotent.
+func (flow *Flow) BindFlowID(flowID protocol.FlowID) error {
+	if flow == nil {
+		return ErrInvalidState
+	}
+	return flow.tx.BindFlowID(flowID)
+}
+
 func (flow *Flow) Snapshot() FlowSnapshot {
 	if flow == nil {
 		return FlowSnapshot{Lifecycle: LifecycleSnapshot{State: Reset}, TxState: TxComplete, Rx: RxSnapshot{State: RxComplete}}

@@ -79,6 +79,19 @@ func TestReceiverCopiesInputActionsAndSnapshots(t *testing.T) {
 	}
 }
 
+func TestReceiverWriteActionSurvivesDiscard(t *testing.T) {
+	rx := NewReceiver()
+	actions, err := rx.ReceiveData(0, []byte("payload"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	write := requireAction(t, actions, RxWriteLocal)
+	rx.Discard()
+	if got := string(write.CopyData()); got != "payload" {
+		t.Fatalf("discard changed detached write action: %q", got)
+	}
+}
+
 func TestReceiverOverlapMergeConflictAndWrittenPrefixCropping(t *testing.T) {
 	rx := NewReceiver()
 	for _, data := range []struct {

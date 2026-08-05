@@ -203,9 +203,13 @@ func TestApplicationRelayRedundantApplicationReadMapsDataAndEOFToBothAttachments
 	finAttachments := messageAttachments[protocol.FIN](t, actions)
 	assertAttachmentSet(t, dataAttachments, testRelayA, testRelayB)
 	assertAttachmentSet(t, finAttachments, testRelayA, testRelayB)
+	var dataFrames [][]byte
 	for _, action := range actions {
-		if message, ok := applicationRelayActionMessage(t, action).(protocol.Data); ok && string(message.Bytes) != "reply" {
-			t.Fatalf("DATA bytes = %q", message.Bytes)
+		if message, ok := applicationRelayActionMessage(t, action).(protocol.Data); ok {
+			if string(message.Bytes) != "reply" {
+				t.Fatalf("DATA bytes = %q", message.Bytes)
+			}
+			dataFrames = append(dataFrames, action.Encoded)
 		}
 		if action.Kind == ApplicationRelayActionRead {
 			t.Fatal("read scheduled after local EOF")
@@ -216,6 +220,9 @@ func TestApplicationRelayRedundantApplicationReadMapsDataAndEOFToBothAttachments
 	}
 	if snapshot := relay.Snapshot(); snapshot.Flow.TxState != flow.TxFinPending || snapshot.Flow.TxReplayBytes != 5 {
 		t.Fatalf("snapshot after EOF = %#v", snapshot)
+	}
+	if len(dataFrames) != 2 || &dataFrames[0][0] != &dataFrames[1][0] {
+		t.Fatal("redundant DATA attempts did not share immutable encoded frame")
 	}
 }
 

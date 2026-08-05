@@ -221,10 +221,13 @@ func (runtime *sessionRuntime) admit(ctx context.Context, request transport.Writ
 		return nil, ErrWireProtocol
 	}
 	runtime.nextID++
+	// Encoded is borrowed as immutable data until completion. Complete DATA
+	// frames may be shared by concurrent attachment attempts; the worker only
+	// reads the bytes and never assumes unique ownership.
 	queued := &sessionRuntimeRequest{
 		id: runtime.nextID, ctx: ctx, class: request.Class, flowID: flowID, itemID: itemID,
 		attemptGeneration: attemptGeneration, dataPayload: dataPayload,
-		encoded: append([]byte(nil), request.Encoded...), result: make(chan error, 1),
+		encoded: request.Encoded, result: make(chan error, 1),
 		state: sessionRuntimeQueued,
 	}
 	if request.Class == transport.FrameData {
