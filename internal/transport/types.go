@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+
+	"github.com/adrianceding/via/internal/protocol"
 )
 
 const (
@@ -112,6 +114,11 @@ func (limits QueueLimits) Validate(capabilities Capabilities) error {
 		return fmt.Errorf("%w: maximum encoded frame does not fit data capacity", ErrInvalidQueueLimits)
 	}
 	return nil
+}
+
+// ValidateV1QueueLimits validates queue limits against the v1 maximum frame size.
+func ValidateV1QueueLimits(limits QueueLimits) error {
+	return limits.Validate(Capabilities{maxEncodedFrame: protocol.MaxFrameSize})
 }
 
 // FrameClass is supplied by the protocol coordinator; carrier adapters must not parse frame types themselves.

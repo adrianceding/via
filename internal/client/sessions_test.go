@@ -239,7 +239,7 @@ func TestSessionManagerValidatesLimitsCandidatesAndExhaustion(t *testing.T) {
 		withSessionConfig(valid, func(config *SessionManagerConfig) { config.DesiredSessions = MaxSessions + 1 }),
 		withSessionConfig(valid, func(config *SessionManagerConfig) { config.AuthInProgress = 3 }),
 		withSessionConfig(valid, func(config *SessionManagerConfig) { config.RemoteEndpoint = "" }),
-		withSessionConfig(valid, func(config *SessionManagerConfig) { config.QueueLimits.MaxFrames-- }),
+		withSessionConfig(valid, func(config *SessionManagerConfig) { config.QueueLimits.MaxFrames = 0 }),
 	}
 	for _, config := range invalid {
 		if _, err := NewSessionManager(config); !errors.Is(err, ErrInvalidSessionManager) {
@@ -257,6 +257,14 @@ func TestSessionManagerValidatesLimitsCandidatesAndExhaustion(t *testing.T) {
 		Kind: SessionPathsChanged, Candidates: []networkpath.Candidate{clientCandidate(1, "eth0", "192.0.2.1")},
 	})
 	if !errors.Is(err, ErrSessionGeneration) || len(actions) != 0 || manager.Snapshot().Sessions[0].State != ManagedSessionWaiting {
+		custom := valid
+		custom.QueueLimits.MaxFrames = 1024
+		custom.QueueLimits.MaxBytes = 4 << 20
+		custom.QueueLimits.ReservedControlFrames = 32
+		custom.QueueLimits.ReservedControlBytes = 32 << 10
+		if _, err := NewSessionManager(custom); err != nil {
+			t.Fatalf("custom queue limits rejected: %v", err)
+		}
 		t.Fatalf("generation exhaustion = %#v / %#v / %v", actions, manager.Snapshot(), err)
 	}
 

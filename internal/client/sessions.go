@@ -126,7 +126,7 @@ type SessionManager struct {
 func NewSessionManager(config SessionManagerConfig) (*SessionManager, error) {
 	if config.DesiredSessions < 1 || config.DesiredSessions > MaxSessions ||
 		config.AuthInProgress < 1 || config.AuthInProgress > config.DesiredSessions ||
-		config.RemoteEndpoint == "" || config.QueueLimits != transport.V1QueueLimits() {
+		config.RemoteEndpoint == "" || transport.ValidateV1QueueLimits(config.QueueLimits) != nil {
 		return nil, ErrInvalidSessionManager
 	}
 	return &SessionManager{
