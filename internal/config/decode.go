@@ -337,6 +337,7 @@ func decodeTransport(node *yaml.Node, client bool) (Transport, error) {
 	if client {
 		allowed = []string{"type", "address"}
 	}
+	allowed = append(allowed, "write_buffer_bytes", "output_queue_frames", "output_queue_bytes", "control_reserve_frames", "control_reserve_bytes")
 	fields, err := fieldsOf(node, path, allowed...)
 	if err != nil {
 		return Transport{}, err
@@ -353,6 +354,31 @@ func decodeTransport(node *yaml.Node, client bool) (Transport, error) {
 		result.Address, err = requiredStringAt(fields, "address", path+".address")
 	} else {
 		result.Listen, err = requiredStringAt(fields, "listen", path+".listen")
+	}
+	if err != nil {
+		return Transport{}, err
+	}
+	if fields["write_buffer_bytes"] != nil {
+		result.WriteBufferBytes, err = uintValue(fields["write_buffer_bytes"], path+".write_buffer_bytes")
+	}
+	if err != nil {
+		return Transport{}, err
+	}
+	for _, field := range []struct {
+		name   string
+		target *uint64
+	}{
+		{"output_queue_frames", &result.OutputQueueFrames},
+		{"output_queue_bytes", &result.OutputQueueBytes},
+		{"control_reserve_frames", &result.ControlReserveFrames},
+		{"control_reserve_bytes", &result.ControlReserveBytes},
+	} {
+		if fields[field.name] != nil {
+			*field.target, err = uintValue(fields[field.name], path+"."+field.name)
+			if err != nil {
+				return Transport{}, err
+			}
+		}
 	}
 	return result, err
 }
@@ -573,7 +599,7 @@ func decodePrincipals(node *yaml.Node) ([]Principal, error) {
 }
 
 func decodeClientLimits(node *yaml.Node, limits *ClientLimits) error {
-	fields, err := fieldsOf(node, "limits", "flows", "opening_flows", "recovering_flows", "sessions", "auth_in_progress", "socks_connections", "socks_handshakes", "socks_per_source", "memory_budget_bytes")
+	fields, err := fieldsOf(node, "limits", "flows", "opening_flows", "recovering_flows", "sessions", "auth_in_progress", "socks_connections", "socks_handshakes", "socks_per_source", "flow_send_window_bytes", "flow_receive_window_bytes", "memory_budget_bytes")
 	if err != nil {
 		return err
 	}
@@ -584,13 +610,14 @@ func decodeClientLimits(node *yaml.Node, limits *ClientLimits) error {
 		{"flows", &limits.Flows}, {"opening_flows", &limits.OpeningFlows}, {"recovering_flows", &limits.RecoveringFlows},
 		{"sessions", &limits.Sessions}, {"auth_in_progress", &limits.AuthInProgress}, {"socks_connections", &limits.SOCKSConnections},
 		{"socks_handshakes", &limits.SOCKSHandshakes}, {"socks_per_source", &limits.SOCKSPerSource},
+		{"flow_send_window_bytes", &limits.FlowSendWindowBytes}, {"flow_receive_window_bytes", &limits.FlowReceiveWindowBytes},
 		{"memory_budget_bytes", &limits.MemoryBudgetBytes},
 	}
 	return decodeUintFields(fields, "limits", values)
 }
 
 func decodeServerLimits(node *yaml.Node, limits *ServerLimits) error {
-	fields, err := fieldsOf(node, "limits", "flows", "per_principal_flows", "opening_flows", "recovering_flows", "sessions", "sessions_per_principal", "auth_in_progress", "target_dials", "tombstones", "tombstones_per_principal", "rate_limit_keys", "memory_budget_bytes")
+	fields, err := fieldsOf(node, "limits", "flows", "per_principal_flows", "opening_flows", "recovering_flows", "sessions", "sessions_per_principal", "auth_in_progress", "target_dials", "tombstones", "tombstones_per_principal", "rate_limit_keys", "flow_send_window_bytes", "flow_receive_window_bytes", "memory_budget_bytes")
 	if err != nil {
 		return err
 	}
@@ -602,6 +629,7 @@ func decodeServerLimits(node *yaml.Node, limits *ServerLimits) error {
 		{"recovering_flows", &limits.RecoveringFlows}, {"sessions", &limits.Sessions}, {"sessions_per_principal", &limits.SessionsPerPrincipal},
 		{"auth_in_progress", &limits.AuthInProgress}, {"target_dials", &limits.TargetDials}, {"tombstones", &limits.Tombstones},
 		{"tombstones_per_principal", &limits.TombstonesPerPrincipal}, {"rate_limit_keys", &limits.RateLimitKeys},
+		{"flow_send_window_bytes", &limits.FlowSendWindowBytes}, {"flow_receive_window_bytes", &limits.FlowReceiveWindowBytes},
 		{"memory_budget_bytes", &limits.MemoryBudgetBytes},
 	}
 	return decodeUintFields(fields, "limits", values)

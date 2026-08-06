@@ -3,6 +3,8 @@ package flow
 import (
 	"bytes"
 	"math"
+
+	"github.com/adrianceding/via/internal/protocol"
 )
 
 type RxActionKind uint8
@@ -88,10 +90,18 @@ type Receiver struct {
 	pendingWrite   *pendingRxWrite
 	pendingClose   uint64
 	failure        error
+	window         uint64
 }
 
 func NewReceiver() *Receiver {
-	return &Receiver{state: RxOpen}
+	return NewReceiverWithWindow(ReceiveWindowSize)
+}
+
+func NewReceiverWithWindow(window uint64) *Receiver {
+	if window < protocol.MaxDataLength {
+		window = ReceiveWindowSize
+	}
+	return &Receiver{state: RxOpen, window: window}
 }
 
 func (r *Receiver) State() RxState {
@@ -192,7 +202,7 @@ func (r *Receiver) ReceiveData(offset uint64, data []byte) ([]RxAction, error) {
 		data = data[trim:]
 		offset = r.writtenOffset
 	}
-	if end > saturatingAdd(r.writtenOffset, ReceiveWindowSize) {
+	if end > saturatingAdd(r.writtenOffset, r.window) {
 		return r.fail(ErrWindowExceeded)
 	}
 	if err := r.insertRange(offset, end, data); err != nil {

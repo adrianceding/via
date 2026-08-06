@@ -27,16 +27,21 @@ type tcpWriteBufferConnection interface {
 }
 
 type TCPConfig struct {
-	FrameTotal      time.Duration
-	FrameNoProgress time.Duration
+	FrameTotal       time.Duration
+	FrameNoProgress  time.Duration
+	WriteBufferBytes int
 }
 
 func DefaultTCPConfig() TCPConfig {
-	return TCPConfig{FrameTotal: 30 * time.Second, FrameNoProgress: 5 * time.Second}
+	return TCPConfig{FrameTotal: 30 * time.Second, FrameNoProgress: 5 * time.Second, WriteBufferBytes: tcpWriteBufferBytes}
 }
 
 func (config TCPConfig) Validate() error {
-	if config.FrameTotal < 5*time.Second || config.FrameTotal > 30*time.Second ||
+	if config.WriteBufferBytes == 0 {
+		config.WriteBufferBytes = tcpWriteBufferBytes
+	}
+	if config.WriteBufferBytes < protocol.MaxFrameSize || config.WriteBufferBytes > 16<<20 ||
+		config.FrameTotal < 5*time.Second || config.FrameTotal > 30*time.Second ||
 		config.FrameNoProgress < time.Second || config.FrameNoProgress > 30*time.Second ||
 		config.FrameNoProgress > config.FrameTotal {
 		return ErrInvalidTCPConfig
@@ -50,6 +55,9 @@ type TCPFactory struct {
 }
 
 func NewTCPFactory(config TCPConfig) (*TCPFactory, error) {
+	if config.WriteBufferBytes == 0 {
+		config.WriteBufferBytes = tcpWriteBufferBytes
+	}
 	if err := config.Validate(); err != nil {
 		return nil, err
 	}
@@ -79,9 +87,6 @@ func (factory *TCPFactory) NewDialer(options DialOptions) (Dialer, error) {
 	if err := options.QueueLimits.Validate(factory.capabilities); err != nil {
 		return nil, err
 	}
-	if options.QueueLimits != V1QueueLimits() {
-		return nil, fmt.Errorf("%w: TCP requires v1 queue limits", ErrInvalidQueueLimits)
-	}
 	if _, _, err := splitEndpoint(options.RemoteEndpoint, false); err != nil {
 		return nil, fmt.Errorf("%w: invalid remote endpoint", ErrInvalidTCPConfig)
 	}
@@ -108,9 +113,6 @@ func (factory *TCPFactory) NewListener(options ListenOptions) (Listener, error) 
 	}
 	if err := options.QueueLimits.Validate(factory.capabilities); err != nil {
 		return nil, err
-	}
-	if options.QueueLimits != V1QueueLimits() {
-		return nil, fmt.Errorf("%w: TCP requires v1 queue limits", ErrInvalidQueueLimits)
 	}
 	local, err := literalTCPAddr(options.LocalEndpoint, false)
 	if err != nil {
@@ -143,7 +145,7 @@ func (dialer *tcpDialer) Dial(ctx context.Context) (Connection, error) {
 		_ = connection.Close()
 		return nil, ErrInvalidTCPConfig
 	}
-	if err := configureTCPWriteBuffer(tcpConnection); err != nil {
+	if err := configureTCPWriteBuffer(tcpConnection, dialer.factory.config.WriteBufferBytes); err != nil {
 		return nil, err
 	}
 	return newTCPConnection(connection, dialer.factory.config, dialer.factory.capabilities, dialer.limits, time.Now), nil
@@ -176,14 +178,18 @@ func (listener *tcpListener) Accept(ctx context.Context) (Connection, error) {
 		}
 		return nil, err
 	}
-	if err := configureTCPWriteBuffer(connection); err != nil {
+	if err := configureTCPWriteBuffer(connection, listener.factory.config.WriteBufferBytes); err != nil {
 		return nil, err
 	}
 	return newTCPConnection(connection, listener.factory.config, listener.factory.capabilities, listener.limits, time.Now), nil
 }
 
-func configureTCPWriteBuffer(connection tcpWriteBufferConnection) error {
-	if err := connection.SetWriteBuffer(tcpWriteBufferBytes); err != nil {
+func configureTCPWriteBuffer(connection tcpWriteBufferConnection, sizes ...int) error {
+	size := tcpWriteBufferBytes
+	if len(sizes) != 0 {
+		size = sizes[0]
+	}
+	if err := connection.SetWriteBuffer(size); err != nil {
 		_ = connection.Close()
 		return err
 	}

@@ -94,10 +94,18 @@ type Tx struct {
 	segments     []*replaySegment
 	selective    []ByteRange
 	fin          *finReplay
+	window       uint64
 }
 
 func NewTx() *Tx {
-	return &Tx{state: TxOpen}
+	return NewTxWithWindow(SendWindowSize)
+}
+
+func NewTxWithWindow(window uint64) *Tx {
+	if window < protocol.MaxDataLength {
+		window = SendWindowSize
+	}
+	return &Tx{state: TxOpen, window: window}
 }
 
 func (t *Tx) State() TxState { return t.state }
@@ -114,7 +122,7 @@ func (t *Tx) AvailableWindow() uint64 {
 	if t.state != TxOpen || len(t.segments) >= MaxReplaySegments {
 		return 0
 	}
-	return SendWindowSize - t.ReplayBytes()
+	return t.window - t.ReplayBytes()
 }
 
 func (t *Tx) BindFlowID(flowID protocol.FlowID) error {
@@ -179,7 +187,7 @@ func (t *Tx) Append(data []byte) (TxItem, error) {
 	if err != nil {
 		return TxItem{}, err
 	}
-	if end-t.acknowledged > SendWindowSize {
+	if end-t.acknowledged > t.window {
 		return TxItem{}, ErrWindowExceeded
 	}
 	if len(t.segments) >= MaxReplaySegments {

@@ -14,14 +14,17 @@ const (
 
 	DefaultClientRequiredBytes uint64 = 3_911_357_440
 	DefaultServerRequiredBytes uint64 = 20_244_763_648
+	perFlowFixedBytes                 = PerFlowBytes - 2*DefaultFlowWindowBytes
+	perSessionFixedBytes              = PerSessionBytes - DefaultOutputQueueBytes
 )
 
 var ErrBudget = errors.New("config: memory budget")
 
-func ClientRequiredBytes(limits ClientLimits) (uint64, error) {
+func ClientRequiredBytes(limits ClientLimits, transports ...Transport) (uint64, error) {
+	perSession := sessionBudgetBytes(transports...)
 	terms := []budgetTerm{
-		{limits.Flows, PerFlowBytes},
-		{limits.Sessions, PerSessionBytes},
+		{limits.Flows, flowBudgetBytes(limits)},
+		{limits.Sessions, perSession},
 		{limits.AuthInProgress, 4096},
 		{1, 1024},
 		{limits.SOCKSConnections, 1024},
@@ -31,10 +34,11 @@ func ClientRequiredBytes(limits ClientLimits) (uint64, error) {
 	return sumBudget(terms)
 }
 
-func ServerRequiredBytes(limits ServerLimits, principals uint64) (uint64, error) {
+func ServerRequiredBytes(limits ServerLimits, principals uint64, transports ...Transport) (uint64, error) {
+	perSession := sessionBudgetBytes(transports...)
 	terms := []budgetTerm{
-		{limits.Flows, PerFlowBytes},
-		{limits.Sessions, PerSessionBytes},
+		{limits.Flows, flowBudgetBytes(limits)},
+		{limits.Sessions, perSession},
 		{limits.AuthInProgress, 4096},
 		{principals, 1024},
 		{limits.Tombstones, 512},
@@ -44,6 +48,21 @@ func ServerRequiredBytes(limits ServerLimits, principals uint64) (uint64, error)
 		{1, ServerGlobalBytes},
 	}
 	return sumBudget(terms)
+}
+
+func sessionBudgetBytes(transports ...Transport) uint64 {
+	queueBytes := DefaultOutputQueueBytes
+	if len(transports) != 0 && transports[0].OutputQueueBytes != 0 {
+		queueBytes = transports[0].OutputQueueBytes
+	}
+	return perSessionFixedBytes + queueBytes
+}
+
+func flowBudgetBytes(limits interface {
+	flowWindows() (uint64, uint64)
+}) uint64 {
+	send, receive := limits.flowWindows()
+	return perFlowFixedBytes + send + receive
 }
 
 type budgetTerm struct {

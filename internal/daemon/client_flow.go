@@ -103,7 +103,7 @@ func newClientFlow(host *clientDaemon, connection net.Conn, target protocol.Targ
 	if err != nil {
 		return nil, err
 	}
-	application, err := clientcore.NewApplicationIOExecutor(connection)
+	application, err := clientcore.NewApplicationIOExecutorWithLimit(connection, int(host.configuration.Limits.FlowReceiveWindowBytes))
 	if err != nil {
 		return nil, err
 	}
@@ -389,7 +389,7 @@ func (instance *clientFlow) initializeRelay(flowID protocol.FlowID) bool {
 	if flowID == (protocol.FlowID{}) {
 		return false
 	}
-	machine := flow.NewFlow()
+	machine := flow.NewFlowWithWindows(instance.host.configuration.Limits.FlowSendWindowBytes, instance.host.configuration.Limits.FlowReceiveWindowBytes)
 	relay, err := clientcore.NewApplicationRelay(flowID, policy.Config{
 		Mode: instance.host.configuration.Delivery.Mode, Selection: instance.host.configuration.Delivery.Selection,
 		Constraints: instance.host.configuration.Delivery.Constraints,

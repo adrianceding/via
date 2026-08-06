@@ -8,18 +8,39 @@ import (
 )
 
 const (
-	MaxConfigBytes    = 1 << 20
-	MaxPrincipals     = 4096
-	MaxClientSessions = 64
-	MaxMemoryBudget   = uint64(1<<63 - 1)
+	MaxConfigBytes                     = 1 << 20
+	MaxPrincipals                      = 4096
+	MaxClientSessions                  = 64
+	MaxMemoryBudget                    = uint64(1<<63 - 1)
+	DefaultFlowWindowBytes      uint64 = 320 << 10
+	MinimumFlowWindowBytes      uint64 = 65512
+	MaximumFlowWindowBytes      uint64 = 4 << 20
+	DefaultTCPWriteBufferBytes  uint64 = 128 << 10
+	MinimumTCPWriteBufferBytes  uint64 = 65512
+	MaximumTCPWriteBufferBytes  uint64 = 16 << 20
+	DefaultOutputQueueFrames    uint64 = 256
+	MinimumOutputQueueFrames    uint64 = 32
+	MaximumOutputQueueFrames    uint64 = 4096
+	DefaultOutputQueueBytes     uint64 = 1 << 20
+	MinimumOutputQueueBytes     uint64 = 1 << 20
+	MaximumOutputQueueBytes     uint64 = 16 << 20
+	DefaultControlReserveFrames uint64 = 16
+	MaximumControlReserveFrames uint64 = 1024
+	DefaultControlReserveBytes  uint64 = 16 << 10
+	MaximumControlReserveBytes  uint64 = 1 << 20
 )
 
 type PSK [32]byte
 
 type Transport struct {
-	Type    string
-	Address string
-	Listen  string
+	Type                 string
+	Address              string
+	Listen               string
+	WriteBufferBytes     uint64
+	OutputQueueFrames    uint64
+	OutputQueueBytes     uint64
+	ControlReserveFrames uint64
+	ControlReserveBytes  uint64
 }
 
 type Delivery struct {
@@ -50,15 +71,21 @@ type BasicAuth struct {
 }
 
 type ClientLimits struct {
-	Flows             uint64
-	OpeningFlows      uint64
-	RecoveringFlows   uint64
-	Sessions          uint64
-	AuthInProgress    uint64
-	SOCKSConnections  uint64
-	SOCKSHandshakes   uint64
-	SOCKSPerSource    uint64
-	MemoryBudgetBytes uint64
+	Flows                  uint64
+	OpeningFlows           uint64
+	RecoveringFlows        uint64
+	Sessions               uint64
+	AuthInProgress         uint64
+	SOCKSConnections       uint64
+	SOCKSHandshakes        uint64
+	SOCKSPerSource         uint64
+	FlowSendWindowBytes    uint64
+	FlowReceiveWindowBytes uint64
+	MemoryBudgetBytes      uint64
+}
+
+func (limits ClientLimits) flowWindows() (uint64, uint64) {
+	return limits.FlowSendWindowBytes, limits.FlowReceiveWindowBytes
 }
 
 type ServerLimits struct {
@@ -73,7 +100,13 @@ type ServerLimits struct {
 	Tombstones             uint64
 	TombstonesPerPrincipal uint64
 	RateLimitKeys          uint64
+	FlowSendWindowBytes    uint64
+	FlowReceiveWindowBytes uint64
 	MemoryBudgetBytes      uint64
+}
+
+func (limits ServerLimits) flowWindows() (uint64, uint64) {
+	return limits.FlowSendWindowBytes, limits.FlowReceiveWindowBytes
 }
 
 type Deadlines struct {
@@ -122,6 +155,7 @@ func defaultClientLimits() ClientLimits {
 		Flows: 2048, OpeningFlows: 256, RecoveringFlows: 1024,
 		Sessions: MaxClientSessions, AuthInProgress: MaxClientSessions,
 		SOCKSConnections: 2048, SOCKSHandshakes: 512, SOCKSPerSource: 2048,
+		FlowSendWindowBytes: DefaultFlowWindowBytes, FlowReceiveWindowBytes: DefaultFlowWindowBytes,
 	}
 }
 
@@ -130,6 +164,7 @@ func defaultServerLimits() ServerLimits {
 		Flows: 8192, PerPrincipalFlows: 8192, OpeningFlows: 512, RecoveringFlows: 2048,
 		Sessions: 4096, SessionsPerPrincipal: 4096, AuthInProgress: 512, TargetDials: 512,
 		Tombstones: 32768, TombstonesPerPrincipal: 32768, RateLimitKeys: 16384,
+		FlowSendWindowBytes: DefaultFlowWindowBytes, FlowReceiveWindowBytes: DefaultFlowWindowBytes,
 	}
 }
 

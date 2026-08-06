@@ -96,7 +96,7 @@ func RunServer(ctx context.Context, configuration config.Server) error {
 }
 
 func newServerDaemon(configuration config.Server) (*serverDaemon, error) {
-	transportRegistry, err := newTransportRegistry(configuration.Deadlines.FrameTotal, configuration.Deadlines.FrameNoProgress)
+	transportRegistry, err := newTransportRegistry(configuration.Deadlines.FrameTotal, configuration.Deadlines.FrameNoProgress, configuration.Transport.WriteBufferBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -108,6 +108,7 @@ func newServerDaemon(configuration config.Server) (*serverDaemon, error) {
 		Flows: int(configuration.Limits.Flows), FlowsPerPrincipal: int(configuration.Limits.PerPrincipalFlows),
 		OpeningFlows: int(configuration.Limits.OpeningFlows), TargetDials: int(configuration.Limits.TargetDials),
 		Tombstones: int(configuration.Limits.Tombstones), TombstonesPerPrincipal: int(configuration.Limits.TombstonesPerPrincipal),
+		FlowSendWindowBytes: configuration.Limits.FlowSendWindowBytes, FlowReceiveWindowBytes: configuration.Limits.FlowReceiveWindowBytes,
 	}, rand.Reader, time.Now)
 	if err != nil {
 		return nil, err
@@ -150,7 +151,10 @@ func newServerDaemon(configuration config.Server) (*serverDaemon, error) {
 		return nil, err
 	}
 	listener, err := factory.NewListener(transport.ListenOptions{
-		LocalEndpoint: configuration.Transport.Listen, QueueLimits: transport.V1QueueLimits(),
+		LocalEndpoint: configuration.Transport.Listen, QueueLimits: transport.QueueLimits{
+			MaxFrames: uint32(configuration.Transport.OutputQueueFrames), MaxBytes: configuration.Transport.OutputQueueBytes,
+			ReservedControlFrames: uint32(configuration.Transport.ControlReserveFrames), ReservedControlBytes: configuration.Transport.ControlReserveBytes,
+		},
 	})
 	if err != nil {
 		cancelDials()

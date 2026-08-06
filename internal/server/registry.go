@@ -37,6 +37,8 @@ type RegistryLimits struct {
 	TargetDials            int
 	Tombstones             int
 	TombstonesPerPrincipal int
+	FlowSendWindowBytes    uint64
+	FlowReceiveWindowBytes uint64
 }
 
 // FlowKey is the unique server registry key. The same FlowID under different principals is unrelated.
@@ -291,7 +293,7 @@ func (registry *Registry) HandleOpen(principalID string, request protocol.Open) 
 		deliveryMode:     request.DeliveryMode,
 		pathSelection:    request.PathSelection,
 		constraints:      request.Constraints,
-		owner:            flow.NewFlow(),
+		owner:            flow.NewFlowWithWindows(registry.limits.FlowSendWindowBytes, registry.limits.FlowReceiveWindowBytes),
 		actionGeneration: generation,
 		openExpiresAt:    now.Add(OpenDeadline),
 		operation:        operation,

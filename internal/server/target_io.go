@@ -21,17 +21,25 @@ type closeWriter interface {
 // executor; Relay keeps at most one action in flight per direction. Close does not
 // wait for in-flight operations and relies on net.Conn concurrent-close semantics to unblock them.
 type TargetIOExecutor struct {
-	connection net.Conn
-	closeOnce  sync.Once
-	closeErr   error
-	readBuffer []byte
+	connection    net.Conn
+	closeOnce     sync.Once
+	closeErr      error
+	readBuffer    []byte
+	maxWriteBytes int
 }
 
 func NewTargetIOExecutor(connection net.Conn) (*TargetIOExecutor, error) {
-	if connection == nil {
+	return NewTargetIOExecutorWithLimit(connection, MaxTargetWriteBytes)
+}
+
+func NewTargetIOExecutorWithLimit(connection net.Conn, maxWriteBytes int) (*TargetIOExecutor, error) {
+	if maxWriteBytes == 0 {
+		maxWriteBytes = MaxTargetWriteBytes
+	}
+	if connection == nil || maxWriteBytes < 1 {
 		return nil, ErrInvalidTargetIOAction
 	}
-	return &TargetIOExecutor{connection: connection}, nil
+	return &TargetIOExecutor{connection: connection, maxWriteBytes: maxWriteBytes}, nil
 }
 
 // Execute returns a result to feed back into Relay. hasResult=false applies only
@@ -67,7 +75,7 @@ func (executor *TargetIOExecutor) Execute(action RelayAction) (event RelayEvent,
 		}, true, nil
 
 	case RelayActionWriteTarget:
-		if action.DataLen() < 1 || action.DataLen() > MaxTargetWriteBytes {
+		if action.DataLen() < 1 || action.DataLen() > executor.maxWriteBytes {
 			return RelayEvent{}, false, ErrInvalidTargetIOAction
 		}
 		data := action.CopyData()

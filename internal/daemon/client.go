@@ -93,7 +93,7 @@ func newClientDaemon(configuration config.Client) (*clientDaemon, error) {
 	if err != nil {
 		return nil, err
 	}
-	transportRegistry, err := newTransportRegistry(configuration.Deadlines.FrameTotal, configuration.Deadlines.FrameNoProgress)
+	transportRegistry, err := newTransportRegistry(configuration.Deadlines.FrameTotal, configuration.Deadlines.FrameNoProgress, configuration.Transport.WriteBufferBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -101,9 +101,13 @@ func newClientDaemon(configuration config.Client) (*clientDaemon, error) {
 	if err != nil {
 		return nil, err
 	}
+	queueLimits := transport.QueueLimits{
+		MaxFrames: uint32(configuration.Transport.OutputQueueFrames), MaxBytes: configuration.Transport.OutputQueueBytes,
+		ReservedControlFrames: uint32(configuration.Transport.ControlReserveFrames), ReservedControlBytes: configuration.Transport.ControlReserveBytes,
+	}
 	sessionManager, err := clientcore.NewSessionManager(clientcore.SessionManagerConfig{
 		DesiredSessions: int(configuration.Limits.Sessions), AuthInProgress: int(configuration.Limits.AuthInProgress),
-		RemoteEndpoint: configuration.Transport.Address, QueueLimits: transport.V1QueueLimits(),
+		RemoteEndpoint: configuration.Transport.Address, QueueLimits: queueLimits,
 	})
 	if err != nil {
 		return nil, err

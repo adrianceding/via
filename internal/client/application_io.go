@@ -22,17 +22,25 @@ type applicationCloseWriter interface {
 // per direction. Close does not wait for in-flight operations and relies on
 // net.Conn concurrent-close semantics to unblock them.
 type ApplicationIOExecutor struct {
-	connection net.Conn
-	readBuffer []byte
-	closeOnce  sync.Once
-	closeErr   error
+	connection    net.Conn
+	readBuffer    []byte
+	maxWriteBytes int
+	closeOnce     sync.Once
+	closeErr      error
 }
 
 func NewApplicationIOExecutor(connection net.Conn) (*ApplicationIOExecutor, error) {
-	if connection == nil {
+	return NewApplicationIOExecutorWithLimit(connection, MaxApplicationWriteBytes)
+}
+
+func NewApplicationIOExecutorWithLimit(connection net.Conn, maxWriteBytes int) (*ApplicationIOExecutor, error) {
+	if maxWriteBytes == 0 {
+		maxWriteBytes = MaxApplicationWriteBytes
+	}
+	if connection == nil || maxWriteBytes < 1 {
 		return nil, ErrInvalidApplicationIOAction
 	}
-	return &ApplicationIOExecutor{connection: connection}, nil
+	return &ApplicationIOExecutor{connection: connection, maxWriteBytes: maxWriteBytes}, nil
 }
 
 // Execute returns a result to feed back into ApplicationRelay. hasResult=false
@@ -69,7 +77,7 @@ func (executor *ApplicationIOExecutor) Execute(action ApplicationRelayAction) (e
 		}, true, nil
 
 	case ApplicationRelayActionWrite:
-		if action.DataLen() < 1 || action.DataLen() > MaxApplicationWriteBytes {
+		if action.DataLen() < 1 || action.DataLen() > executor.maxWriteBytes {
 			return ApplicationRelayEvent{}, false, ErrInvalidApplicationIOAction
 		}
 		data := action.data

@@ -10,6 +10,14 @@
 transport:
   type: tcp
   listen: "0.0.0.0:38473"
+  # 可选：TCP socket 写缓冲，默认 128 KiB，范围为 65512 到 16 MiB。
+  # Optional: TCP socket write buffer; default 128 KiB, range 65512 to 16 MiB.
+  # write_buffer_bytes: 4194304
+  # Optional: per-session output queue. Defaults: 256 frames / 1 MiB / 16 control frames / 16 KiB.
+  # output_queue_frames: 512
+  # output_queue_bytes: 4194304
+  # control_reserve_frames: 32
+  # control_reserve_bytes: 32768
 
 # 生成新密钥：openssl rand -base64 32
 # Generate a new key with: openssl rand -base64 32
@@ -50,6 +58,8 @@ principals:
 #   tombstones: 0                  # 已结束数据流的短期记录总数，用于处理迟到或重复消息 / Short-lived records for closed flows, used for late or duplicate messages
 #   tombstones_per_principal: 0    # 单个客户端身份的结束记录数，不得大于 tombstones / Closed-flow records for one identity; cannot exceed tombstones
 #   rate_limit_keys: 0             # 速率限制器同时保存的客户端或数据流状态数 / Client or flow states retained by rate limiters
+#   flow_send_window_bytes: 4194304    # 每个 Flow 的发送窗口，默认 320 KiB，范围 65512 到 4 MiB / Per-flow send window; default 320 KiB, range 65512 to 4 MiB
+#   flow_receive_window_bytes: 4194304 # 每个 Flow 的接收窗口，默认 320 KiB，范围 65512 到 4 MiB / Per-flow receive window; default 320 KiB, range 65512 to 4 MiB
 #   memory_budget_bytes: 0         # 估算资源超过此字节数时拒绝启动；0 表示不检查 / Reject startup above this estimated resource size; 0 disables the check
 
 # 可选：以下均为默认值。通常无需修改。

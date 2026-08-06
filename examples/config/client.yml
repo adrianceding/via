@@ -17,6 +17,14 @@ psk: "MTIzNDU2Nzg5MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTI="
 transport:
   type: tcp
   address: "127.0.0.1:38473"
+  # 可选：TCP socket 写缓冲，默认 128 KiB，范围为 65512 到 16 MiB。
+  # Optional: TCP socket write buffer; default 128 KiB, range 65512 to 16 MiB.
+  # write_buffer_bytes: 4194304
+  # Optional: per-session output queue. Defaults: 256 frames / 1 MiB / 16 control frames / 16 KiB.
+  # output_queue_frames: 512
+  # output_queue_bytes: 4194304
+  # control_reserve_frames: 32
+  # control_reserve_bytes: 32768
 
 # 应用连接的 SOCKS5 地址。
 # SOCKS5 address used by local applications.
@@ -47,6 +55,15 @@ socks_listen: "127.0.0.1:1080"
 #     max_delivery_delay: "80ms"
 #     max_delay_gap: "30ms"
 #     constraint_fallback: fastest
+
+# 可选：每个逻辑 Flow 的收发窗口，默认均为 320 KiB，范围为 65512 到 4 MiB。
+# Optional: per-flow send/receive windows; both default to 320 KiB, range 65512 to 4 MiB.
+# 客户端发送窗口不得大于服务端接收窗口；服务端发送窗口不得大于客户端接收窗口。
+# Client send must not exceed server receive; server send must not exceed client receive.
+# limits:
+#   flow_send_window_bytes: 4194304
+#   flow_receive_window_bytes: 4194304
+#   memory_budget_bytes: 0
 
 # 可选：全量冗余发送。redundant 模式不能同时设置 path_selection 或 constraints。
 # Full redundant delivery. Redundant mode cannot be combined with path_selection or constraints.

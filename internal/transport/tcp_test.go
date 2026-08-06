@@ -46,8 +46,8 @@ func TestTCPFactoryCapabilitiesAndConfiguration(t *testing.T) {
 	}
 	wrongLimits := V1QueueLimits()
 	wrongLimits.MaxFrames--
-	if _, err := factory.NewDialer(DialOptions{RemoteEndpoint: "127.0.0.1:9443", QueueLimits: wrongLimits}); !errors.Is(err, ErrInvalidQueueLimits) {
-		t.Fatalf("non-v1 queue limits error = %v", err)
+	if _, err := factory.NewDialer(DialOptions{RemoteEndpoint: "127.0.0.1:9443", QueueLimits: wrongLimits}); err != nil {
+		t.Fatalf("custom queue limits unexpectedly rejected: %v", err)
 	}
 	if _, err := factory.NewDialer(DialOptions{
 		RemoteEndpoint: "127.0.0.1:9443",

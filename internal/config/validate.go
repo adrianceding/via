@@ -31,6 +31,15 @@ func validateClient(configuration *Client) error {
 	if configuration.Transport.Type != "tcp" {
 		return &FieldError{Path: "transport.type", Kind: ErrFieldValue}
 	}
+	if configuration.Transport.WriteBufferBytes == 0 {
+		configuration.Transport.WriteBufferBytes = DefaultTCPWriteBufferBytes
+	}
+	if configuration.Transport.WriteBufferBytes < MinimumTCPWriteBufferBytes || configuration.Transport.WriteBufferBytes > MaximumTCPWriteBufferBytes {
+		return &FieldError{Path: "transport.write_buffer_bytes", Kind: ErrFieldValue}
+	}
+	if err := normalizeAndValidateQueue(&configuration.Transport); err != nil {
+		return err
+	}
 	if configuration.Transport.Address, err = validateClientEndpoint(configuration.Transport.Address, "transport.address"); err != nil {
 		return err
 	}
@@ -50,7 +59,7 @@ func validateClient(configuration *Client) error {
 	if err := validateDeadlines(configuration.Deadlines, true); err != nil {
 		return err
 	}
-	required, err := ClientRequiredBytes(configuration.Limits)
+	required, err := ClientRequiredBytes(configuration.Limits, configuration.Transport)
 	if err != nil || configuration.Limits.MemoryBudgetBytes != 0 && required > configuration.Limits.MemoryBudgetBytes {
 		return &FieldError{Path: "limits.memory_budget_bytes", Kind: ErrBudget}
 	}
@@ -81,6 +90,15 @@ func validateServer(configuration *Server) error {
 	if configuration.Transport.Listen, err = validateLiteralEndpoint(configuration.Transport.Listen, "transport.listen"); err != nil {
 		return err
 	}
+	if configuration.Transport.WriteBufferBytes == 0 {
+		configuration.Transport.WriteBufferBytes = DefaultTCPWriteBufferBytes
+	}
+	if configuration.Transport.WriteBufferBytes < MinimumTCPWriteBufferBytes || configuration.Transport.WriteBufferBytes > MaximumTCPWriteBufferBytes {
+		return &FieldError{Path: "transport.write_buffer_bytes", Kind: ErrFieldValue}
+	}
+	if err := normalizeAndValidateQueue(&configuration.Transport); err != nil {
+		return err
+	}
 	if err := validateStatus(&configuration.Status); err != nil {
 		return err
 	}
@@ -109,11 +127,41 @@ func validateServer(configuration *Server) error {
 	if err := validateDeadlines(configuration.Deadlines, false); err != nil {
 		return err
 	}
-	required, err := ServerRequiredBytes(configuration.Limits, uint64(len(configuration.Principals)))
+	required, err := ServerRequiredBytes(configuration.Limits, uint64(len(configuration.Principals)), configuration.Transport)
 	if err != nil || configuration.Limits.MemoryBudgetBytes != 0 && required > configuration.Limits.MemoryBudgetBytes {
 		return &FieldError{Path: "limits.memory_budget_bytes", Kind: ErrBudget}
 	}
 	configuration.RequiredBytes = required
+	return nil
+}
+
+func normalizeAndValidateQueue(transport *Transport) error {
+	if transport.OutputQueueFrames == 0 {
+		transport.OutputQueueFrames = DefaultOutputQueueFrames
+	}
+	if transport.OutputQueueBytes == 0 {
+		transport.OutputQueueBytes = DefaultOutputQueueBytes
+	}
+	if transport.ControlReserveFrames == 0 {
+		transport.ControlReserveFrames = DefaultControlReserveFrames
+	}
+	if transport.ControlReserveBytes == 0 {
+		transport.ControlReserveBytes = DefaultControlReserveBytes
+	}
+	checks := []limitCheck{
+		{"output_queue_frames", transport.OutputQueueFrames, MinimumOutputQueueFrames, MaximumOutputQueueFrames},
+		{"output_queue_bytes", transport.OutputQueueBytes, MinimumOutputQueueBytes, MaximumOutputQueueBytes},
+		{"control_reserve_frames", transport.ControlReserveFrames, 1, MaximumControlReserveFrames},
+		{"control_reserve_bytes", transport.ControlReserveBytes, 1, MaximumControlReserveBytes},
+	}
+	if err := validateTransportLimitChecks(checks); err != nil {
+		return err
+	}
+	if transport.ControlReserveFrames >= transport.OutputQueueFrames ||
+		transport.ControlReserveBytes >= transport.OutputQueueBytes ||
+		transport.OutputQueueBytes-transport.ControlReserveBytes < protocol.MaxFrameSize {
+		return &FieldError{Path: "transport", Kind: ErrFieldValue}
+	}
 	return nil
 }
 
@@ -216,6 +264,8 @@ func validateClientLimits(limits ClientLimits) error {
 		{"auth_in_progress", limits.AuthInProgress, 1, MaxClientSessions}, {"socks_connections", limits.SOCKSConnections, 1, 2048},
 		{"socks_handshakes", limits.SOCKSHandshakes, 1, 512}, {"socks_per_source", limits.SOCKSPerSource, 1, 2048},
 		{"memory_budget_bytes", limits.MemoryBudgetBytes, 1, MaxMemoryBudget},
+		{"flow_send_window_bytes", limits.FlowSendWindowBytes, MinimumFlowWindowBytes, MaximumFlowWindowBytes},
+		{"flow_receive_window_bytes", limits.FlowReceiveWindowBytes, MinimumFlowWindowBytes, MaximumFlowWindowBytes},
 	}
 	if err := validateLimitChecksAllowZero(checks, "memory_budget_bytes"); err != nil {
 		return err
@@ -235,6 +285,8 @@ func validateServerLimits(limits ServerLimits) error {
 		{"auth_in_progress", limits.AuthInProgress, 1, 512}, {"target_dials", limits.TargetDials, 1, 512},
 		{"tombstones", limits.Tombstones, 1, 32768}, {"tombstones_per_principal", limits.TombstonesPerPrincipal, 1, 32768},
 		{"rate_limit_keys", limits.RateLimitKeys, 1, 16384}, {"memory_budget_bytes", limits.MemoryBudgetBytes, 1, MaxMemoryBudget},
+		{"flow_send_window_bytes", limits.FlowSendWindowBytes, MinimumFlowWindowBytes, MaximumFlowWindowBytes},
+		{"flow_receive_window_bytes", limits.FlowReceiveWindowBytes, MinimumFlowWindowBytes, MaximumFlowWindowBytes},
 	}
 	if err := validateLimitChecksAllowZero(checks, "memory_budget_bytes"); err != nil {
 		return err
@@ -248,6 +300,12 @@ func validateServerLimits(limits ServerLimits) error {
 }
 
 func normalizeClientLimits(limits *ClientLimits) {
+	if limits.FlowSendWindowBytes == 0 {
+		limits.FlowSendWindowBytes = DefaultFlowWindowBytes
+	}
+	if limits.FlowReceiveWindowBytes == 0 {
+		limits.FlowReceiveWindowBytes = DefaultFlowWindowBytes
+	}
 	if limits.Flows == 0 {
 		limits.Flows = 2048
 	}
@@ -275,6 +333,12 @@ func normalizeClientLimits(limits *ClientLimits) {
 }
 
 func normalizeServerLimits(limits *ServerLimits) {
+	if limits.FlowSendWindowBytes == 0 {
+		limits.FlowSendWindowBytes = DefaultFlowWindowBytes
+	}
+	if limits.FlowReceiveWindowBytes == 0 {
+		limits.FlowReceiveWindowBytes = DefaultFlowWindowBytes
+	}
 	if limits.Flows == 0 {
 		limits.Flows = 8192
 	}
@@ -315,6 +379,15 @@ type limitCheck struct {
 	value   uint64
 	minimum uint64
 	maximum uint64
+}
+
+func validateTransportLimitChecks(checks []limitCheck) error {
+	for _, check := range checks {
+		if check.value < check.minimum || check.value > check.maximum {
+			return &FieldError{Path: "transport." + check.name, Kind: ErrFieldValue}
+		}
+	}
+	return nil
 }
 
 func validateLimitChecks(checks []limitCheck) error {

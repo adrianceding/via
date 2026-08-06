@@ -71,7 +71,7 @@ func newServerFlow(host *serverDaemon, key servercore.FlowKey, flowID protocol.F
 	if err != nil {
 		return nil, err
 	}
-	target, err := servercore.NewTargetIOExecutor(connection)
+	target, err := servercore.NewTargetIOExecutorWithLimit(connection, int(host.configuration.Limits.FlowReceiveWindowBytes))
 	if err != nil {
 		return nil, err
 	}

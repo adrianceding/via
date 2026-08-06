@@ -100,9 +100,13 @@ type Flow struct {
 }
 
 func NewFlow() *Flow {
+	return NewFlowWithWindows(SendWindowSize, ReceiveWindowSize)
+}
+
+func NewFlowWithWindows(sendWindow, receiveWindow uint64) *Flow {
 	return &Flow{
-		tx:        NewTx(),
-		rx:        NewReceiver(),
+		tx:        NewTxWithWindow(sendWindow),
+		rx:        NewReceiverWithWindow(receiveWindow),
 		lifecycle: NewLifecycle(),
 	}
 }

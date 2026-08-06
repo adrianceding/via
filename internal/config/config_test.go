@@ -61,6 +61,61 @@ func TestDecodeClientAndServerDefaultsMatchBudgetVectors(t *testing.T) {
 	}
 }
 
+func TestDecodePerformanceLimits(t *testing.T) {
+	clientYAML := strings.Replace(minimalClientYAML(), `transport:
+  type: tcp
+  address: "127.0.0.1:9443"
+`, `transport:
+  type: tcp
+  address: "127.0.0.1:9443"
+  write_buffer_bytes: 4194304
+  output_queue_bytes: 4194304
+  control_reserve_frames: 32
+  control_reserve_bytes: 32768
+`, 1) + `limits:
+  flow_send_window_bytes: 4194304
+  flow_receive_window_bytes: 2097152
+`
+	client, err := DecodeClient([]byte(clientYAML))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.Transport.WriteBufferBytes != 4<<20 || client.Limits.FlowSendWindowBytes != 4<<20 || client.Limits.FlowReceiveWindowBytes != 2<<20 {
+		t.Fatalf("client performance limits = %#v", client)
+	}
+	if client.Transport.OutputQueueFrames != 256 || client.Transport.OutputQueueBytes != 4<<20 ||
+		client.Transport.ControlReserveFrames != 32 || client.Transport.ControlReserveBytes != 32<<10 {
+		t.Fatalf("client queue limits = %#v", client.Transport)
+	}
+
+	serverYAML := strings.Replace(minimalServerYAML(), `transport:
+  type: tcp
+  listen: "127.0.0.1:9443"
+`, `transport:
+  type: tcp
+  listen: "127.0.0.1:9443"
+  write_buffer_bytes: 2097152
+  output_queue_frames: 512
+  output_queue_bytes: 2097152
+  control_reserve_frames: 32
+  control_reserve_bytes: 32768
+`, 1) + `limits:
+  flow_send_window_bytes: 2097152
+  flow_receive_window_bytes: 4194304
+`
+	server, err := DecodeServer([]byte(serverYAML))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if server.Transport.WriteBufferBytes != 2<<20 || server.Limits.FlowSendWindowBytes != 2<<20 || server.Limits.FlowReceiveWindowBytes != 4<<20 {
+		t.Fatalf("server performance limits = %#v", server)
+	}
+	if server.Transport.OutputQueueFrames != 512 || server.Transport.OutputQueueBytes != 2<<20 ||
+		server.Transport.ControlReserveFrames != 32 || server.Transport.ControlReserveBytes != 32<<10 {
+		t.Fatalf("server queue limits = %#v", server.Transport)
+	}
+}
+
 func TestZeroLimitsMeanNoConfiguredCap(t *testing.T) {
 	clientYAML := minimalClientYAML() + `limits:
   flows: 0
@@ -522,6 +577,7 @@ func TestZeroDependentLimitsFollowExplicitParentLimits(t *testing.T) {
 		Flows: 10, OpeningFlows: 10, RecoveringFlows: 10,
 		Sessions: 2, AuthInProgress: 2,
 		SOCKSConnections: 10, SOCKSHandshakes: 10, SOCKSPerSource: 10,
+		FlowSendWindowBytes: DefaultFlowWindowBytes, FlowReceiveWindowBytes: DefaultFlowWindowBytes,
 	}
 	if client.Limits != wantClient {
 		t.Fatalf("partial client limits = %#v, want %#v", client.Limits, wantClient)
@@ -548,6 +604,7 @@ func TestZeroDependentLimitsFollowExplicitParentLimits(t *testing.T) {
 		Flows: 10, PerPrincipalFlows: 10, OpeningFlows: 10, RecoveringFlows: 10,
 		Sessions: 4, SessionsPerPrincipal: 4, AuthInProgress: 4, TargetDials: 10,
 		Tombstones: 10, TombstonesPerPrincipal: 10, RateLimitKeys: 17,
+		FlowSendWindowBytes: DefaultFlowWindowBytes, FlowReceiveWindowBytes: DefaultFlowWindowBytes,
 	}
 	if server.Limits != wantServer {
 		t.Fatalf("partial server limits = %#v, want %#v", server.Limits, wantServer)
