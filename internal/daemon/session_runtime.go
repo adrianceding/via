@@ -59,11 +59,12 @@ type sessionRuntimeSnapshot struct {
 }
 
 type sessionRuntime struct {
-	ctx        context.Context
-	cancel     context.CancelFunc
-	connection transport.Connection
-	onFailure  func(error)
-	now        func() time.Time
+	ctx         context.Context
+	cancel      context.CancelFunc
+	connection  transport.Connection
+	queueLimits transport.QueueLimits
+	onFailure   func(error)
+	now         func() time.Time
 
 	mu                sync.Mutex
 	nextID            uint64
@@ -98,12 +99,27 @@ func newSessionRuntime(ctx context.Context, connection transport.Connection, onF
 	return newSessionRuntimeWithClock(ctx, connection, onFailure, time.Now)
 }
 
+func sessionQueueLimits(connection transport.Connection) (transport.QueueLimits, error) {
+	if connection == nil {
+		return transport.QueueLimits{}, ErrWireProtocol
+	}
+	limits := connection.QueueLimits()
+	if err := limits.Validate(connection.Capabilities()); err != nil {
+		return transport.QueueLimits{}, ErrWireProtocol
+	}
+	return limits, nil
+}
+
 func newSessionRuntimeWithClock(ctx context.Context, connection transport.Connection, onFailure func(error), now func() time.Time) (*sessionRuntime, error) {
 	if ctx == nil || connection == nil {
 		return nil, ErrWireProtocol
 	}
 	if now == nil {
 		return nil, ErrWireProtocol
+	}
+	limits, err := sessionQueueLimits(connection)
+	if err != nil {
+		return nil, err
 	}
 	runtimeCtx, cancel := context.WithCancel(ctx)
 	scheduler, err := policy.NewScheduler(policy.MaxSchedulerFlows)
@@ -112,9 +128,9 @@ func newSessionRuntimeWithClock(ctx context.Context, connection transport.Connec
 		return nil, err
 	}
 	runtime := &sessionRuntime{
-		ctx: runtimeCtx, cancel: cancel, connection: connection, onFailure: onFailure, now: now,
+		ctx: runtimeCtx, cancel: cancel, connection: connection, queueLimits: limits, onFailure: onFailure, now: now,
 		quality:       policy.NewQualityWithClock(now),
-		dataScheduler: scheduler, requests: make(map[uint64]*sessionRuntimeRequest, transport.V1OutputQueueFrameLimit),
+		dataScheduler: scheduler, requests: make(map[uint64]*sessionRuntimeRequest, int(limits.MaxFrames)),
 		wake: make(chan struct{}, 1), done: make(chan struct{}), workerDone: make(chan struct{}),
 	}
 	go runtime.run()
@@ -353,12 +369,17 @@ func (runtime *sessionRuntime) setConnection(connection transport.Connection) er
 	if runtime == nil || connection == nil {
 		return ErrWireProtocol
 	}
+	limits, err := sessionQueueLimits(connection)
+	if err != nil {
+		return err
+	}
 	runtime.mu.Lock()
 	defer runtime.mu.Unlock()
 	if runtime.closed {
 		return runtime.closeErrorLocked()
 	}
 	runtime.connection = connection
+	runtime.queueLimits = limits
 	return nil
 }
 
@@ -522,7 +543,7 @@ func (runtime *sessionRuntime) close(err error) {
 		}
 		runtime.controlQueue = nil
 		runtime.dataScheduler = mustNewRuntimeScheduler()
-		runtime.requests = make(map[uint64]*sessionRuntimeRequest, transport.V1OutputQueueFrameLimit)
+		runtime.requests = make(map[uint64]*sessionRuntimeRequest, int(runtime.queueLimits.MaxFrames))
 		runtime.selected = nil
 		runtime.queuedFrames = 0
 		runtime.queuedBytes = 0
@@ -555,14 +576,15 @@ func (runtime *sessionRuntime) closeErrorLocked() error {
 }
 
 func (runtime *sessionRuntime) fitsLocked(class transport.FrameClass, encodedBytes uint64) bool {
+	limits := runtime.queueLimits
 	acceptedFrames := runtime.queuedFrames + runtime.inFlightFrames
 	acceptedBytes := runtime.queuedBytes + runtime.inFlightBytes
-	if acceptedFrames >= transport.V1OutputQueueFrameLimit || encodedBytes > transport.V1OutputQueueByteLimit-acceptedBytes {
+	if acceptedFrames >= limits.MaxFrames || acceptedBytes > limits.MaxBytes || encodedBytes > limits.MaxBytes-acceptedBytes {
 		return false
 	}
 	if class == transport.FrameData {
-		dataFrameLimit := transport.V1OutputQueueFrameLimit - transport.V1ControlReserveFrameLimit
-		dataByteLimit := transport.V1OutputQueueByteLimit - transport.V1ControlReserveByteLimit
+		dataFrameLimit := limits.MaxFrames - limits.ReservedControlFrames
+		dataByteLimit := limits.MaxBytes - limits.ReservedControlBytes
 		return acceptedFrames < dataFrameLimit && acceptedBytes <= dataByteLimit &&
 			encodedBytes <= dataByteLimit-acceptedBytes
 	}

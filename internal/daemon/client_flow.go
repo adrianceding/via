@@ -464,7 +464,7 @@ func (instance *clientFlow) handleRelay(event clientcore.ApplicationRelayEvent) 
 	actions, err := instance.relay.Handle(event)
 	err = errors.Join(refreshErr, err)
 	if err != nil {
-		log.Printf("client flow event failed: %s, %s", clientRelayEventCategory(event), clientRelayErrorCategory(err))
+		log.Printf("client flow event failed: %s, %s", clientRelayEventCategory(event), clientRelayErrorMessage(err))
 	}
 	reason := clientRelayReason(event)
 	if reason == statusapi.ReasonNone {
@@ -596,6 +596,13 @@ func clientRelayErrorCategory(err error) string {
 		return "unknown path quality attachment"
 	}
 	return "internal error"
+}
+
+func clientRelayErrorMessage(err error) string {
+	if err == nil {
+		return ""
+	}
+	return clientRelayErrorCategory(err) + ": " + err.Error()
 }
 
 func (instance *clientFlow) publishStatus(reason statusapi.TransitionReason) {

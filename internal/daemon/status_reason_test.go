@@ -117,6 +117,13 @@ func TestClientRelayDiagnosticCategoriesAreFixed(t *testing.T) {
 	}
 }
 
+func TestClientRelayErrorMessagePreservesUnderlyingError(t *testing.T) {
+	detail := errors.New("write tcp 198.18.20.1:50453: broken pipe")
+	if got, want := clientRelayErrorMessage(detail), "internal error: "+detail.Error(); got != want {
+		t.Fatalf("client error message = %q, want %q", got, want)
+	}
+}
+
 func TestServerFlowResettingPreservesOriginalTransitionReason(t *testing.T) {
 	if reason := stableServerRelayReason(flow.Resetting, statusapi.ReasonProtocolConflict); reason != statusapi.ReasonNone {
 		t.Fatalf("resetting late reason = %d", reason)

@@ -278,7 +278,8 @@ func (address clientTestAddress) Network() string { return "test" }
 func (address clientTestAddress) String() string  { return string(address) }
 
 func (*clientTestTransportConnection) Capabilities() transport.Capabilities {
-	return transport.Capabilities{}
+	capabilities, _ := transport.NewCapabilities(transport.CapabilitySpec{MaxEncodedFrame: protocol.MaxFrameSize})
+	return capabilities
 }
 func (*clientTestTransportConnection) QueueLimits() transport.QueueLimits {
 	return transport.V1QueueLimits()

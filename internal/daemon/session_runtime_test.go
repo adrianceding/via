@@ -62,6 +62,137 @@ func TestSessionRuntimeControlPriorityAndFlowRoundRobin(t *testing.T) {
 	}
 }
 
+func TestSessionRuntimeUsesConnectionQueueLimits(t *testing.T) {
+	tests := []struct {
+		name         string
+		limits       transport.QueueLimits
+		encodedBytes int
+		dataCount    int
+		controlFull  bool
+	}{
+		{
+			name: "frame limit",
+			limits: transport.QueueLimits{
+				MaxFrames: 4, MaxBytes: 1 << 20, ReservedControlFrames: 1, ReservedControlBytes: 16 << 10,
+			},
+			encodedBytes: 1024, dataCount: 3, controlFull: true,
+		},
+		{
+			name: "byte limit",
+			limits: transport.QueueLimits{
+				MaxFrames: 8, MaxBytes: 200000, ReservedControlFrames: 2, ReservedControlBytes: 10000,
+			},
+			encodedBytes: 60000, dataCount: 3,
+		},
+		{
+			name: "expanded configured queue",
+			limits: transport.QueueLimits{
+				MaxFrames: 1024, MaxBytes: 4 << 20, ReservedControlFrames: 32, ReservedControlBytes: 32 << 10,
+			},
+			encodedBytes: protocol.MaxFrameSize, dataCount: 63,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			connection := newRuntimeTestConnectionWithLimits(test.limits)
+			runtime, err := newSessionRuntime(context.Background(), connection, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer runtime.close(transport.ErrClosed)
+
+			requests := make([]*sessionRuntimeRequest, 0, test.dataCount+1)
+			first, err := runtime.admit(context.Background(), runtimeRequestDataWithSize(1, test.encodedBytes), protocol.FlowID{1}, 1, 1, uint64(test.encodedBytes))
+			if err != nil {
+				t.Fatal(err)
+			}
+			requests = append(requests, first)
+			connection.waitEntered(t)
+			for index := 1; index < test.dataCount; index++ {
+				request, err := runtime.admit(context.Background(), runtimeRequestDataWithSize(byte(index+1), test.encodedBytes), protocol.FlowID{1}, uint64(index+1), 1, uint64(test.encodedBytes))
+				if err != nil {
+					t.Fatalf("DATA admission %d: %v", index+1, err)
+				}
+				requests = append(requests, request)
+			}
+			if _, err := runtime.admit(context.Background(), runtimeRequestDataWithSize(byte(test.dataCount+1), test.encodedBytes), protocol.FlowID{1}, uint64(test.dataCount+1), 1, uint64(test.encodedBytes)); !errors.Is(err, transport.ErrQueueFull) {
+				t.Fatalf("overflow DATA error = %v, want %v", err, transport.ErrQueueFull)
+			}
+
+			control, err := runtime.admit(context.Background(), transport.WriteRequest{Class: transport.FrameControl, Encoded: []byte{protocol.HeaderSize}}, protocol.FlowID{}, 0, 0, 0)
+			if err != nil {
+				t.Fatalf("control admission after DATA budget: %v", err)
+			}
+			if test.controlFull {
+				if _, err := runtime.admit(context.Background(), transport.WriteRequest{Class: transport.FrameControl, Encoded: []byte{protocol.HeaderSize}}, protocol.FlowID{}, 0, 0, 0); !errors.Is(err, transport.ErrQueueFull) {
+					t.Fatalf("control overflow error = %v, want %v", err, transport.ErrQueueFull)
+				}
+			}
+
+			connection.release()
+			for _, request := range requests {
+				if err := runtime.wait(context.Background(), request); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := runtime.wait(context.Background(), control); err != nil {
+				t.Fatal(err)
+			}
+			if snapshot := runtime.snapshot(); snapshot.QueuedFrames != 0 || snapshot.QueuedEncodedBytes != 0 || snapshot.InFlightFrames != 0 || snapshot.InFlightEncoded != 0 {
+				t.Fatalf("drained runtime snapshot = %#v", snapshot)
+			}
+		})
+	}
+}
+
+func TestSessionRuntimeSetConnectionUpdatesQueueLimits(t *testing.T) {
+	initialLimits := transport.QueueLimits{
+		MaxFrames: 4, MaxBytes: 1 << 20, ReservedControlFrames: 1, ReservedControlBytes: 16 << 10,
+	}
+	replacementLimits := transport.QueueLimits{
+		MaxFrames: 6, MaxBytes: 1 << 20, ReservedControlFrames: 1, ReservedControlBytes: 16 << 10,
+	}
+	initialConnection := newRuntimeTestConnectionWithLimits(initialLimits)
+	replacementConnection := newRuntimeTestConnectionWithLimits(replacementLimits)
+	runtime, err := newSessionRuntime(context.Background(), initialConnection, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.close(transport.ErrClosed)
+	if err := runtime.setConnection(replacementConnection); err != nil {
+		t.Fatal(err)
+	}
+
+	requests := make([]*sessionRuntimeRequest, 0, 5)
+	for index := 0; index < 5; index++ {
+		request, err := runtime.admit(context.Background(), runtimeRequestDataWithSize(byte(index+1), 1024), protocol.FlowID{1}, uint64(index+1), 1, 1024)
+		if err != nil {
+			t.Fatalf("DATA admission %d: %v", index+1, err)
+		}
+		requests = append(requests, request)
+		if index == 0 {
+			replacementConnection.waitEntered(t)
+		}
+	}
+	if _, err := runtime.admit(context.Background(), runtimeRequestDataWithSize(6, 1024), protocol.FlowID{1}, 6, 1, 1024); !errors.Is(err, transport.ErrQueueFull) {
+		t.Fatalf("overflow DATA error = %v, want %v", err, transport.ErrQueueFull)
+	}
+
+	replacementConnection.release()
+	for _, request := range requests {
+		if err := runtime.wait(context.Background(), request); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestSessionRuntimeRejectsInvalidConnectionQueueLimits(t *testing.T) {
+	connection := newRuntimeTestConnectionWithLimits(transport.QueueLimits{})
+	if _, err := newSessionRuntime(context.Background(), connection, nil); !errors.Is(err, ErrWireProtocol) {
+		t.Fatalf("invalid queue limits error = %v, want %v", err, ErrWireProtocol)
+	}
+}
+
 func TestSessionRuntimeCancelAndCloseCompleteRequestsOnce(t *testing.T) {
 	connection := newRuntimeTestConnection()
 	runtime, err := newSessionRuntime(context.Background(), connection, nil)
@@ -336,6 +467,7 @@ func TestSessionRuntimeTerminalCloseAlwaysNotifiesObserver(t *testing.T) {
 
 type runtimeTestConnection struct {
 	mu        sync.Mutex
+	limits    transport.QueueLimits
 	writes    []transport.WriteRequest
 	entered   chan struct{}
 	releaseCh chan struct{}
@@ -343,16 +475,22 @@ type runtimeTestConnection struct {
 }
 
 func newRuntimeTestConnection() *runtimeTestConnection {
-	return &runtimeTestConnection{entered: make(chan struct{}), releaseCh: make(chan struct{})}
+	return newRuntimeTestConnectionWithLimits(transport.V1QueueLimits())
+}
+
+func newRuntimeTestConnectionWithLimits(limits transport.QueueLimits) *runtimeTestConnection {
+	return &runtimeTestConnection{limits: limits, entered: make(chan struct{}), releaseCh: make(chan struct{})}
 }
 
 func (connection *runtimeTestConnection) Capabilities() transport.Capabilities {
 	capabilities, _ := transport.NewCapabilities(transport.CapabilitySpec{MaxEncodedFrame: protocol.MaxFrameSize})
 	return capabilities
 }
-func (*runtimeTestConnection) QueueLimits() transport.QueueLimits { return transport.V1QueueLimits() }
-func (*runtimeTestConnection) LocalEndpoint() string              { return "127.0.0.1:1" }
-func (*runtimeTestConnection) RemoteEndpoint() string             { return "127.0.0.1:2" }
+func (connection *runtimeTestConnection) QueueLimits() transport.QueueLimits {
+	return connection.limits
+}
+func (*runtimeTestConnection) LocalEndpoint() string  { return "127.0.0.1:1" }
+func (*runtimeTestConnection) RemoteEndpoint() string { return "127.0.0.1:2" }
 func (*runtimeTestConnection) ReadFrame(context.Context) ([]byte, error) {
 	return nil, transport.ErrClosed
 }
@@ -389,4 +527,10 @@ func (connection *runtimeTestConnection) writesSnapshot() []transport.WriteReque
 
 func runtimeRequestData(marker byte, _ byte, payload []byte) transport.WriteRequest {
 	return transport.WriteRequest{Class: transport.FrameData, Encoded: []byte{marker, byte(len(payload))}}
+}
+
+func runtimeRequestDataWithSize(marker byte, encodedBytes int) transport.WriteRequest {
+	encoded := make([]byte, encodedBytes)
+	encoded[0] = marker
+	return transport.WriteRequest{Class: transport.FrameData, Encoded: encoded}
 }
