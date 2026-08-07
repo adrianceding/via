@@ -645,10 +645,25 @@ func resolveRelayAddress(endpoint string, timeout time.Duration) (netip.Addr, er
 	if err != nil {
 		return netip.Addr{}, err
 	}
+	return selectRelayAddress(addresses)
+}
+
+func selectRelayAddress(addresses []netip.Addr) (netip.Addr, error) {
+	var ipv6 netip.Addr
 	for _, address := range addresses {
-		if address.IsValid() && !address.IsUnspecified() && address.Zone() == "" {
-			return address.Unmap(), nil
+		address = address.Unmap()
+		if !address.IsValid() || address.IsUnspecified() || address.Zone() != "" {
+			continue
 		}
+		if address.Is4() {
+			return address, nil
+		}
+		if address.Is6() && !ipv6.IsValid() {
+			ipv6 = address
+		}
+	}
+	if ipv6.IsValid() {
+		return ipv6, nil
 	}
 	return netip.Addr{}, ErrWireProtocol
 }

@@ -200,6 +200,21 @@ func TestClientProbeTimeoutPenaltyAndRecoveryReachPublishedFlow(t *testing.T) {
 	}
 }
 
+func TestSelectRelayAddressPrefersIPv4RegardlessOfResolverOrder(t *testing.T) {
+	ipv4 := netip.MustParseAddr("149.28.139.39")
+	ipv6 := netip.MustParseAddr("2001:db8::39")
+	if got, err := selectRelayAddress([]netip.Addr{ipv6, ipv4}); err != nil || got != ipv4 {
+		t.Fatalf("selected relay address = %v, %v; want IPv4 %v", got, err, ipv4)
+	}
+}
+
+func TestSelectRelayAddressFallsBackToIPv6(t *testing.T) {
+	ipv6 := netip.MustParseAddr("2001:db8::39")
+	if got, err := selectRelayAddress([]netip.Addr{netip.IPv6Unspecified(), ipv6}); err != nil || got != ipv6 {
+		t.Fatalf("selected relay address = %v, %v; want IPv6 %v", got, err, ipv6)
+	}
+}
+
 func TestWriteSOCKSReplyArmsFreshBoundedDeadline(t *testing.T) {
 	connection := &clientTestNetConnection{}
 	before := time.Now()
