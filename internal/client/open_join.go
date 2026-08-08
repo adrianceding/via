@@ -723,10 +723,12 @@ func (coordinator *OpenJoinCoordinator) attachmentPublicationCompleted(event Ope
 
 func (coordinator *OpenJoinCoordinator) beginRedundantOpenAttempts(batch *openJoinActionBatch) {
 	count := 0
+	indices := make([]int, 0, coordinator.sessionCount)
 	for index := 0; index < coordinator.sessionCount; index++ {
 		session := &coordinator.sessions[index]
 		if session.openAttempt.Kind == OpenJoinAttemptNone && !session.openFinished {
 			count++
+			indices = append(indices, index)
 		}
 	}
 	if count == 0 {
@@ -761,7 +763,14 @@ func (coordinator *OpenJoinCoordinator) beginRedundantOpenAttempts(batch *openJo
 	} else {
 		coordinator.state = OpenJoinOpening
 	}
-	for index := 0; index < coordinator.sessionCount; index++ {
+	// The server starts reading the target as soon as the first attachment is
+	// published. Put the best currently-known session first so the initial
+	// adaptive window does not get pinned to an arbitrary slow path while the
+	// remaining sessions establish in parallel.
+	sort.SliceStable(indices, func(left, right int) bool {
+		return betterOpenJoinSession(coordinator.sessions[indices[left]], coordinator.sessions[indices[right]])
+	})
+	for _, index := range indices {
 		session := &coordinator.sessions[index]
 		if session.openAttempt.Kind != OpenJoinAttemptNone || session.openFinished {
 			continue

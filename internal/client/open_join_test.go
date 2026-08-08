@@ -116,8 +116,8 @@ func TestOpenJoinRacesFasterReconnectedSession(t *testing.T) {
 	})
 
 	_, opens := beginTestOpens(t, coordinator)
-	if got := openJoinSessionGenerations(opens); !slices.Equal(got, []uint64{1, 3}) {
-		t.Fatalf("OPEN sessions = %#v, want all ready sessions", got)
+	if got := openJoinSessionGenerations(opens); !slices.Equal(got, []uint64{3, 1}) {
+		t.Fatalf("OPEN sessions = %#v, want fastest session first", got)
 	}
 }
 
@@ -134,8 +134,8 @@ func TestOpenJoinSessionQualityDoesNotExcludeAttachmentEstablishment(t *testing.
 	})
 
 	_, opens := beginTestOpens(t, coordinator)
-	if got := openJoinSessionGenerations(opens); !slices.Equal(got, []uint64{1, 2}) {
-		t.Fatalf("OPEN sessions = %#v, want all ready sessions", got)
+	if got := openJoinSessionGenerations(opens); !slices.Equal(got, []uint64{2, 1}) {
+		t.Fatalf("OPEN sessions = %#v, want best quality session first", got)
 	}
 }
 
@@ -150,8 +150,8 @@ func TestOpenJoinRacesStalledSessionAsBoundedFallback(t *testing.T) {
 	})
 
 	_, opens := beginTestOpens(t, coordinator)
-	if got := openJoinSessionGenerations(opens); !slices.Equal(got, []uint64{1, 2}) {
-		t.Fatalf("OPEN sessions = %#v, want stalled path retained as establishment fallback", got)
+	if got := openJoinSessionGenerations(opens); !slices.Equal(got, []uint64{2, 1}) {
+		t.Fatalf("OPEN sessions = %#v, want non-stalled path first with stalled fallback", got)
 	}
 }
 
