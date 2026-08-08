@@ -176,13 +176,19 @@ type relayAttemptHistory struct {
 }
 
 type relayAttempt struct {
-	attachment       flow.AttachmentKey
-	start            uint64
-	end              uint64
-	writeSucceeded   bool
-	invalid          bool
-	writeCompletedAt time.Time
-	credited         []flow.ByteRange
+	attachment             flow.AttachmentKey
+	start                  uint64
+	end                    uint64
+	writeSucceeded         bool
+	invalid                bool
+	writeCompletedAt       time.Time
+	credited               []flow.ByteRange
+	pendingAcknowledgments []relayAcknowledgment
+}
+
+type relayAcknowledgment struct {
+	rangeValue     flow.ByteRange
+	acknowledgedAt time.Time
 }
 
 // Relay owns target-side read/write action generations and maps a single
@@ -508,7 +514,8 @@ func (relay *Relay) handleSendResult(event RelayEvent, actions *[]RelayAction) e
 	var result error
 	switch pending.kind {
 	case relayPendingAttempt:
-		relay.recordAttemptResult(pending, outcome, event.WriteCompletedAt)
+		relay.recordAttemptResult(pending, outcome, event.WriteCompletedAt, actions)
+		relay.pruneAttemptHistory(relay.machine.TxAcknowledgedOffset(), false)
 		result = relay.applyFlowEvent(flow.FlowEvent{
 			Kind: flow.FlowAttemptResult, ItemID: pending.itemID,
 			AttemptGeneration: pending.attemptGeneration,
@@ -1086,7 +1093,7 @@ func (relay *Relay) recordAttemptStart(item flow.TxItem, attachment flow.Attachm
 	history.attempts = append(history.attempts, attempt)
 }
 
-func (relay *Relay) recordAttemptResult(pending relayPendingSend, outcome flow.AttemptOutcome, completedAt time.Time) {
+func (relay *Relay) recordAttemptResult(pending relayPendingSend, outcome flow.AttemptOutcome, completedAt time.Time, actions *[]RelayAction) {
 	history := relay.attemptHistory[pending.itemID]
 	if history == nil || history.generation != pending.attemptGeneration {
 		return
@@ -1096,8 +1103,13 @@ func (relay *Relay) recordAttemptResult(pending relayPendingSend, outcome flow.A
 		if attempt.attachment != pending.attachment {
 			continue
 		}
+		if attempt.invalid {
+			attempt.pendingAcknowledgments = nil
+			return
+		}
 		if outcome != flow.AttemptSucceeded {
 			attempt.invalid = true
+			attempt.pendingAcknowledgments = nil
 			return
 		}
 		if completedAt.IsZero() {
@@ -1105,6 +1117,10 @@ func (relay *Relay) recordAttemptResult(pending relayPendingSend, outcome flow.A
 		}
 		attempt.writeSucceeded = true
 		attempt.writeCompletedAt = completedAt
+		for _, acknowledgment := range attempt.pendingAcknowledgments {
+			relay.appendDataCredit(attempt, acknowledgment, actions)
+		}
+		attempt.pendingAcknowledgments = nil
 		return
 	}
 }
@@ -1123,7 +1139,7 @@ func (relay *Relay) consumeAcknowledgedRanges(ranges []flow.ByteRange, actions *
 		history := relay.attemptHistory[itemID]
 		for index := range history.attempts {
 			attempt := &history.attempts[index]
-			if attempt.invalid || !attempt.writeSucceeded || attempt.writeCompletedAt.IsZero() {
+			if attempt.invalid {
 				continue
 			}
 			for _, acknowledged := range ranges {
@@ -1145,13 +1161,12 @@ func (relay *Relay) consumeAcknowledgedRanges(ranges []flow.ByteRange, actions *
 				}
 				credited := flow.ByteRange{Start: start, End: end}
 				attempt.credited = append(attempt.credited, credited)
-				*actions = append(*actions, RelayAction{
-					Kind:             RelayActionDataCredit,
-					Attachment:       attempt.attachment,
-					DataCreditBytes:  credited.End - credited.Start,
-					WriteCompletedAt: attempt.writeCompletedAt,
-					AcknowledgedAt:   acknowledgedAt,
-				})
+				acknowledgment := relayAcknowledgment{rangeValue: credited, acknowledgedAt: acknowledgedAt}
+				if !attempt.writeSucceeded || attempt.writeCompletedAt.IsZero() {
+					attempt.pendingAcknowledgments = append(attempt.pendingAcknowledgments, acknowledgment)
+					continue
+				}
+				relay.appendDataCredit(attempt, acknowledgment, actions)
 			}
 		}
 	}
@@ -1167,9 +1182,38 @@ func (relay *Relay) pruneAttemptHistory(acknowledged uint64, includeFIN bool) {
 			continue
 		}
 		if history.end <= acknowledged {
+			if relay.hasPendingAttempt(itemID, history.generation) {
+				continue
+			}
 			delete(relay.attemptHistory, itemID)
 		}
 	}
+}
+
+func (relay *Relay) hasPendingAttempt(itemID, generation uint64) bool {
+	for _, pending := range relay.pendingSends {
+		if pending.kind == relayPendingAttempt && pending.itemID == itemID && pending.attemptGeneration == generation {
+			return true
+		}
+	}
+	return false
+}
+
+func (relay *Relay) appendDataCredit(attempt *relayAttempt, acknowledgment relayAcknowledgment, actions *[]RelayAction) {
+	if attempt == nil || actions == nil || acknowledgment.rangeValue.Len() == 0 {
+		return
+	}
+	acknowledgedAt := acknowledgment.acknowledgedAt
+	if acknowledgedAt.Before(attempt.writeCompletedAt) {
+		acknowledgedAt = attempt.writeCompletedAt
+	}
+	*actions = append(*actions, RelayAction{
+		Kind:             RelayActionDataCredit,
+		Attachment:       attempt.attachment,
+		DataCreditBytes:  acknowledgment.rangeValue.Len(),
+		WriteCompletedAt: attempt.writeCompletedAt,
+		AcknowledgedAt:   acknowledgedAt,
+	})
 }
 
 func attemptedAttachment(attempted []flow.AttachmentKey, attachment flow.AttachmentKey) bool {

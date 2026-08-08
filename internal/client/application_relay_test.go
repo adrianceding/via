@@ -759,7 +759,7 @@ func TestApplicationRelayACKReleasesReverseReplayAndLateSendResultIsHarmless(t *
 		countRelayActions(actions, ApplicationRelayActionCancelNoProgressDeadline) != 1 {
 		t.Fatalf("ACK deadline actions = %#v", actions)
 	}
-	_, err = relay.Handle(ApplicationRelayEvent{
+	actions, err = relay.Handle(ApplicationRelayEvent{
 		Kind: ApplicationRelaySendResult, Generation: dataSend.Generation, AttemptOutcome: flow.AttemptSucceeded,
 	})
 	if err != nil {
@@ -767,6 +767,11 @@ func TestApplicationRelayACKReleasesReverseReplayAndLateSendResultIsHarmless(t *
 	}
 	if relay.Snapshot().Flow.TxReplayBytes != 0 {
 		t.Fatal("late local send completion recreated replay")
+	}
+	credit := requireRelayAction(t, actions, ApplicationRelayActionDataCredit)
+	if credit.Attachment != dataSend.Attachment || credit.DataCreditBytes != 8 ||
+		credit.WriteCompletedAt.IsZero() || credit.AcknowledgedAt.Before(credit.WriteCompletedAt) {
+		t.Fatalf("late send completion DATA credit = %#v", credit)
 	}
 }
 
