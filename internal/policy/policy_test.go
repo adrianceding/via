@@ -120,6 +120,70 @@ func TestPolicyTelemetryMutatesActiveQualitySnapshot(t *testing.T) {
 	}
 }
 
+func TestPolicyIncumbentStalled(t *testing.T) {
+	if (*Policy)(nil).IncumbentStalled() {
+		t.Fatal("nil policy reported a stalled incumbent")
+	}
+	policy := newTestPolicy(t, Config{Mode: protocol.DeliveryAdaptive, Selection: protocol.PathFastest})
+	if err := policy.AddAttachment(testAttachmentA); err != nil {
+		t.Fatal(err)
+	}
+	policy.incumbent = testAttachmentA
+	policy.hasIncumbent = true
+	if policy.IncumbentStalled() {
+		t.Fatal("policy without pending delivery reported a stalled incumbent")
+	}
+	policy.SetPending(true)
+	if policy.IncumbentStalled() {
+		t.Fatal("healthy incumbent reported as stalled")
+	}
+	if err := policy.SetQualitySnapshot(testAttachmentA, QualitySnapshot{
+		SRTT: 20 * time.Millisecond, CapacityBytesSec: 1 << 20, StallPenalty: time.Second,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !policy.IncumbentStalled() {
+		t.Fatal("stalled incumbent was not reported")
+	}
+	if allocations := testing.AllocsPerRun(100, func() { _ = policy.IncumbentStalled() }); allocations != 0 {
+		t.Fatalf("incumbent stall query allocations = %v, want 0", allocations)
+	}
+	delete(policy.attachments, testAttachmentA)
+	if policy.IncumbentStalled() {
+		t.Fatal("removed incumbent reported as stalled")
+	}
+}
+
+func TestPolicySetInitialIncumbent(t *testing.T) {
+	policy := newTestPolicy(t, Config{Mode: protocol.DeliveryAdaptive, Selection: protocol.PathFastest})
+	addTestAttachments(t, policy)
+	if err := policy.SetInitialIncumbent(testAttachmentB); err != nil {
+		t.Fatal(err)
+	}
+	if snapshot := policy.Snapshot(); !snapshot.HasIncumbent || snapshot.Incumbent != testAttachmentB {
+		t.Fatalf("initial incumbent = %#v", snapshot)
+	}
+	if err := policy.SetInitialIncumbent(testAttachmentA); err != nil {
+		t.Fatal(err)
+	}
+	if got := policy.Snapshot().Incumbent; got != testAttachmentB {
+		t.Fatalf("existing incumbent changed to %#v", got)
+	}
+	unknown := flow.AttachmentKey{SessionGeneration: 99, AttachmentGeneration: 1}
+	if err := policy.SetInitialIncumbent(unknown); !errors.Is(err, ErrUnknownAttachment) {
+		t.Fatalf("unknown initial incumbent error = %v", err)
+	}
+
+	distributed := newTestPolicy(t, Config{Mode: protocol.DeliveryAdaptive, Selection: protocol.PathDistributed})
+	addTestAttachments(t, distributed)
+	if err := distributed.SetInitialIncumbent(testAttachmentA); err != nil {
+		t.Fatal(err)
+	}
+	if distributed.Snapshot().HasIncumbent {
+		t.Fatal("distributed policy retained an incumbent")
+	}
+}
+
 func TestFastestPolicyIncludesCongestionAndStall(t *testing.T) {
 	now := time.Unix(100, 0)
 	policy := newTestPolicyWithClock(t, Config{Mode: protocol.DeliveryAdaptive, Selection: protocol.PathFastest}, func() time.Time { return now })

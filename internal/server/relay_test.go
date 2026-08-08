@@ -105,6 +105,36 @@ func TestRelayAdaptiveFastestPlacesNewDataOnceAcrossTwoAttachments(t *testing.T)
 	}
 }
 
+func TestRelayAdaptiveFastestReturnsInitialDataOnIngressAttachment(t *testing.T) {
+	relay, machine := newRelayFixture(t, policy.Config{
+		Mode: protocol.DeliveryAdaptive, Selection: protocol.PathFastest,
+	})
+	publishRelayAttachment(t, relay, machine, testRelayA)
+	publishRelayAttachment(t, relay, machine, testRelayB)
+	if _, err := relay.Handle(RelayEvent{Kind: RelaySetSessionQualities, SessionQualities: map[flow.AttachmentKey]policy.QualitySnapshot{
+		testRelayA: {SRTT: 20 * time.Millisecond, CapacityBytesSec: 1 << 20, QueuedBytes: 2 << 20},
+		testRelayB: {SRTT: 100 * time.Millisecond, CapacityBytesSec: 1 << 20},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := relay.Handle(RelayEvent{
+		Kind: RelayRemoteMessage, Attachment: testRelayA,
+		Message: protocol.Data{FlowID: testRelayFlowID, Offset: 0, Bytes: []byte("request")},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	actions, err := relay.Handle(RelayEvent{
+		Kind: RelayTargetReadResult, Generation: relay.Snapshot().TargetReadGeneration, Data: []byte("response"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := requireMessageAction[protocol.Data](t, actions)
+	if data.Attachment != testRelayA {
+		t.Fatalf("initial response attachment = %#v, want ingress %#v", data.Attachment, testRelayA)
+	}
+}
+
 func TestRelayAdaptiveFirstRetryTargetsTheOtherAttachmentThenEscalates(t *testing.T) {
 	relay, machine := newRelayFixture(t, policy.Config{
 		Mode: protocol.DeliveryAdaptive, Selection: protocol.PathFastest,

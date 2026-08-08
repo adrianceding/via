@@ -445,7 +445,7 @@ func (daemon *serverDaemon) probeServerSession(session *wireSession) {
 func (daemon *serverDaemon) notifyServerProbeQuality(session *wireSession, rtt time.Duration) {
 	for flowID, attachment := range session.allAttachments() {
 		instance := daemon.flow(servercore.FlowKey{PrincipalID: session.principal, FlowID: flowID})
-		if instance != nil {
+		if instance != nil && !instance.qualityStopped.Load() {
 			_ = instance.handle(servercore.RelayEvent{
 				Kind: servercore.RelaySetSessionQuality, Attachment: attachment,
 				Quality: session.qualitySnapshot(),
@@ -460,7 +460,7 @@ func (daemon *serverDaemon) notifyServerProbeStallPenalty(session *wireSession, 
 	}
 	for flowID, attachment := range session.allAttachments() {
 		instance := daemon.flow(servercore.FlowKey{PrincipalID: session.principal, FlowID: flowID})
-		if instance != nil {
+		if instance != nil && !instance.qualityStopped.Load() {
 			_ = instance.handle(servercore.RelayEvent{
 				Kind: servercore.RelaySetSessionQuality, Attachment: attachment,
 				Quality: session.qualitySnapshot(),

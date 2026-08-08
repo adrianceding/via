@@ -102,6 +102,7 @@ type clientFlow struct {
 	ownedEvents    []any
 	recoveringSlot bool
 	lastReason     statusapi.TransitionReason
+	qualityStopped atomic.Bool
 }
 
 func newClientFlow(host *clientDaemon, connection net.Conn, target protocol.Target) (*clientFlow, error) {
@@ -305,7 +306,7 @@ func (instance *clientFlow) emitOwned(event any) {
 }
 
 func (instance *clientFlow) tryEmitQuality(event clientcore.ApplicationRelayEvent) {
-	if instance == nil {
+	if instance == nil || instance.qualityStopped.Load() {
 		return
 	}
 	if instance.qualityWake != nil {
@@ -326,7 +327,7 @@ func (instance *clientFlow) tryEmitQuality(event clientcore.ApplicationRelayEven
 }
 
 func (instance *clientFlow) tryEmitSessionQuality(generation uint64, rtt, stall time.Duration) {
-	if instance == nil || generation == 0 || rtt < 0 || stall < 0 || rtt == 0 && stall == 0 {
+	if instance == nil || instance.qualityStopped.Load() || generation == 0 || rtt < 0 || stall < 0 || rtt == 0 && stall == 0 {
 		return
 	}
 	event := clientFlowSessionQuality{generation: generation, rtt: rtt, stall: stall}
@@ -621,13 +622,16 @@ func (instance *clientFlow) handleRelay(event clientcore.ApplicationRelayEvent) 
 	}
 	instance.recordRelayCounters(actions)
 	state := instance.machine.LifecycleState()
+	instance.stopTerminalQuality(state)
 	if !instance.syncRecoveringSlot(state) {
 		instance.executeRelay(actions)
 		more, _ := instance.relay.Handle(clientcore.ApplicationRelayEvent{
 			Kind: clientcore.ApplicationRelayResetRequested, ResetReason: protocol.ResetResourceLimit,
 		})
 		instance.recordRelayCounters(more)
-		instance.syncRecoveringSlot(instance.machine.LifecycleState())
+		state = instance.machine.LifecycleState()
+		instance.stopTerminalQuality(state)
+		instance.syncRecoveringSlot(state)
 		instance.executeRelay(more)
 		instance.publishStatus(statusapi.ReasonResourceLimit)
 		return
@@ -647,7 +651,20 @@ func (instance *clientFlow) handleRelay(event clientcore.ApplicationRelayEvent) 
 			instance.executeRelay(more)
 		}
 	}
+	instance.stopTerminalQuality(instance.machine.LifecycleState())
 	instance.publishStatus(reason)
+}
+
+func (instance *clientFlow) stopTerminalQuality(state flow.LifecycleState) {
+	if instance == nil || state != flow.Closing && state != flow.Closed && state != flow.Reset {
+		return
+	}
+	if instance.qualityStopped.CompareAndSwap(false, true) {
+		instance.qualityMu.Lock()
+		instance.pendingSessionQuality = nil
+		instance.pendingRelayQuality = nil
+		instance.qualityMu.Unlock()
+	}
 }
 
 func (instance *clientFlow) refreshSessionQualities(kind clientcore.ApplicationRelayEventKind) error {

@@ -1192,16 +1192,7 @@ func (relay *ApplicationRelay) setSessionQuality(event ApplicationRelayEvent) er
 }
 
 func (relay *ApplicationRelay) incumbentStalled() bool {
-	snapshot := relay.policy.Snapshot()
-	if !snapshot.Pending || !snapshot.HasIncumbent {
-		return false
-	}
-	for _, attachment := range snapshot.Attachments {
-		if attachment.Attachment == snapshot.Incumbent {
-			return attachment.Quality.StallPenalty > 0
-		}
-	}
-	return false
+	return relay.policy.IncumbentStalled()
 }
 
 func (relay *ApplicationRelay) currentRetryAfter() time.Duration {

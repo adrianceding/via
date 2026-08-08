@@ -407,6 +407,11 @@ func (relay *Relay) handleRemoteMessage(message protocol.Message, attachment flo
 			return ErrInvalidRelayEvent
 		}
 		event = flow.FlowEvent{Kind: flow.FlowRemoteData, Offset: typed.Offset, Data: typed.Bytes}
+		err := relay.applyFlowEvent(event, actions)
+		if err == nil {
+			err = relay.policy.SetInitialIncumbent(attachment)
+		}
+		return err
 	case protocol.ACK:
 		if typed.FlowID != relay.flowID {
 			return ErrInvalidRelayEvent
@@ -1011,16 +1016,7 @@ func (relay *Relay) setSessionQuality(event RelayEvent) error {
 }
 
 func (relay *Relay) incumbentStalled() bool {
-	snapshot := relay.policy.Snapshot()
-	if !snapshot.Pending || !snapshot.HasIncumbent {
-		return false
-	}
-	for _, attachment := range snapshot.Attachments {
-		if attachment.Attachment == snapshot.Incumbent {
-			return attachment.Quality.StallPenalty > 0
-		}
-	}
-	return false
+	return relay.policy.IncumbentStalled()
 }
 
 func (relay *Relay) currentRetryAfter() time.Duration {

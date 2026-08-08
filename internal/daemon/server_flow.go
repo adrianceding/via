@@ -7,6 +7,7 @@ import (
 	"log"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/adrianceding/via/internal/auth"
@@ -59,6 +60,7 @@ type serverFlow struct {
 	recoveringSlot bool
 	statusActive   bool
 	lastReason     statusapi.TransitionReason
+	qualityStopped atomic.Bool
 }
 
 func newServerFlow(host *serverDaemon, key servercore.FlowKey, flowID protocol.FlowID, destination protocol.Target, mode protocol.DeliveryMode, selection protocol.PathSelection, constraints protocol.DeliveryConstraints, owner *flow.Flow, connection net.Conn) (*serverFlow, error) {
@@ -164,6 +166,9 @@ func (instance *serverFlow) finishTransitionLocked(actions []servercore.RelayAct
 	flowStatus := instance.owner.StatusSnapshot()
 	state := flowStatus.LifecycleState
 	terminal := state == flow.Closed || state == flow.Reset
+	if state == flow.Closing || terminal {
+		instance.qualityStopped.Store(true)
+	}
 	if terminal {
 		instance.terminal = true
 	}

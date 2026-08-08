@@ -222,6 +222,35 @@ func (policy *Policy) RemoveAttachment(attachment flow.AttachmentKey) {
 
 func (policy *Policy) SetPending(pending bool) { policy.pending = pending }
 
+// IncumbentStalled reports whether pending delivery is currently assigned to
+// an incumbent attachment whose latest quality sample marks it as stalled.
+// This query is used by the quality-update hot path and must remain allocation
+// free.
+func (policy *Policy) IncumbentStalled() bool {
+	if policy == nil || !policy.pending || !policy.hasIncumbent {
+		return false
+	}
+	state, ok := policy.attachments[policy.incumbent]
+	return ok && policy.qualitySnapshot(state).StallPenalty > 0
+}
+
+// SetInitialIncumbent gives a fastest-path flow affinity to a known attachment
+// until normal challenge, stall, or recovery rules move it. It is intentionally
+// a no-op once an incumbent exists.
+func (policy *Policy) SetInitialIncumbent(attachment flow.AttachmentKey) error {
+	if policy == nil {
+		return ErrUnknownAttachment
+	}
+	if _, ok := policy.attachments[attachment]; !ok {
+		return ErrUnknownAttachment
+	}
+	if policy.config.Selection != protocol.PathFastest || policy.hasIncumbent {
+		return nil
+	}
+	policy.setIncumbent(attachment, policy.currentNow(), false)
+	return nil
+}
+
 // Attachments returns the current attachment keys in stable order without
 // building a full policy snapshot. Callers that only need the key set for
 // refresh loops should prefer this over Snapshot.

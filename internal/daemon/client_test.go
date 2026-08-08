@@ -229,6 +229,31 @@ func TestClientFlowSessionQualityNotificationIsBounded(t *testing.T) {
 	}
 }
 
+func TestClientFlowTerminalQualityNotificationsAreDropped(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	instance := &clientFlow{
+		ctx: ctx, cancel: cancel, events: make(chan any, 1), qualityWake: make(chan struct{}, 1),
+		pendingSessionQuality: make(map[uint64]clientFlowSessionQuality),
+		pendingRelayQuality:   make(map[flow.AttachmentKey]clientcore.ApplicationRelayEvent),
+	}
+	instance.tryEmitSessionQuality(11, 25*time.Millisecond, 0)
+	instance.stopTerminalQuality(flow.Closing)
+	instance.tryEmitSessionQuality(11, 50*time.Millisecond, 0)
+	instance.tryEmitQuality(clientcore.ApplicationRelayEvent{
+		Kind:       clientcore.ApplicationRelaySetSessionQuality,
+		Attachment: flow.AttachmentKey{SessionGeneration: 11, AttachmentGeneration: 1},
+		Quality:    policy.QualitySnapshot{SRTT: 50 * time.Millisecond},
+	})
+	if pending := instance.takeQualityEvents(); len(pending) != 0 {
+		t.Fatalf("terminal quality notifications = %#v", pending)
+	}
+	select {
+	case <-instance.qualityWake:
+	default:
+	}
+}
+
 func TestClientFlowQualityNotificationCoalescesWhenQueueFull(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

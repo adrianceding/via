@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -135,6 +136,24 @@ func TestServerProbeTimeoutPenaltyAndRecoveryUpdatePublishedFlow(t *testing.T) {
 	snapshot = harness.instance.snapshot().Policy
 	if len(snapshot.Attachments) != 1 || snapshot.Attachments[0].Quality.StallPenalty != 0 || snapshot.Attachments[0].Quality.SRTT != 25*time.Millisecond {
 		t.Fatalf("server recovered probe snapshot = %#v", snapshot)
+	}
+}
+
+func TestServerTerminalFlowIgnoresProbeQuality(t *testing.T) {
+	harness := newServerRuntimeHarness(t)
+	defer harness.close()
+	if err := harness.daemon.handleJoin(harness.session, protocol.Join{
+		FlowID: harness.flowID, Capability: harness.capability,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	before := harness.instance.snapshot().Policy
+	harness.instance.qualityStopped.Store(true)
+	harness.session.runtime.observeProbe(75 * time.Millisecond)
+	harness.daemon.notifyServerProbeQuality(harness.session, 75*time.Millisecond)
+	after := harness.instance.snapshot().Policy
+	if !reflect.DeepEqual(after, before) {
+		t.Fatalf("terminal probe quality changed policy: before=%#v after=%#v", before, after)
 	}
 }
 
