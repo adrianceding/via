@@ -127,6 +127,9 @@ func (manager *Manager) Refresh() ([]Event, Snapshot, error) {
 	}
 	events := diffCandidates(manager.current.Candidates, next.Candidates)
 	if len(events) > MaxEventsPerRefresh {
+		// The incremental event stream is bounded, but the snapshot remains the
+		// authoritative current path set for callers that can consume it directly.
+		manager.current = next
 		return nil, manager.Snapshot(), ErrSnapshotLimit
 	}
 	manager.current = next

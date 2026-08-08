@@ -293,7 +293,12 @@ func (flow *Flow) handleRemoteACK(nextOffset uint64, ranges []ByteRange) ([]Flow
 		actions = append(actions, FlowAction{Kind: FlowActionTxAcknowledged, ACKRanges: newlyCovered})
 	}
 	cumulativeProgress := flow.tx.AcknowledgedOffset() > before
-	return flow.syncDataDeadlines(actions, cumulativeProgress, cumulativeProgress), nil
+	// A new selective ACK proves that DATA is arriving even when a slower
+	// attachment still blocks cumulative progress. Refresh only the retry
+	// timer; the no-progress deadline must continue to require cumulative
+	// progress or local receive progress.
+	acknowledgementProgress := cumulativeProgress || len(newlyCovered) != 0
+	return flow.syncDataDeadlines(actions, acknowledgementProgress, cumulativeProgress), nil
 }
 
 func (flow *Flow) handleRemoteFIN(finalOffset uint64) ([]FlowAction, error) {

@@ -137,19 +137,24 @@ func TestFlowCumulativeACKAndSelectiveACKDeadlineSemantics(t *testing.T) {
 	}
 	before := machine.Snapshot()
 
-	if _, err := machine.Handle(FlowEvent{
+	actions, err := machine.Handle(FlowEvent{
 		Kind:   FlowRemoteACK,
 		Offset: 0,
 		Ranges: []ByteRange{{Start: 1, End: 3}},
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
 	afterSelective := machine.Snapshot()
-	if afterSelective.NoProgressGeneration != before.NoProgressGeneration || afterSelective.RetryGeneration != before.RetryGeneration {
-		t.Fatalf("selective ACK refreshed deadlines: before=%#v after=%#v", before, afterSelective)
+	if afterSelective.NoProgressGeneration != before.NoProgressGeneration || afterSelective.RetryGeneration == before.RetryGeneration {
+		t.Fatalf("selective ACK did not refresh only retry deadline: before=%#v after=%#v", before, afterSelective)
+	}
+	if !hasFlowAction(actions, FlowActionCancelRetryDeadline) || !hasFlowAction(actions, FlowActionArmRetryDeadline) ||
+		hasFlowAction(actions, FlowActionCancelNoProgressDeadline) {
+		t.Fatalf("selective ACK deadline actions = %#v", actions)
 	}
 
-	actions, err := machine.Handle(FlowEvent{Kind: FlowRemoteACK, Offset: 3})
+	actions, err = machine.Handle(FlowEvent{Kind: FlowRemoteACK, Offset: 3})
 	if err != nil {
 		t.Fatal(err)
 	}

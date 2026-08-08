@@ -89,6 +89,7 @@ type sessionRuntime struct {
 	eligibleAckedData uint64
 	lastNotify        time.Time
 	wake              chan struct{}
+	space             chan struct{}
 	done              chan struct{}
 	workerDone        chan struct{}
 	onSnapshot        func(sessionRuntimeSnapshot)
@@ -131,7 +132,7 @@ func newSessionRuntimeWithClock(ctx context.Context, connection transport.Connec
 		ctx: runtimeCtx, cancel: cancel, connection: connection, queueLimits: limits, onFailure: onFailure, now: now,
 		quality:       policy.NewQualityWithClock(now),
 		dataScheduler: scheduler, requests: make(map[uint64]*sessionRuntimeRequest, int(limits.MaxFrames)),
-		wake: make(chan struct{}, 1), done: make(chan struct{}), workerDone: make(chan struct{}),
+		wake: make(chan struct{}, 1), space: make(chan struct{}, 1), done: make(chan struct{}), workerDone: make(chan struct{}),
 	}
 	go runtime.run()
 	return runtime, nil
@@ -272,6 +273,25 @@ func (runtime *sessionRuntime) admit(ctx context.Context, request transport.Writ
 	return queued, nil
 }
 
+func (runtime *sessionRuntime) admitControl(ctx context.Context, request transport.WriteRequest) (*sessionRuntimeRequest, error) {
+	for {
+		queued, err := runtime.admit(ctx, request, protocol.FlowID{}, 0, 0, 0)
+		if !errors.Is(err, transport.ErrQueueFull) {
+			return queued, err
+		}
+		select {
+		case <-runtime.space:
+		case <-runtime.done:
+			runtime.mu.Lock()
+			closedErr := runtime.closeErrorLocked()
+			runtime.mu.Unlock()
+			return nil, closedErr
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+}
+
 func (runtime *sessionRuntime) wait(ctx context.Context, request *sessionRuntimeRequest) error {
 	_, err := runtime.waitCompletion(ctx, request)
 	return err
@@ -318,6 +338,7 @@ func (runtime *sessionRuntime) cancelQueued(request *sessionRuntimeRequest, err 
 	runtime.queuedBytes -= minUint64(runtime.queuedBytes, uint64(len(request.encoded)))
 	runtime.updateQualityLoadLocked()
 	runtime.finishLocked(request, err)
+	runtime.signalSpaceLocked()
 	runtime.signalLocked()
 	snapshot, notify := runtime.snapshotIfNotifyDueLocked()
 	runtime.mu.Unlock()
@@ -444,6 +465,7 @@ func (runtime *sessionRuntime) completeWrite(request *sessionRuntimeRequest, err
 	}
 	runtime.updateQualityLoadLocked()
 	runtime.finishLocked(request, err)
+	runtime.signalSpaceLocked()
 	snapshot, notify := runtime.snapshotIfNotifyDueLocked()
 	runtime.mu.Unlock()
 	if notify {
@@ -552,6 +574,7 @@ func (runtime *sessionRuntime) close(err error) {
 		runtime.queuedData = 0
 		runtime.inFlightData = 0
 		runtime.updateQualityLoadLocked()
+		runtime.signalSpaceLocked()
 		close(runtime.done)
 		runtime.cancel()
 		runtime.mu.Unlock()
@@ -594,6 +617,13 @@ func (runtime *sessionRuntime) fitsLocked(class transport.FrameClass, encodedByt
 func (runtime *sessionRuntime) signalLocked() {
 	select {
 	case runtime.wake <- struct{}{}:
+	default:
+	}
+}
+
+func (runtime *sessionRuntime) signalSpaceLocked() {
+	select {
+	case runtime.space <- struct{}{}:
 	default:
 	}
 }

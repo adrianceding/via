@@ -358,12 +358,21 @@ func TestAdaptiveEscalationRecoveryAndStableDeescalation(t *testing.T) {
 	if policy.Snapshot().State != AdaptiveTargeted || policy.Snapshot().Transition != TransitionAcknowledgementGap || len(placements) != 1 || placements[0].Attachment != testAttachmentB {
 		t.Fatalf("targeted recovery = %#v / %#v", policy.Snapshot(), placements)
 	}
+	placements = policy.PlaceNew(PlacementRequest{Bytes: 100})
+	if len(placements) != 1 || placements[0].Attachment != testAttachmentB {
+		t.Fatalf("targeted recovery did not move new DATA = %#v", placements)
+	}
 	placements = policy.RetryDue(PlacementRequest{Bytes: 100})
 	if policy.Snapshot().State != AdaptiveFull || policy.Snapshot().Transition != TransitionRetryEscalated {
 		t.Fatalf("full escalation = %#v", policy.Snapshot())
 	}
-	assertPlacementSet(t, placements, testAttachmentA, testAttachmentB)
-	assertPlacementSet(t, policy.PlaceNew(PlacementRequest{Bytes: 100}), testAttachmentA, testAttachmentB)
+	if len(placements) != 1 {
+		t.Fatalf("fastest full recovery copy count = %#v", placements)
+	}
+	placements = policy.PlaceNew(PlacementRequest{Bytes: 100})
+	if len(placements) != 1 {
+		t.Fatalf("new DATA remained duplicated during recovery = %#v", placements)
+	}
 
 	for index := 0; index < StableACKCount; index++ {
 		policy.RecordCumulativeProgress(StableAcknowledged / StableACKCount)
@@ -377,6 +386,63 @@ func TestAdaptiveEscalationRecoveryAndStableDeescalation(t *testing.T) {
 	if policy.Snapshot().State != AdaptiveSingle || policy.Snapshot().Transition != TransitionStableAcknowledgement {
 		t.Fatalf("second stable window = %#v", policy.Snapshot())
 	}
+}
+
+func TestAdaptiveRecoverySkipsStalledDataAttachments(t *testing.T) {
+	policy := newTestPolicy(t, Config{Mode: protocol.DeliveryAdaptive, Selection: protocol.PathFastest})
+	addTestAttachments(t, policy)
+	quality := QualitySnapshot{
+		SRTT:             10 * time.Millisecond,
+		CapacityBytesSec: 1 << 20,
+		RetryEstimate:    MinimumRetryEstimate,
+		DataSampleFresh:  true,
+	}
+	if err := policy.SetQualitySnapshot(testAttachmentA, quality); err != nil {
+		t.Fatal(err)
+	}
+	quality.StallPenalty = time.Second
+	if err := policy.SetQualitySnapshot(testAttachmentB, quality); err != nil {
+		t.Fatal(err)
+	}
+
+	placements := policy.RetryDue(PlacementRequest{Bytes: 100})
+	if len(placements) != 1 || placements[0].Attachment != testAttachmentA {
+		t.Fatalf("stalled recovery placements = %#v", placements)
+	}
+	assertPlacementSet(t, policy.ControlPlacements(), testAttachmentA, testAttachmentB)
+}
+
+func TestAdaptiveFullRecoveryLimitsDataCopiesToBestAttachments(t *testing.T) {
+	policy := newTestPolicy(t, Config{Mode: protocol.DeliveryAdaptive, Selection: protocol.PathFastest})
+	addTestAttachments(t, policy)
+	third := flow.AttachmentKey{SessionGeneration: 3, AttachmentGeneration: 1}
+	if err := policy.AddAttachment(third); err != nil {
+		t.Fatal(err)
+	}
+	for attachment, rtt := range map[flow.AttachmentKey]time.Duration{
+		testAttachmentA: 10 * time.Millisecond,
+		testAttachmentB: 20 * time.Millisecond,
+		third:           30 * time.Millisecond,
+	} {
+		if err := policy.SetQualitySnapshot(attachment, QualitySnapshot{
+			SRTT:             rtt,
+			CapacityBytesSec: 1 << 20,
+			RetryEstimate:    MinimumRetryEstimate,
+			DataSampleFresh:  true,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	placements := policy.RetryDue(PlacementRequest{Bytes: 100})
+	if len(placements) != 1 {
+		t.Fatalf("fastest adaptive full copy count = %#v, want 1", placements)
+	}
+	placements = policy.PlaceNew(PlacementRequest{Bytes: 100})
+	if len(placements) != 1 || placements[0].Attachment != testAttachmentA {
+		t.Fatalf("new DATA recovery placement = %#v", placements)
+	}
+	assertPlacementSet(t, policy.ControlPlacements(), testAttachmentA, testAttachmentB, third)
 }
 
 func TestAdaptiveWaitsForRecoveryAndUsesFullWhenPending(t *testing.T) {

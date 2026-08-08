@@ -78,12 +78,16 @@ type clientFlow struct {
 	ctx           context.Context
 	cancel        context.CancelFunc
 
-	events     chan any
-	openResult chan protocol.OpenResultCode
-	done       chan struct{}
-	resultOnce sync.Once
-	doneOnce   sync.Once
-	cancelCode atomic.Uint32
+	events                chan any
+	openResult            chan protocol.OpenResultCode
+	done                  chan struct{}
+	resultOnce            sync.Once
+	doneOnce              sync.Once
+	cancelCode            atomic.Uint32
+	qualityMu             sync.Mutex
+	qualityWake           chan struct{}
+	pendingSessionQuality map[uint64]clientFlowSessionQuality
+	pendingRelayQuality   map[flow.AttachmentKey]clientcore.ApplicationRelayEvent
 
 	openJoinTimers map[openJoinTimerKey]*time.Timer
 	relayTimers    map[relayTimerKey]*time.Timer
@@ -113,7 +117,9 @@ func newClientFlow(host *clientDaemon, connection net.Conn, target protocol.Targ
 	instance := &clientFlow{
 		host: host, application: application, openJoin: coordinator, target: target, ctx: ctx, cancel: cancel,
 		events: make(chan any, 128), openResult: make(chan protocol.OpenResultCode, 1), done: make(chan struct{}),
-		openJoinTimers: make(map[openJoinTimerKey]*time.Timer, 4), relayTimers: make(map[relayTimerKey]*time.Timer, 5),
+		qualityWake: make(chan struct{}, 1), pendingSessionQuality: make(map[uint64]clientFlowSessionQuality),
+		pendingRelayQuality: make(map[flow.AttachmentKey]clientcore.ApplicationRelayEvent),
+		openJoinTimers:      make(map[openJoinTimerKey]*time.Timer, 4), relayTimers: make(map[relayTimerKey]*time.Timer, 5),
 		publications: make(map[flow.AttachmentKey]uint64, flow.MaxAttachments),
 	}
 	host.flowsMu.Lock()
@@ -150,6 +156,10 @@ func (instance *clientFlow) run() {
 			return
 		case raw := <-instance.events:
 			instance.dispatch(raw)
+			instance.drainOwnedEvents()
+			instance.drainQualityEvents()
+		case <-instance.qualityWake:
+			instance.drainQualityEvents()
 			instance.drainOwnedEvents()
 		}
 		if instance.relay != nil {
@@ -275,6 +285,16 @@ func (instance *clientFlow) tryEmitQuality(event clientcore.ApplicationRelayEven
 	if instance == nil {
 		return
 	}
+	if instance.qualityWake != nil {
+		instance.qualityMu.Lock()
+		if instance.pendingRelayQuality == nil {
+			instance.pendingRelayQuality = make(map[flow.AttachmentKey]clientcore.ApplicationRelayEvent)
+		}
+		instance.pendingRelayQuality[event.Attachment] = event
+		instance.qualityMu.Unlock()
+		instance.signalQuality()
+		return
+	}
 	select {
 	case instance.events <- event:
 	case <-instance.ctx.Done():
@@ -286,10 +306,52 @@ func (instance *clientFlow) tryEmitSessionQuality(generation uint64, rtt, stall 
 	if instance == nil || generation == 0 || rtt < 0 || stall < 0 || rtt == 0 && stall == 0 {
 		return
 	}
+	event := clientFlowSessionQuality{generation: generation, rtt: rtt, stall: stall}
+	if instance.qualityWake != nil {
+		instance.qualityMu.Lock()
+		if instance.pendingSessionQuality == nil {
+			instance.pendingSessionQuality = make(map[uint64]clientFlowSessionQuality)
+		}
+		instance.pendingSessionQuality[generation] = event
+		instance.qualityMu.Unlock()
+		instance.signalQuality()
+		return
+	}
 	select {
-	case instance.events <- clientFlowSessionQuality{generation: generation, rtt: rtt, stall: stall}:
+	case instance.events <- event:
 	case <-instance.ctx.Done():
 	default:
+	}
+}
+
+func (instance *clientFlow) signalQuality() {
+	select {
+	case instance.qualityWake <- struct{}{}:
+	default:
+	}
+}
+
+func (instance *clientFlow) takeQualityEvents() []any {
+	if instance == nil {
+		return nil
+	}
+	instance.qualityMu.Lock()
+	defer instance.qualityMu.Unlock()
+	events := make([]any, 0, len(instance.pendingSessionQuality)+len(instance.pendingRelayQuality))
+	for _, event := range instance.pendingSessionQuality {
+		events = append(events, event)
+	}
+	for _, event := range instance.pendingRelayQuality {
+		events = append(events, event)
+	}
+	instance.pendingSessionQuality = nil
+	instance.pendingRelayQuality = nil
+	return events
+}
+
+func (instance *clientFlow) drainQualityEvents() {
+	for _, event := range instance.takeQualityEvents() {
+		instance.dispatch(event)
 	}
 }
 

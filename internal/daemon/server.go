@@ -514,7 +514,7 @@ func (daemon *serverDaemon) handleOpen(session *wireSession, request protocol.Op
 			session.close()
 		}
 	}) {
-		return ErrWireCapacity
+		return session.send(protocol.OpenResult{FlowID: request.FlowID, Result: protocol.OpenResourceLimit})
 	}
 	return nil
 }

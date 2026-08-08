@@ -138,7 +138,7 @@ func TestManagerEmitsDeterministicHotplugRenameAndAddressEvents(t *testing.T) {
 	}
 }
 
-func TestManagerKeepsPriorSnapshotOnEnumerationOrLimitFailure(t *testing.T) {
+func TestManagerKeepsPriorSnapshotOnEnumerationOrInputLimitFailure(t *testing.T) {
 	filter, _ := NewFilter(nil, nil)
 	enumerator := &fakeEnumerator{interfaces: []Interface{{
 		Index: 1, Name: "eth0", Up: true, Addresses: []netip.Addr{netip.MustParseAddr("192.0.2.1")},
@@ -159,6 +159,36 @@ func TestManagerKeepsPriorSnapshotOnEnumerationOrLimitFailure(t *testing.T) {
 	enumerator.interfaces = make([]Interface, MaxInterfaces+1)
 	if _, after, err := manager.Refresh(); !errors.Is(err, ErrSnapshotLimit) || !reflect.DeepEqual(after, before) {
 		t.Fatalf("limit failure snapshot = %#v, %v", after, err)
+	}
+}
+
+func TestManagerPublishesSnapshotWhenEventLimitIsExceeded(t *testing.T) {
+	filter, _ := NewFilter(nil, nil)
+	enumerator := &fakeEnumerator{interfaces: []Interface{{
+		Index: 1, Name: "eth0", Up: true, Addresses: []netip.Addr{netip.MustParseAddr("192.0.2.1")},
+	}}}
+	manager, err := NewManager(enumerator, filter, netip.MustParseAddr("198.51.100.1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := manager.Refresh(); err != nil {
+		t.Fatal(err)
+	}
+	next := make([]Interface, MaxInterfaces)
+	for index := range next {
+		addresses := make([]netip.Addr, 3)
+		for addressIndex := range addresses {
+			addresses[addressIndex] = netip.AddrFrom4([4]byte{192, 0, byte(index + 1), byte(addressIndex + 1)})
+		}
+		next[index] = Interface{Index: index + 1, Name: "eth", Up: true, Addresses: addresses}
+	}
+	enumerator.interfaces = next
+	events, snapshot, err := manager.Refresh()
+	if !errors.Is(err, ErrSnapshotLimit) {
+		t.Fatalf("event overflow error = %v", err)
+	}
+	if len(events) != 0 || len(snapshot.Candidates) != MaxInterfaces*3 {
+		t.Fatalf("event overflow snapshot/events = %d / %d", len(snapshot.Candidates), len(events))
 	}
 }
 

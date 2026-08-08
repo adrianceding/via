@@ -12,6 +12,7 @@ import (
 	clientcore "github.com/adrianceding/via/internal/client"
 	"github.com/adrianceding/via/internal/flow"
 	pathcore "github.com/adrianceding/via/internal/path"
+	"github.com/adrianceding/via/internal/policy"
 	"github.com/adrianceding/via/internal/protocol"
 	"github.com/adrianceding/via/internal/socks5"
 	"github.com/adrianceding/via/internal/transport"
@@ -173,6 +174,47 @@ func TestClientFlowSessionQualityNotificationIsBounded(t *testing.T) {
 	quality, ok := (<-instance.events).(clientFlowSessionQuality)
 	if !ok || quality.generation != 11 || quality.rtt != 170*time.Millisecond || quality.stall != probeTimeout {
 		t.Fatalf("quality notification = %#v", quality)
+	}
+}
+
+func TestClientFlowQualityNotificationCoalescesWhenQueueFull(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	attachment := flow.AttachmentKey{SessionGeneration: 7, AttachmentGeneration: 9}
+	instance := &clientFlow{
+		ctx: ctx, cancel: cancel, events: make(chan any, 1), qualityWake: make(chan struct{}, 1),
+	}
+	instance.events <- "sentinel"
+
+	instance.tryEmitSessionQuality(11, 170*time.Millisecond, probeTimeout)
+	instance.tryEmitSessionQuality(11, 25*time.Millisecond, 0)
+	instance.tryEmitQuality(clientcore.ApplicationRelayEvent{
+		Kind: clientcore.ApplicationRelaySetSessionQuality, Attachment: attachment,
+		Quality: policy.QualitySnapshot{SRTT: 170 * time.Millisecond, StallPenalty: probeTimeout},
+	})
+	instance.tryEmitQuality(clientcore.ApplicationRelayEvent{
+		Kind: clientcore.ApplicationRelaySetSessionQuality, Attachment: attachment,
+		Quality: policy.QualitySnapshot{SRTT: 25 * time.Millisecond},
+	})
+
+	pending := instance.takeQualityEvents()
+	var sessionQuality *clientFlowSessionQuality
+	var relayQuality *clientcore.ApplicationRelayEvent
+	for _, raw := range pending {
+		switch event := raw.(type) {
+		case clientFlowSessionQuality:
+			copy := event
+			sessionQuality = &copy
+		case clientcore.ApplicationRelayEvent:
+			copy := event
+			relayQuality = &copy
+		}
+	}
+	if sessionQuality == nil || sessionQuality.generation != 11 || sessionQuality.rtt != 25*time.Millisecond || sessionQuality.stall != 0 {
+		t.Fatalf("coalesced session quality = %#v", sessionQuality)
+	}
+	if relayQuality == nil || relayQuality.Attachment != attachment || relayQuality.Quality.SRTT != 25*time.Millisecond || relayQuality.Quality.StallPenalty != 0 {
+		t.Fatalf("coalesced relay quality = %#v", relayQuality)
 	}
 }
 

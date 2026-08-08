@@ -248,7 +248,8 @@ func (daemon *clientDaemon) run(ctx context.Context) error {
 func (daemon *clientDaemon) runSessionPool() {
 	refresh := func() {
 		_, snapshot, err := daemon.pathManager.Refresh()
-		if err != nil {
+		// A large incremental diff still publishes an authoritative snapshot.
+		if err != nil && !errors.Is(err, pathcore.ErrSnapshotLimit) {
 			return
 		}
 		actions, err := daemon.sessionManager.Handle(clientcore.SessionManagerEvent{

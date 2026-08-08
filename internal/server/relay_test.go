@@ -140,7 +140,9 @@ func TestRelayAdaptiveFirstRetryTargetsTheOtherAttachmentThenEscalates(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertAttachmentSet(t, messageAttachments[protocol.Data](t, actions), testRelayA, testRelayB)
+	if got := messageAttachments[protocol.Data](t, actions); len(got) != 1 {
+		t.Fatalf("fastest full recovery DATA copies = %#v", got)
+	}
 	if state := relay.Snapshot().Policy.State; state != policy.AdaptiveFull {
 		t.Fatalf("policy state after full retry = %v", state)
 	}

@@ -92,6 +92,45 @@ func TestWireSendContextHonorsParentDeadline(t *testing.T) {
 	}
 }
 
+func TestWireControlSendWaitsForQueueCapacity(t *testing.T) {
+	limits := transport.V1QueueLimits()
+	limits.MaxFrames = 2
+	limits.ReservedControlFrames = 1
+	connection := newRuntimeTestConnectionWithLimits(limits)
+	session, err := newWireSession(context.Background(), 1, connection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.close()
+
+	control := transport.WriteRequest{Class: transport.FrameControl, Encoded: []byte{1}}
+	if _, err := session.runtime.admit(context.Background(), control, protocol.FlowID{}, 0, 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	connection.waitEntered(t)
+	if _, err := session.runtime.admit(context.Background(), control, protocol.FlowID{}, 0, 0, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	result := make(chan error, 1)
+	go func() { result <- session.send(protocol.Probe{Token: 3}) }()
+	select {
+	case err := <-result:
+		t.Fatalf("control send returned before queue capacity was available: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	connection.release()
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("control send after capacity returned %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("control send did not resume after queue capacity became available")
+	}
+}
+
 func TestWireProbeRateAndGenerationAreBounded(t *testing.T) {
 	session, err := newWireSession(context.Background(), 1, blockingWireConnection{})
 	if err != nil {

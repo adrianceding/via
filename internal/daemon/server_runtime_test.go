@@ -655,6 +655,59 @@ func TestServerOpenWorkerExhaustionKeepsSharedSessionUsable(t *testing.T) {
 	}
 }
 
+func TestServerOpenWaiterExhaustionReturnsResourceLimit(t *testing.T) {
+	harness := newServerRuntimeHarness(t)
+	defer harness.close()
+	connector := newBlockingTargetConnector(true)
+	defer connector.closePeer()
+	executor, err := servercore.NewTargetDialExecutor(net.DefaultResolver, connector)
+	if err != nil {
+		t.Fatal(err)
+	}
+	harness.daemon.targets = executor
+	harness.daemon.openWaiterLimit = 1
+	first := protocol.Open{
+		FlowID: protocol.FlowID{0x41}, OpenToken: protocol.OpenToken{0x42}, DeliveryMode: protocol.DeliveryRedundant,
+		PathSelection: protocol.PathNone,
+		Target:        protocol.Target{Address: netip.MustParseAddr("127.0.0.1"), Port: 41},
+	}
+	second := protocol.Open{
+		FlowID: protocol.FlowID{0x43}, OpenToken: protocol.OpenToken{0x44}, DeliveryMode: protocol.DeliveryRedundant,
+		PathSelection: protocol.PathNone,
+		Target:        protocol.Target{Address: netip.MustParseAddr("127.0.0.1"), Port: 43},
+	}
+	if err := harness.daemon.handleOpen(harness.session, first); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-connector.started:
+	case <-time.After(time.Second):
+		t.Fatal("first target dial did not start")
+	}
+	if err := harness.daemon.handleOpen(harness.session, first); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, time.Second, func() bool {
+		harness.daemon.openWaitersMu.Lock()
+		defer harness.daemon.openWaitersMu.Unlock()
+		return len(harness.daemon.openWaiters) == 1
+	}, "first OPEN waiter")
+	if err := harness.daemon.handleOpen(harness.session, second); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, time.Second, func() bool { return connector.calls.Load() >= 2 }, "second target dial")
+	if err := harness.daemon.handleOpen(harness.session, second); err != nil {
+		t.Fatalf("OPEN waiter capacity closed the shared session: %v", err)
+	}
+	results := harness.connection.openResults(second.FlowID)
+	if len(results) != 1 || results[0].Result != protocol.OpenResourceLimit {
+		t.Fatalf("OPEN waiter capacity results = %#v", results)
+	}
+	if harness.connection.isClosed() {
+		t.Fatal("OPEN waiter capacity closed the shared session")
+	}
+}
+
 func TestServerRecoveringFlowLimitResetsOnlyExcessFlow(t *testing.T) {
 	harness := newServerRuntimeHarness(t)
 	defer harness.close()

@@ -242,7 +242,14 @@ func (session *wireSession) admitEncodedContextMetadata(parent context.Context, 
 		return nil, err
 	}
 	sendCtx, cancel := context.WithTimeout(parent, sendTimeout)
-	request, err := session.runtime.admit(sendCtx, transport.WriteRequest{Class: class, Encoded: encoded}, flowID, itemID, attemptGeneration, dataPayload)
+	write := transport.WriteRequest{Class: class, Encoded: encoded}
+	var request *sessionRuntimeRequest
+	var err error
+	if class == transport.FrameControl {
+		request, err = session.runtime.admitControl(sendCtx, write)
+	} else {
+		request, err = session.runtime.admit(sendCtx, write, flowID, itemID, attemptGeneration, dataPayload)
+	}
 	if err != nil {
 		cancel()
 		return nil, err

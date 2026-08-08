@@ -22,6 +22,7 @@ const (
 	fastestImprovementAbsolute = 5 * time.Millisecond
 	fastestChallengeDuration   = 300 * time.Millisecond
 	fastestHoldDownDuration    = time.Second
+	maximumAdaptiveDataCopies  = 2
 )
 
 var (
@@ -296,7 +297,10 @@ func (policy *Policy) PlaceNew(request PlacementRequest) []Placement {
 	if policy.state == AdaptiveWaiting || len(policy.attachments) == 0 {
 		return nil
 	}
-	if policy.config.Mode == protocol.DeliveryRedundant || policy.state == AdaptiveFull {
+	// Adaptive recovery duplicates the outstanding gap, but new DATA should
+	// continue on one selected path. Keeping every new segment duplicated while
+	// a single gap is unresolved amplifies reordering and exhausts path queues.
+	if policy.config.Mode == protocol.DeliveryRedundant || policy.state == AdaptiveFull && request.Bytes == 0 {
 		return policy.placeAll(request.Attempted, request.Bytes)
 	}
 	return policy.placeOne(request, nil)
@@ -315,9 +319,18 @@ func (policy *Policy) GapDue(request PlacementRequest) []Placement {
 		policy.transition = TransitionAcknowledgementGap
 	}
 	if policy.state == AdaptiveFull {
-		return policy.placeAll(request.Attempted, request.Bytes)
+		placements := policy.placeAll(request.Attempted, request.Bytes)
+		policy.setRecoveryIncumbent(placements, request.Bytes)
+		return placements
 	}
-	return policy.placeOne(request, attemptedSet(request.Attempted))
+	placements := policy.placeOne(request, attemptedSet(request.Attempted))
+	if policy.config.Selection == protocol.PathFastest && len(placements) != 0 {
+		// The incumbent just failed to advance the cumulative ACK. Keep new
+		// DATA on the alternate that received the targeted recovery instead of
+		// immediately sending the next segment back to the failed path.
+		policy.setIncumbent(placements[0].Attachment, policy.currentNow(), true)
+	}
+	return placements
 }
 
 func (policy *Policy) RetryDue(request PlacementRequest) []Placement {
@@ -331,7 +344,9 @@ func (policy *Policy) RetryDue(request PlacementRequest) []Placement {
 			policy.transition = TransitionRetryEscalated
 		}
 	}
-	return policy.placeAll(request.Attempted, request.Bytes)
+	placements := policy.placeAll(request.Attempted, request.Bytes)
+	policy.setRecoveryIncumbent(placements, request.Bytes)
+	return placements
 }
 
 func (policy *Policy) ControlPlacements() []Placement {
@@ -431,19 +446,59 @@ func (policy *Policy) StatusSnapshot() StatusSnapshot {
 func (policy *Policy) placeAll(attempted []flow.AttachmentKey, payloadBytes uint64) []Placement {
 	excluded := attemptedSet(attempted)
 	keys := policy.sortedAttachments()
-	placements := make([]Placement, 0, len(keys))
+	placementsKeys := make([]flow.AttachmentKey, 0, len(keys))
 	for _, attachment := range keys {
 		if _, exists := excluded[attachment]; !exists {
-			quality := policy.qualitySnapshot(policy.attachments[attachment])
-			estimatedDelivery := deliveryEstimate(quality, payloadBytes)
-			placements = append(placements, Placement{
-				Attachment:        attachment,
-				RetryAfter:        boundedRetryAfter(quality.RetryEstimate, estimatedDelivery),
-				EstimatedDelivery: estimatedDelivery,
-			})
+			placementsKeys = append(placementsKeys, attachment)
 		}
 	}
+	if payloadBytes != 0 {
+		eligible := make([]flow.AttachmentKey, 0, len(placementsKeys))
+		for _, attachment := range placementsKeys {
+			quality := policy.qualitySnapshot(policy.attachments[attachment])
+			if quality.StallPenalty == 0 {
+				eligible = append(eligible, attachment)
+			}
+		}
+		if len(eligible) != 0 {
+			placementsKeys = eligible
+		}
+		copyLimit := maximumAdaptiveDataCopies
+		if policy.config.Selection == protocol.PathFastest {
+			copyLimit = 1
+		}
+		if policy.config.Mode == protocol.DeliveryAdaptive && policy.state == AdaptiveFull && len(placementsKeys) > copyLimit {
+			sort.SliceStable(placementsKeys, func(left, right int) bool {
+				leftQuality := policy.qualitySnapshot(policy.attachments[placementsKeys[left]])
+				rightQuality := policy.qualitySnapshot(policy.attachments[placementsKeys[right]])
+				leftEstimate := deliveryEstimate(leftQuality, payloadBytes)
+				rightEstimate := deliveryEstimate(rightQuality, payloadBytes)
+				if leftEstimate != rightEstimate {
+					return leftEstimate < rightEstimate
+				}
+				return stableTie(policy.flowID, placementsKeys[left]) < stableTie(policy.flowID, placementsKeys[right])
+			})
+			placementsKeys = placementsKeys[:copyLimit]
+		}
+	}
+	placements := make([]Placement, 0, len(placementsKeys))
+	for _, attachment := range placementsKeys {
+		quality := policy.qualitySnapshot(policy.attachments[attachment])
+		estimatedDelivery := deliveryEstimate(quality, payloadBytes)
+		placements = append(placements, Placement{
+			Attachment:        attachment,
+			RetryAfter:        boundedRetryAfter(quality.RetryEstimate, estimatedDelivery),
+			EstimatedDelivery: estimatedDelivery,
+		})
+	}
 	return placements
+}
+
+func (policy *Policy) setRecoveryIncumbent(placements []Placement, payloadBytes uint64) {
+	if policy.config.Selection != protocol.PathFastest || payloadBytes == 0 || len(placements) == 0 {
+		return
+	}
+	policy.setIncumbent(placements[0].Attachment, policy.currentNow(), true)
 }
 
 func (policy *Policy) placeOne(request PlacementRequest, excluded map[flow.AttachmentKey]struct{}) []Placement {
@@ -514,7 +569,7 @@ func (policy *Policy) candidates(payloadBytes uint64, excluded map[flow.Attachme
 		result = append(result, candidate{
 			attachment: attachment,
 			estimate:   deliveryEstimate(snapshot, payloadBytes),
-			capacity:   snapshot.CapacityBytesSec,
+			capacity:   effectiveCapacity(snapshot),
 			tie:        stableTie(policy.flowID, attachment),
 		})
 	}
@@ -545,10 +600,7 @@ func (policy *Policy) applyConstraints(candidates []candidate) []candidate {
 
 func (policy *Policy) virtualFinish(candidate candidate, payloadBytes uint64) float64 {
 	snapshot := policy.qualitySnapshot(policy.attachments[candidate.attachment])
-	capacity := snapshot.CapacityBytesSec
-	if !finitePositive(capacity) {
-		capacity = defaultCapacity
-	}
+	capacity := effectiveCapacity(snapshot)
 	assigned := policy.attachments[candidate.attachment].assigned
 	base := snapshot.SRTT
 	if base == 0 {

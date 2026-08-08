@@ -154,3 +154,26 @@ func TestQualityStaleDataRTTFallsBackToProbe(t *testing.T) {
 		t.Fatalf("stale DATA quality = %#v", snapshot)
 	}
 }
+
+func TestQualityStaleCapacityDecaysFromLastMeasuredValue(t *testing.T) {
+	now := time.Unix(500, 0)
+	quality := NewQualityWithClock(func() time.Time { return now })
+	if err := quality.ObserveData(0, 64<<10, time.Second); err != nil {
+		t.Fatal(err)
+	}
+
+	now = now.Add(4 * time.Second)
+	snapshot := quality.Snapshot()
+	if snapshot.DataSampleFresh || snapshot.CapacityBytesSec != defaultCapacity || snapshot.LastDataCapacity != 64<<10 {
+		t.Fatalf("stale capacity snapshot = %#v", snapshot)
+	}
+	capacity := effectiveCapacity(snapshot)
+	if capacity <= snapshot.LastDataCapacity || capacity >= defaultCapacity {
+		t.Fatalf("stale capacity was not retained with decay: got %v, snapshot=%#v", capacity, snapshot)
+	}
+
+	now = now.Add(staleCapacityHorizon)
+	if got := effectiveCapacity(quality.Snapshot()); got != defaultCapacity {
+		t.Fatalf("expired stale capacity = %v, want %v", got, defaultCapacity)
+	}
+}

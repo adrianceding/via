@@ -13,6 +13,7 @@ const (
 	MaximumRetryEstimate = 2 * time.Second
 	minimumRTTVariation  = 50 * time.Millisecond
 	defaultCapacity      = 1 << 20
+	staleCapacityHorizon = 60 * time.Second
 	maximumSamplePeriod  = 30 * time.Second
 	minimumDataFreshness = 3 * time.Second
 	maximumDataFreshness = 15 * time.Second
@@ -155,12 +156,39 @@ func deliveryEstimate(snapshot QualitySnapshot, payloadBytes uint64) time.Durati
 		base = InitialRetryEstimate
 	}
 	bytes := saturatingSum(snapshot.QueuedBytes, snapshot.InFlightBytes, payloadBytes)
-	seconds := float64(bytes) / snapshot.CapacityBytesSec
-	if !finitePositive(snapshot.CapacityBytesSec) || seconds > float64(math.MaxInt64)/float64(time.Second) {
+	capacity := effectiveCapacity(snapshot)
+	seconds := float64(bytes) / capacity
+	if !finitePositive(capacity) || seconds > float64(math.MaxInt64)/float64(time.Second) {
 		return time.Duration(math.MaxInt64)
 	}
 	serialization := time.Duration(seconds * float64(time.Second))
 	return saturatingDurationSum(base, serialization, snapshot.StallPenalty)
+}
+
+// effectiveCapacity keeps the last measured capacity useful after its fresh
+// window expires. A path should not immediately become indistinguishable from
+// an unmeasured path just because no DATA sample arrived recently.
+func effectiveCapacity(snapshot QualitySnapshot) float64 {
+	if snapshot.DataSampleFresh {
+		if finitePositive(snapshot.CapacityBytesSec) {
+			return snapshot.CapacityBytesSec
+		}
+		return defaultCapacity
+	}
+	if !finitePositive(snapshot.LastDataCapacity) {
+		if finitePositive(snapshot.CapacityBytesSec) {
+			return snapshot.CapacityBytesSec
+		}
+		return defaultCapacity
+	}
+	if snapshot.DataSampleAge <= 0 {
+		return snapshot.LastDataCapacity
+	}
+	if snapshot.DataSampleAge >= staleCapacityHorizon {
+		return defaultCapacity
+	}
+	weight := float64(snapshot.DataSampleAge) / float64(staleCapacityHorizon)
+	return snapshot.LastDataCapacity + (float64(defaultCapacity)-snapshot.LastDataCapacity)*weight
 }
 
 func (quality *Quality) preferredRTT(now time.Time) (time.Duration, time.Duration) {
