@@ -186,30 +186,15 @@ func TestRelayQualityEventsDriveFastestPlacementAndRetryEstimate(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := relay.Handle(RelayEvent{
-		Kind: RelaySetStallPenalty, Attachment: testRelayA, StallPenalty: time.Second,
-	}); err != nil {
-		t.Fatal(err)
-	}
 	actions, err = relay.Handle(RelayEvent{
-		Kind: RelayTargetReadResult, Generation: relay.Snapshot().TargetReadGeneration, Data: []byte("load"),
+		Kind: RelaySetStallPenalty, Attachment: testRelayA, StallPenalty: time.Second,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	attachments = messageAttachments[protocol.Data](t, actions)
-	if len(attachments) != 1 || attachments[0] != testRelayA {
-		t.Fatalf("loaded placement before challenge = %#v", attachments)
-	}
-	now = now.Add(300 * time.Millisecond)
-	retryGeneration := relay.Snapshot().Flow.RetryGeneration
-	actions, err = relay.Handle(RelayEvent{Kind: RelayRetryDeadline, Generation: retryGeneration})
-	if err != nil {
-		t.Fatal(err)
-	}
-	attachments = messageAttachments[protocol.Data](t, actions)
 	if len(attachments) != 1 || attachments[0] != testRelayB {
-		t.Fatalf("loaded recovery placements = %#v", attachments)
+		t.Fatalf("stall did not immediately recover outstanding DATA = %#v", attachments)
 	}
 }
 

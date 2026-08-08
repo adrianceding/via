@@ -623,7 +623,7 @@ func (daemon *clientDaemon) routeClientMessage(session *wireSession, flowID prot
 	instance := daemon.flows[flowID]
 	daemon.flowsMu.RUnlock()
 	if instance != nil {
-		instance.emit(clientFlowRemote{message: message, sessionGeneration: session.generation, attachment: attachment})
+		instance.emitRemote(clientFlowRemote{message: message, sessionGeneration: session.generation, attachment: attachment})
 	}
 }
 

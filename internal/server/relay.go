@@ -314,6 +314,9 @@ func (relay *Relay) Handle(event RelayEvent) ([]RelayAction, error) {
 	}
 	var actions []RelayAction
 	var err error
+	qualityMaySignalStall := event.Kind == RelaySetStallPenalty ||
+		event.Kind == RelaySetSessionQuality || event.Kind == RelaySetSessionQualities
+	wasIncumbentStalled := qualityMaySignalStall && relay.incumbentStalled()
 	switch event.Kind {
 	case RelayStart:
 		if relay.started {
@@ -363,6 +366,12 @@ func (relay *Relay) Handle(event RelayEvent) ([]RelayAction, error) {
 		err = relay.policy.SetQualitySnapshots(event.SessionQualities)
 	default:
 		return nil, ErrInvalidRelayEvent
+	}
+	if err == nil && qualityMaySignalStall && !wasIncumbentStalled && relay.incumbentStalled() {
+		generation := relay.machine.Snapshot().RetryGeneration
+		if generation != 0 {
+			err = relay.applyFlowEvent(flow.FlowEvent{Kind: flow.FlowRetryDeadline, Generation: generation}, &actions)
+		}
 	}
 
 	if errors.Is(err, ErrRelayAttemptLimit) && !relay.converging() {
@@ -990,24 +999,28 @@ func (relay *Relay) observeProbeQuality(event RelayEvent) error {
 }
 
 func (relay *Relay) setAttachmentLoad(event RelayEvent) error {
-	quality, err := relay.policy.Quality(event.Attachment)
-	if err != nil {
-		return err
-	}
-	quality.SetLoad(event.QueuedBytes, event.InFlightBytes)
-	return nil
+	return relay.policy.SetAttachmentLoad(event.Attachment, event.QueuedBytes, event.InFlightBytes)
 }
 
 func (relay *Relay) setStallPenalty(event RelayEvent) error {
-	quality, err := relay.policy.Quality(event.Attachment)
-	if err != nil {
-		return err
-	}
-	return quality.SetStallPenalty(event.StallPenalty)
+	return relay.policy.SetStallPenalty(event.Attachment, event.StallPenalty)
 }
 
 func (relay *Relay) setSessionQuality(event RelayEvent) error {
 	return relay.policy.SetQualitySnapshot(event.Attachment, event.Quality)
+}
+
+func (relay *Relay) incumbentStalled() bool {
+	snapshot := relay.policy.Snapshot()
+	if !snapshot.Pending || !snapshot.HasIncumbent {
+		return false
+	}
+	for _, attachment := range snapshot.Attachments {
+		if attachment.Attachment == snapshot.Incumbent {
+			return attachment.Quality.StallPenalty > 0
+		}
+	}
+	return false
 }
 
 func (relay *Relay) currentRetryAfter() time.Duration {

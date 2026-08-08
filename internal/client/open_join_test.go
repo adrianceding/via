@@ -399,7 +399,7 @@ func TestAdaptiveOpenRacesAllReadySessionsAndPublishesEachAttachment(t *testing.
 		t.Fatalf("adaptive concurrent OPEN actions = %#v", opening)
 	}
 
-	for _, open := range opens {
+	for index, open := range opens {
 		result := successfulTestOpenResult()
 		result.ImplicitAttachment = true
 		actions := handleOpenJoin(t, coordinator, OpenJoinEvent{
@@ -414,18 +414,56 @@ func TestAdaptiveOpenRacesAllReadySessionsAndPublishesEachAttachment(t *testing.
 			Kind: OpenJoinAttachmentPublished, Generation: publish.Generation,
 			SessionGeneration: publish.SessionGeneration,
 		})
-		if open.SessionGeneration == opens[len(opens)-1].SessionGeneration {
+		if index == 0 {
 			if !hasOpenJoinAction(completed, OpenJoinActionReplyApplicationSuccess) {
-				t.Fatalf("last adaptive attachment did not enable the application: %#v", completed)
+				t.Fatalf("first adaptive attachment did not enable the application: %#v", completed)
 			}
 		} else if hasOpenJoinAction(completed, OpenJoinActionReplyApplicationSuccess) {
-			t.Fatalf("session %d enabled the application before all paths were ready: %#v", open.SessionGeneration, completed)
+			t.Fatalf("session %d enabled the application more than once: %#v", open.SessionGeneration, completed)
 		}
 	}
 
 	if snapshot := coordinator.Snapshot(); snapshot.State != OpenJoinActive ||
 		len(snapshot.Attachments) != len(opens) || !snapshot.ApplicationAccepted {
 		t.Fatalf("snapshot after all adaptive paths attached = %#v", snapshot)
+	}
+}
+
+func TestAdaptiveInvalidFinalOpenResultDoesNotLeaveAcceptedFlowWaiting(t *testing.T) {
+	coordinator := newTestOpenJoin(t)
+	for generation := uint64(1); generation <= 2; generation++ {
+		handleOpenJoin(t, coordinator, OpenJoinEvent{Kind: OpenJoinSessionReady, SessionGeneration: generation})
+	}
+	_, opens := beginTestOpens(t, coordinator)
+	if len(opens) != 2 {
+		t.Fatalf("adaptive concurrent OPEN attempts = %#v", opens)
+	}
+
+	result := successfulTestOpenResult()
+	result.ImplicitAttachment = true
+	healthy := handleOpenJoin(t, coordinator, OpenJoinEvent{
+		Kind: OpenJoinOpenResultReceived, Generation: opens[0].Generation,
+		SessionGeneration: opens[0].SessionGeneration, OpenResult: result,
+	})
+	publish := requireOpenJoinAction(t, healthy, OpenJoinActionPublishAttachment)
+	completed := handleOpenJoin(t, coordinator, OpenJoinEvent{
+		Kind: OpenJoinAttachmentPublished, Generation: publish.Generation,
+		SessionGeneration: publish.SessionGeneration,
+	})
+	if !hasOpenJoinAction(completed, OpenJoinActionReplyApplicationSuccess) {
+		t.Fatalf("healthy attachment did not enable the application: %#v", completed)
+	}
+
+	invalid := handleOpenJoin(t, coordinator, OpenJoinEvent{
+		Kind: OpenJoinOpenResultReceived, Generation: opens[1].Generation,
+		SessionGeneration: opens[1].SessionGeneration, OpenResult: protocol.OpenResult{},
+	})
+	if hasOpenJoinAction(invalid, OpenJoinActionFailFlow) {
+		t.Fatalf("invalid secondary OPEN failed an accepted flow: %#v", invalid)
+	}
+	snapshot := coordinator.Snapshot()
+	if snapshot.State != OpenJoinActive || !snapshot.ApplicationAccepted || snapshot.OpenDeadlineGeneration != 0 {
+		t.Fatalf("accepted flow remained waiting after final invalid OPEN = %#v", snapshot)
 	}
 }
 
@@ -1005,9 +1043,9 @@ func TestRedundantOpenAndJoinRaceAllReadySessions(t *testing.T) {
 	firstCompleted := handleOpenJoin(t, coordinator, OpenJoinEvent{
 		Kind: OpenJoinAttachmentPublished, Generation: firstPublish.Generation, SessionGeneration: firstPublish.SessionGeneration,
 	})
-	if hasOpenJoinAction(firstCompleted, OpenJoinActionReplyApplicationSuccess) ||
+	if !hasOpenJoinAction(firstCompleted, OpenJoinActionReplyApplicationSuccess) ||
 		coordinator.Snapshot().State != OpenJoinJoining {
-		t.Fatalf("first OPEN attachment published before all paths were ready = %#v / %#v", firstCompleted, coordinator.Snapshot())
+		t.Fatalf("first OPEN attachment did not enable application while remaining paths joined = %#v / %#v", firstCompleted, coordinator.Snapshot())
 	}
 
 	for _, open := range opens {
@@ -1025,12 +1063,8 @@ func TestRedundantOpenAndJoinRaceAllReadySessions(t *testing.T) {
 		completed := handleOpenJoin(t, coordinator, OpenJoinEvent{
 			Kind: OpenJoinAttachmentPublished, Generation: publish.Generation, SessionGeneration: open.SessionGeneration,
 		})
-		if open.SessionGeneration == opens[1].SessionGeneration {
-			if !hasOpenJoinAction(completed, OpenJoinActionReplyApplicationSuccess) {
-				t.Fatalf("last OPEN attachment did not enable the application: %#v", completed)
-			}
-		} else if hasOpenJoinAction(completed, OpenJoinActionReplyApplicationSuccess) {
-			t.Fatalf("session %d enabled the application before all paths were ready: %#v", open.SessionGeneration, completed)
+		if hasOpenJoinAction(completed, OpenJoinActionReplyApplicationSuccess) {
+			t.Fatalf("session %d enabled the application more than once: %#v", open.SessionGeneration, completed)
 		}
 	}
 	if snapshot := coordinator.Snapshot(); snapshot.State != OpenJoinActive || len(snapshot.Attachments) != 3 ||

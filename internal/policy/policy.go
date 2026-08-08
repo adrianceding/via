@@ -13,16 +13,17 @@ import (
 )
 
 const (
-	MaxAttachments             = flow.MaxAttachments
-	StableACKCount             = 8
-	StableAcknowledged         = 64 << 10
-	MinimumConstraint          = protocol.MinimumDeliveryConstraint
-	MaximumConstraint          = protocol.MaximumDeliveryConstraint
-	fastestImprovementPercent  = 15
-	fastestImprovementAbsolute = 5 * time.Millisecond
-	fastestChallengeDuration   = 300 * time.Millisecond
-	fastestHoldDownDuration    = time.Second
-	maximumAdaptiveDataCopies  = 2
+	MaxAttachments               = flow.MaxAttachments
+	StableACKCount               = 8
+	StableAcknowledged           = 64 << 10
+	MinimumConstraint            = protocol.MinimumDeliveryConstraint
+	MaximumConstraint            = protocol.MaximumDeliveryConstraint
+	fastestImprovementPercent    = 15
+	fastestImprovementAbsolute   = 5 * time.Millisecond
+	fastestChallengeDuration     = 300 * time.Millisecond
+	fastestHoldDownDuration      = time.Second
+	maximumAdaptiveDataCopies    = 2
+	MaximumDeliveryRetryEstimate = 10 * time.Second
 )
 
 var (
@@ -278,6 +279,35 @@ func (policy *Policy) SetQualitySnapshots(snapshots map[flow.AttachmentKey]Quali
 		state.hasSnapshot = true
 	}
 	return nil
+}
+
+func (policy *Policy) SetAttachmentLoad(attachment flow.AttachmentKey, queuedBytes, inFlightBytes uint64) error {
+	state, ok := policy.attachments[attachment]
+	if !ok {
+		return ErrUnknownAttachment
+	}
+	if state.hasSnapshot {
+		state.qualitySnapshot.QueuedBytes = queuedBytes
+		state.qualitySnapshot.InFlightBytes = inFlightBytes
+	} else {
+		state.quality.SetLoad(queuedBytes, inFlightBytes)
+	}
+	return nil
+}
+
+func (policy *Policy) SetStallPenalty(attachment flow.AttachmentKey, penalty time.Duration) error {
+	if penalty < 0 {
+		return ErrInvalidSample
+	}
+	state, ok := policy.attachments[attachment]
+	if !ok {
+		return ErrUnknownAttachment
+	}
+	if state.hasSnapshot {
+		state.qualitySnapshot.StallPenalty = penalty
+		return nil
+	}
+	return state.quality.SetStallPenalty(penalty)
 }
 
 func (policy *Policy) ResolveAssigned(attachment flow.AttachmentKey, bytes uint64) error {
@@ -545,11 +575,7 @@ func (policy *Policy) placementFor(candidate candidate) Placement {
 }
 
 func boundedRetryAfter(retryEstimate, estimatedDelivery time.Duration) time.Duration {
-	// The RTT-based retry estimate is bounded, but delivery time also includes
-	// the bytes already queued on the attachment. Capping that combined value
-	// can retry a still-in-flight frame before the path has had time to deliver
-	// it, especially when a full transport queue is slower than 1 MiB/s.
-	return max(retryEstimate, estimatedDelivery)
+	return min(max(retryEstimate, estimatedDelivery), MaximumDeliveryRetryEstimate)
 }
 
 type candidate struct {
@@ -647,12 +673,9 @@ func (policy *Policy) selectFastest(candidates []candidate) candidate {
 		return best
 	}
 	incumbent := candidates[incumbentIndex]
-	// Keep new DATA on a healthy current path while the flow still has
-	// outstanding bytes. A quality-driven switch here can put a later range
-	// ahead of an earlier range and turn normal reordering into a cumulative
-	// ACK gap. A transport stall is different: let the normal challenge move
-	// new DATA away from a path that is no longer advancing. The explicit
-	// GapDue and RetryDue paths still switch immediately for recovery.
+	// Keep a continuous byte stream on one healthy path. Queue depth changes
+	// faster than delivery quality and must not turn fastest mode into striping;
+	// explicit gap/retry recovery still moves away from a stalled incumbent.
 	incumbentQuality := policy.qualitySnapshot(policy.attachments[incumbent.attachment])
 	if policy.pending && incumbentQuality.StallPenalty == 0 {
 		policy.clearCandidate()

@@ -809,6 +809,9 @@ func (coordinator *OpenJoinCoordinator) redundantOpenResultReceived(event OpenJo
 	}
 	if !coordinator.validOpenResult(event.OpenResult) {
 		if coordinator.capability != (protocol.Capability{}) {
+			session.joinFinished = true
+			coordinator.redundantJoinFailure = OpenJoinFailureProtocol
+			coordinator.finishRedundantJoinRound(batch)
 			return
 		}
 		coordinator.redundantOpenFailure = OpenJoinFailureProtocol
@@ -1051,6 +1054,10 @@ func (coordinator *OpenJoinCoordinator) redundantAttachmentPublicationCompleted(
 		})
 		coordinator.fail(OpenJoinFailureProtocol, 0, batch)
 		return
+	}
+	if !coordinator.applicationAccepted {
+		coordinator.applicationAccepted = true
+		batch.add(OpenJoinAction{Kind: OpenJoinActionReplyApplicationSuccess})
 	}
 	coordinator.finishRedundantJoinRound(batch)
 }

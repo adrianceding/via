@@ -39,6 +39,11 @@ type clientFlowRemote struct {
 	attachment        flow.AttachmentKey
 }
 
+const (
+	minimumInitialOpenHeadStart = 25 * time.Millisecond
+	maximumInitialOpenHeadStart = 250 * time.Millisecond
+)
+
 type clientFlowSessionReady struct {
 	generation uint64
 	rtt        time.Duration
@@ -79,6 +84,7 @@ type clientFlow struct {
 	cancel        context.CancelFunc
 
 	events                chan any
+	remoteEvents          chan clientFlowRemote
 	openResult            chan protocol.OpenResultCode
 	done                  chan struct{}
 	resultOnce            sync.Once
@@ -116,7 +122,8 @@ func newClientFlow(host *clientDaemon, connection net.Conn, target protocol.Targ
 	ctx, cancel := context.WithCancel(host.runtimeCtx)
 	instance := &clientFlow{
 		host: host, application: application, openJoin: coordinator, target: target, ctx: ctx, cancel: cancel,
-		events: make(chan any, 128), openResult: make(chan protocol.OpenResultCode, 1), done: make(chan struct{}),
+		events: make(chan any, 128), remoteEvents: make(chan clientFlowRemote, 2*flow.MaxReplaySegments+flow.MaxAttachments),
+		openResult: make(chan protocol.OpenResultCode, 1), done: make(chan struct{}),
 		qualityWake: make(chan struct{}, 1), pendingSessionQuality: make(map[uint64]clientFlowSessionQuality),
 		pendingRelayQuality: make(map[flow.AttachmentKey]clientcore.ApplicationRelayEvent),
 		openJoinTimers:      make(map[openJoinTimerKey]*time.Timer, 4), relayTimers: make(map[relayTimerKey]*time.Timer, 5),
@@ -156,6 +163,10 @@ func (instance *clientFlow) run() {
 			return
 		case raw := <-instance.events:
 			instance.dispatch(raw)
+			instance.drainOwnedEvents()
+			instance.drainQualityEvents()
+		case remote := <-instance.remoteEvents:
+			instance.handleRemote(remote)
 			instance.drainOwnedEvents()
 			instance.drainQualityEvents()
 		case <-instance.qualityWake:
@@ -275,6 +286,18 @@ func (instance *clientFlow) emit(event any) {
 	}
 }
 
+func (instance *clientFlow) emitRemote(event clientFlowRemote) {
+	if instance == nil {
+		return
+	}
+	select {
+	case instance.remoteEvents <- event:
+	case <-instance.ctx.Done():
+	default:
+		instance.requestCancel(protocol.ResetResourceLimit)
+	}
+}
+
 func (instance *clientFlow) emitOwned(event any) {
 	if instance != nil {
 		instance.ownedEvents = append(instance.ownedEvents, event)
@@ -378,6 +401,7 @@ func (instance *clientFlow) handleOpenJoin(event clientcore.OpenJoinEvent) {
 
 func (instance *clientFlow) executeOpenJoin(actions []clientcore.OpenJoinAction) {
 	failedReservations := make(map[uint64]struct{})
+	openActions := make([]clientcore.OpenJoinAction, 0, len(actions))
 	for _, action := range actions {
 		if _, failed := failedReservations[action.Generation]; failed && action.Kind == clientcore.OpenJoinActionSendJoin {
 			continue
@@ -421,7 +445,7 @@ func (instance *clientFlow) executeOpenJoin(actions []clientcore.OpenJoinAction)
 				instance.cancel()
 				return
 			}
-			instance.send(action.SessionGeneration, action.Open)
+			openActions = append(openActions, action)
 		case clientcore.OpenJoinActionReserveAttachment:
 			session := instance.host.session(action.SessionGeneration)
 			if session == nil {
@@ -468,6 +492,7 @@ func (instance *clientFlow) executeOpenJoin(actions []clientcore.OpenJoinAction)
 			instance.cancel()
 		}
 	}
+	instance.sendOrderedOpens(openActions)
 }
 
 func (instance *clientFlow) initializeRelay(flowID protocol.FlowID) bool {
@@ -507,13 +532,52 @@ func (instance *clientFlow) send(sessionGeneration uint64, message protocol.Mess
 	instance.host.wg.Add(1)
 	go func() {
 		defer instance.host.wg.Done()
-		session := instance.host.session(sessionGeneration)
-		if session == nil || session.send(message) != nil {
-			instance.host.emitPoolEvent(poolEvent{manager: clientcore.SessionManagerEvent{
-				Kind: clientcore.SessionConnectionLost, Generation: sessionGeneration,
-			}})
+		instance.sendNow(sessionGeneration, message)
+	}()
+}
+
+func (instance *clientFlow) sendNow(sessionGeneration uint64, message protocol.Message) {
+	session := instance.host.session(sessionGeneration)
+	if session == nil || session.send(message) != nil {
+		instance.host.emitPoolEvent(poolEvent{manager: clientcore.SessionManagerEvent{
+			Kind: clientcore.SessionConnectionLost, Generation: sessionGeneration,
+		}})
+	}
+}
+
+func (instance *clientFlow) sendOrderedOpens(actions []clientcore.OpenJoinAction) {
+	if len(actions) == 0 {
+		return
+	}
+	instance.host.wg.Add(1)
+	go func() {
+		defer instance.host.wg.Done()
+		first := actions[0]
+		instance.sendNow(first.SessionGeneration, first.Open)
+		if len(actions) == 1 {
+			return
+		}
+		timer := time.NewTimer(instance.initialOpenHeadStart(first.SessionGeneration))
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+		case <-instance.ctx.Done():
+			return
+		}
+		for _, action := range actions[1:] {
+			instance.send(action.SessionGeneration, action.Open)
 		}
 	}()
+}
+
+func (instance *clientFlow) initialOpenHeadStart(sessionGeneration uint64) time.Duration {
+	delay := minimumInitialOpenHeadStart
+	if session := instance.host.session(sessionGeneration); session != nil {
+		if rtt, _ := session.probeQuality(); rtt > delay {
+			delay = rtt
+		}
+	}
+	return min(delay, maximumInitialOpenHeadStart)
 }
 
 func (instance *clientFlow) handleRemote(event clientFlowRemote) {

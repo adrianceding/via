@@ -58,6 +58,58 @@ func TestClientFlowEventBackpressureDoesNotCancelFlow(t *testing.T) {
 	}
 }
 
+func TestClientFlowRemoteOverflowDoesNotBlockSharedSession(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	instance := &clientFlow{ctx: ctx, cancel: cancel, remoteEvents: make(chan clientFlowRemote, 1)}
+	instance.remoteEvents <- clientFlowRemote{}
+
+	done := make(chan struct{})
+	go func() {
+		instance.emitRemote(clientFlowRemote{})
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(250 * time.Millisecond):
+		cancel()
+		<-done
+		t.Fatal("full remote event queue blocked the shared session reader")
+	}
+	select {
+	case <-ctx.Done():
+	default:
+		t.Fatal("remote queue overflow did not cancel only the overloaded flow")
+	}
+	if got := protocol.ResetReason(instance.cancelCode.Load()); got != protocol.ResetResourceLimit {
+		t.Fatalf("overflow reset reason = %d, want %d", got, protocol.ResetResourceLimit)
+	}
+}
+
+func TestClientFlowInitialOpenHeadStartUsesBoundedSessionRTT(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	host := &clientDaemon{sessions: make(map[uint64]*wireSession)}
+	instance := &clientFlow{host: host}
+	if got := instance.initialOpenHeadStart(1); got != minimumInitialOpenHeadStart {
+		t.Fatalf("missing session head start = %s", got)
+	}
+
+	session, err := newWireSession(ctx, 1, &clientTestTransportConnection{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.close()
+	host.sessions[1] = session
+	session.probeSRTT = 100 * time.Millisecond
+	if got := instance.initialOpenHeadStart(1); got != 100*time.Millisecond {
+		t.Fatalf("measured session head start = %s", got)
+	}
+	session.probeSRTT = time.Second
+	if got := instance.initialOpenHeadStart(1); got != maximumInitialOpenHeadStart {
+		t.Fatalf("bounded session head start = %s", got)
+	}
+}
+
 func TestClientFlowConsumesOwnedTimerRegistrations(t *testing.T) {
 	openTimer := time.NewTimer(time.Hour)
 	relayTimer := time.NewTimer(time.Hour)
