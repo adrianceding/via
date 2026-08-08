@@ -166,13 +166,12 @@ type relayPendingSend struct {
 }
 
 type relayAttemptHistory struct {
-	generation  uint64
-	end         uint64
-	fin         bool
-	retryAfter  time.Duration
-	attempted   []flow.AttachmentKey
-	attempts    []relayAttempt
-	invalidated bool
+	generation uint64
+	end        uint64
+	fin        bool
+	retryAfter time.Duration
+	attempted  []flow.AttachmentKey
+	attempts   []relayAttempt
 }
 
 type relayAttempt struct {
@@ -1015,16 +1014,28 @@ func (relay *Relay) currentRetryAfter() time.Duration {
 	if relay.retryAfter > 0 {
 		return relay.retryAfter
 	}
-	var after time.Duration
 	acknowledged := relay.machine.TxAcknowledgedOffset()
+	var earliestEnd uint64
+	var earliestAfter time.Duration
+	foundEarliest := false
 	for _, history := range relay.attemptHistory {
-		if history.retryAfter > 0 && (history.fin || history.end > acknowledged) && (after == 0 || history.retryAfter < after) {
-			after = history.retryAfter
+		if history.fin {
+			if history.end < acknowledged {
+				continue
+			}
+		} else if history.end <= acknowledged {
+			continue
+		}
+		if !foundEarliest || history.end < earliestEnd {
+			foundEarliest = true
+			earliestEnd = history.end
+			earliestAfter = history.retryAfter
 		}
 	}
-	if after > 0 {
-		return after
+	if earliestAfter > 0 {
+		return earliestAfter
 	}
+	var after time.Duration
 	for _, attachment := range relay.policy.Snapshot().Attachments {
 		retry := attachment.Quality.RetryEstimate
 		if retry > 0 && (after == 0 || retry < after) {
@@ -1058,7 +1069,6 @@ func (relay *Relay) beginAttemptGeneration(item flow.TxItem) (*relayAttemptHisto
 		history.retryAfter = 0
 		history.attempted = nil
 		history.attempts = nil
-		history.invalidated = item.AttemptGeneration > 1
 	}
 	if item.Kind == flow.TxItemFIN {
 		history.end = item.FinalOffset
@@ -1075,7 +1085,7 @@ func (relay *Relay) recordAttemptStart(item flow.TxItem, attachment flow.Attachm
 		return
 	}
 	history := relay.attemptHistory[item.ItemID]
-	if history == nil || history.generation != item.AttemptGeneration || history.invalidated || len(history.attempts) >= flow.MaxAttachments {
+	if history == nil || history.generation != item.AttemptGeneration || len(history.attempts) >= flow.MaxAttachments {
 		return
 	}
 	attempt := relayAttempt{

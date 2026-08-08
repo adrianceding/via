@@ -181,13 +181,12 @@ type applicationRelayPendingSend struct {
 }
 
 type applicationRelayAttemptHistory struct {
-	generation  uint64
-	end         uint64
-	fin         bool
-	retryAfter  time.Duration
-	attempted   []flow.AttachmentKey
-	attempts    []applicationRelayAttempt
-	invalidated bool
+	generation uint64
+	end        uint64
+	fin        bool
+	retryAfter time.Duration
+	attempted  []flow.AttachmentKey
+	attempts   []applicationRelayAttempt
 }
 
 type applicationRelayAttempt struct {
@@ -1196,16 +1195,28 @@ func (relay *ApplicationRelay) currentRetryAfter() time.Duration {
 	if relay.retryAfter > 0 {
 		return relay.retryAfter
 	}
-	var after time.Duration
 	acknowledged := relay.machine.TxAcknowledgedOffset()
+	var earliestEnd uint64
+	var earliestAfter time.Duration
+	foundEarliest := false
 	for _, history := range relay.attemptHistory {
-		if history.retryAfter > 0 && (history.fin || history.end > acknowledged) && (after == 0 || history.retryAfter < after) {
-			after = history.retryAfter
+		if history.fin {
+			if history.end < acknowledged {
+				continue
+			}
+		} else if history.end <= acknowledged {
+			continue
+		}
+		if !foundEarliest || history.end < earliestEnd {
+			foundEarliest = true
+			earliestEnd = history.end
+			earliestAfter = history.retryAfter
 		}
 	}
-	if after > 0 {
-		return after
+	if earliestAfter > 0 {
+		return earliestAfter
 	}
+	var after time.Duration
 	for _, attachment := range relay.policy.Snapshot().Attachments {
 		retry := attachment.Quality.RetryEstimate
 		if retry > 0 && (after == 0 || retry < after) {
@@ -1239,7 +1250,6 @@ func (relay *ApplicationRelay) beginAttemptGeneration(item flow.TxItem) (*applic
 		history.retryAfter = 0
 		history.attempted = nil
 		history.attempts = nil
-		history.invalidated = item.AttemptGeneration > 1
 	}
 	if item.Kind == flow.TxItemFIN {
 		history.end = item.FinalOffset

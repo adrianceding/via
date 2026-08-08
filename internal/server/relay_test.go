@@ -202,15 +202,14 @@ func TestRelayQualityEventsDriveFastestPlacementAndRetryEstimate(t *testing.T) {
 		t.Fatalf("loaded placement before challenge = %#v", attachments)
 	}
 	now = now.Add(300 * time.Millisecond)
-	actions, err = relay.Handle(RelayEvent{
-		Kind: RelayTargetReadResult, Generation: relay.Snapshot().TargetReadGeneration, Data: []byte("load-after-challenge"),
-	})
+	retryGeneration := relay.Snapshot().Flow.RetryGeneration
+	actions, err = relay.Handle(RelayEvent{Kind: RelayRetryDeadline, Generation: retryGeneration})
 	if err != nil {
 		t.Fatal(err)
 	}
 	attachments = messageAttachments[protocol.Data](t, actions)
 	if len(attachments) != 1 || attachments[0] != testRelayB {
-		t.Fatalf("loaded placements = %#v", attachments)
+		t.Fatalf("loaded recovery placements = %#v", attachments)
 	}
 }
 
@@ -631,6 +630,48 @@ func TestRelayRejectsDataCreditAfterOverlappingRetry(t *testing.T) {
 	}
 }
 
+func TestRelayCreditsSuccessfulRecoveryAttempt(t *testing.T) {
+	relay, machine := newRelayFixture(t, policy.Config{
+		Mode: protocol.DeliveryAdaptive, Selection: protocol.PathFastest,
+	})
+	publishRelayAttachment(t, relay, machine, testRelayA)
+	publishRelayAttachment(t, relay, machine, testRelayB)
+	firstActions, err := relay.Handle(RelayEvent{
+		Kind: RelayTargetReadResult, Generation: relay.Snapshot().TargetReadGeneration, Data: []byte("retry"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := requireMessageAction[protocol.Data](t, firstActions)
+	retryGeneration := relay.Snapshot().Flow.RetryGeneration
+	retryActions, err := relay.Handle(RelayEvent{Kind: RelayRetryDeadline, Generation: retryGeneration})
+	if err != nil {
+		t.Fatal(err)
+	}
+	retried := requireMessageAction[protocol.Data](t, retryActions)
+	if retried.Attachment == first.Attachment || retried.AttemptGeneration != first.AttemptGeneration+1 {
+		t.Fatalf("recovery attempt = %#v, first = %#v", retried, first)
+	}
+	writeCompletedAt := time.Unix(500, 10*int64(time.Millisecond))
+	if _, err := relay.Handle(RelayEvent{
+		Kind: RelaySendResult, Generation: retried.Generation,
+		AttemptOutcome: flow.AttemptSucceeded, WriteCompletedAt: writeCompletedAt,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	actions, err := relay.Handle(RelayEvent{
+		Kind: RelayRemoteMessage, Attachment: retried.Attachment,
+		Message: protocol.ACK{FlowID: testRelayFlowID, NextOffset: 5},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	credit := requireRelayAction(t, actions, RelayActionDataCredit)
+	if credit.Attachment != retried.Attachment || credit.DataCreditBytes != 5 || credit.WriteCompletedAt != writeCompletedAt {
+		t.Fatalf("recovery DATA credit = %#v, retry = %#v", credit, retried)
+	}
+}
+
 func relayAssignedBytes(snapshot RelaySnapshot) uint64 {
 	var assigned uint64
 	for _, attachment := range snapshot.Policy.Attachments {
@@ -677,6 +718,90 @@ func TestRelayACKRearmsRetryWithLearnedPathEstimate(t *testing.T) {
 	rearmed := requireRelayAction(t, actions, RelayActionArmRetryDeadline)
 	if rearmed.After != wantRetry {
 		t.Fatalf("rearmed learned retry = %v, want %v", rearmed.After, wantRetry)
+	}
+}
+
+func TestRelayRetryDeadlineFollowsEarliestUnacknowledgedItem(t *testing.T) {
+	now := time.Unix(350, 0)
+	relay, machine := newRelayFixtureWithClock(t, policy.Config{
+		Mode: protocol.DeliveryAdaptive, Selection: protocol.PathFastest,
+	}, func() time.Time { return now })
+	publishRelayAttachment(t, relay, machine, testRelayA)
+	publishRelayAttachment(t, relay, machine, testRelayB)
+	if _, err := relay.Handle(RelayEvent{Kind: RelaySetSessionQualities, SessionQualities: map[flow.AttachmentKey]policy.QualitySnapshot{
+		testRelayA: {SRTT: 20 * time.Millisecond, CapacityBytesSec: 1 << 20, QueuedBytes: 2 << 20, RetryEstimate: policy.MaximumRetryEstimate},
+		testRelayB: {SRTT: 3 * time.Second, CapacityBytesSec: 1 << 20, RetryEstimate: policy.MaximumRetryEstimate},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	firstActions, err := relay.Handle(RelayEvent{
+		Kind: RelayTargetReadResult, Generation: relay.Snapshot().TargetReadGeneration, Data: []byte("first"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := requireMessageAction[protocol.Data](t, firstActions)
+	if first.Attachment != testRelayA {
+		t.Fatalf("first DATA attachment = %#v, want %#v", first.Attachment, testRelayA)
+	}
+	firstRetry := requireRelayAction(t, firstActions, RelayActionArmRetryDeadline).After
+	if firstRetry <= policy.MaximumRetryEstimate {
+		t.Fatalf("first retry estimate = %s, want queued delivery estimate above the RTT bound", firstRetry)
+	}
+
+	if _, err := relay.Handle(RelayEvent{Kind: RelaySetSessionQuality, Attachment: testRelayA, Quality: policy.QualitySnapshot{
+		SRTT: 20 * time.Millisecond, CapacityBytesSec: 1 << 20, StallPenalty: 5 * time.Second, RetryEstimate: policy.MaximumRetryEstimate,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	bRetryRTT := firstRetry - time.Duration(len("first"))*time.Second/time.Duration(1<<20)
+	if _, err := relay.Handle(RelayEvent{Kind: RelaySetSessionQuality, Attachment: testRelayB, Quality: policy.QualitySnapshot{
+		SRTT: bRetryRTT, CapacityBytesSec: 1 << 20, RetryEstimate: policy.MaximumRetryEstimate,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	flowActions, err := machine.Handle(flow.FlowEvent{
+		Kind:      flow.FlowLifecycle,
+		Lifecycle: flow.LifecycleEvent{Kind: flow.LifecycleAttachmentLost, Attachment: testRelayA},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := relay.Handle(RelayEvent{Kind: RelayApplyFlowActions, FlowActions: flowActions}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := relay.Handle(RelayEvent{Kind: RelaySetSessionQuality, Attachment: testRelayB, Quality: policy.QualitySnapshot{
+		SRTT: 20 * time.Millisecond, CapacityBytesSec: 1 << 20, RetryEstimate: policy.MinimumRetryEstimate,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := relay.Handle(RelayEvent{
+		Kind: RelayTargetReadResult, Generation: relay.Snapshot().TargetReadGeneration, Data: []byte("second"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(300 * time.Millisecond)
+	thirdActions, err := relay.Handle(RelayEvent{
+		Kind: RelayTargetReadResult, Generation: relay.Snapshot().TargetReadGeneration, Data: []byte("third"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	third := requireMessageAction[protocol.Data](t, thirdActions)
+	if third.Attachment != testRelayB {
+		t.Fatalf("third DATA attachment = %#v, want %#v", third.Attachment, testRelayB)
+	}
+
+	ackActions, err := relay.Handle(RelayEvent{
+		Kind: RelayRemoteMessage, Attachment: testRelayB,
+		Message: protocol.ACK{FlowID: testRelayFlowID, NextOffset: 0, Ranges: []protocol.ACKRange{{Start: 11, End: 16}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rearmed := requireRelayAction(t, ackActions, RelayActionArmRetryDeadline)
+	if rearmed.After != firstRetry {
+		t.Fatalf("retry after selective ACK = %s, want earliest gap estimate %s", rearmed.After, firstRetry)
 	}
 }
 

@@ -545,11 +545,11 @@ func (policy *Policy) placementFor(candidate candidate) Placement {
 }
 
 func boundedRetryAfter(retryEstimate, estimatedDelivery time.Duration) time.Duration {
-	retryAfter := max(retryEstimate, estimatedDelivery)
-	if retryAfter > MaximumRetryEstimate {
-		return MaximumRetryEstimate
-	}
-	return retryAfter
+	// The RTT-based retry estimate is bounded, but delivery time also includes
+	// the bytes already queued on the attachment. Capping that combined value
+	// can retry a still-in-flight frame before the path has had time to deliver
+	// it, especially when a full transport queue is slower than 1 MiB/s.
+	return max(retryEstimate, estimatedDelivery)
 }
 
 type candidate struct {
@@ -647,6 +647,17 @@ func (policy *Policy) selectFastest(candidates []candidate) candidate {
 		return best
 	}
 	incumbent := candidates[incumbentIndex]
+	// Keep new DATA on a healthy current path while the flow still has
+	// outstanding bytes. A quality-driven switch here can put a later range
+	// ahead of an earlier range and turn normal reordering into a cumulative
+	// ACK gap. A transport stall is different: let the normal challenge move
+	// new DATA away from a path that is no longer advancing. The explicit
+	// GapDue and RetryDue paths still switch immediately for recovery.
+	incumbentQuality := policy.qualitySnapshot(policy.attachments[incumbent.attachment])
+	if policy.pending && incumbentQuality.StallPenalty == 0 {
+		policy.clearCandidate()
+		return incumbent
+	}
 	if best.attachment == incumbent.attachment || !fastestImprovement(incumbent.estimate, best.estimate) {
 		policy.clearCandidate()
 		return incumbent

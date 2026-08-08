@@ -93,8 +93,8 @@ func TestPolicyBoundsRetryAfterByEstimatedDelivery(t *testing.T) {
 		t.Fatal(err)
 	}
 	placement = policy.PlaceNew(PlacementRequest{Bytes: 1024})[0]
-	if placement.EstimatedDelivery <= MaximumRetryEstimate || placement.RetryAfter != MaximumRetryEstimate {
-		t.Fatalf("bounded delivery-aware placement = %#v", placement)
+	if placement.EstimatedDelivery <= MaximumRetryEstimate || placement.RetryAfter != placement.EstimatedDelivery {
+		t.Fatalf("delivery-aware placement retained an invalid cap = %#v", placement)
 	}
 }
 
@@ -163,6 +163,71 @@ func TestFastestPolicyHoldDownAndImmediateFailureSwitch(t *testing.T) {
 	policy.RemoveAttachment(testAttachmentB)
 	if got := policy.PlaceNew(PlacementRequest{Bytes: 1})[0].Attachment; got != testAttachmentA {
 		t.Fatalf("failure switch = %+v", got)
+	}
+}
+
+func TestFastestPolicyPinsIncumbentWhileDataIsPending(t *testing.T) {
+	now := time.Unix(300, 0)
+	policy := newTestPolicyWithClock(t, Config{Mode: protocol.DeliveryAdaptive, Selection: protocol.PathFastest}, func() time.Time { return now })
+	addTestAttachments(t, policy)
+	quality := QualitySnapshot{CapacityBytesSec: 1 << 20}
+	quality.SRTT = 100 * time.Millisecond
+	if err := policy.SetQualitySnapshot(testAttachmentA, quality); err != nil {
+		t.Fatal(err)
+	}
+	quality.SRTT = 200 * time.Millisecond
+	if err := policy.SetQualitySnapshot(testAttachmentB, quality); err != nil {
+		t.Fatal(err)
+	}
+	if got := policy.PlaceNew(PlacementRequest{Bytes: 1})[0].Attachment; got != testAttachmentA {
+		t.Fatalf("initial fastest placement = %+v", got)
+	}
+
+	policy.SetPending(true)
+	if err := policy.SetQualitySnapshot(testAttachmentB, QualitySnapshot{SRTT: 20 * time.Millisecond, CapacityBytesSec: 1 << 20}); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(2 * fastestChallengeDuration)
+	if got := policy.PlaceNew(PlacementRequest{Bytes: 1})[0].Attachment; got != testAttachmentA {
+		t.Fatalf("pending flow switched to a quality candidate = %+v", got)
+	}
+	if snapshot := policy.Snapshot(); snapshot.HasCandidate {
+		t.Fatalf("pending flow retained a switch candidate = %#v", snapshot)
+	}
+
+	placements := policy.GapDue(PlacementRequest{Bytes: 1, Attempted: []flow.AttachmentKey{testAttachmentA}})
+	if len(placements) != 1 || placements[0].Attachment != testAttachmentB {
+		t.Fatalf("pending flow did not use explicit recovery switch = %#v", placements)
+	}
+}
+
+func TestFastestPolicyMovesFromStalledIncumbentWhileDataIsPending(t *testing.T) {
+	now := time.Unix(400, 0)
+	policy := newTestPolicyWithClock(t, Config{Mode: protocol.DeliveryAdaptive, Selection: protocol.PathFastest}, func() time.Time { return now })
+	addTestAttachments(t, policy)
+	if err := policy.SetQualitySnapshots(map[flow.AttachmentKey]QualitySnapshot{
+		testAttachmentA: {SRTT: 100 * time.Millisecond, CapacityBytesSec: 1 << 20},
+		testAttachmentB: {SRTT: 200 * time.Millisecond, CapacityBytesSec: 1 << 20},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := policy.PlaceNew(PlacementRequest{Bytes: 1})[0].Attachment; got != testAttachmentA {
+		t.Fatalf("initial fastest placement = %+v", got)
+	}
+
+	policy.SetPending(true)
+	if err := policy.SetQualitySnapshots(map[flow.AttachmentKey]QualitySnapshot{
+		testAttachmentA: {SRTT: 100 * time.Millisecond, CapacityBytesSec: 1 << 20, StallPenalty: 3 * time.Second},
+		testAttachmentB: {SRTT: 20 * time.Millisecond, CapacityBytesSec: 1 << 20},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := policy.PlaceNew(PlacementRequest{Bytes: 1})[0].Attachment; got != testAttachmentA {
+		t.Fatalf("stalled incumbent switched before challenge = %+v", got)
+	}
+	now = now.Add(fastestChallengeDuration)
+	if got := policy.PlaceNew(PlacementRequest{Bytes: 1})[0].Attachment; got != testAttachmentB {
+		t.Fatalf("stalled incumbent did not switch after challenge = %+v", got)
 	}
 }
 
