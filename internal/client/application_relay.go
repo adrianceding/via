@@ -16,7 +16,8 @@ import (
 
 const (
 	// MaxApplicationRelayPendingSends bounds per-flow ledger entries between
-	// send action emission and executor result feedback.
+	// send action emission and executor result feedback. Reaching this
+	// boundary is transport backpressure, not a flow failure.
 	MaxApplicationRelayPendingSends = flow.MaxAttachments * 4
 	MaxApplicationRelayAttemptItems = flow.MaxReplaySegments + 1
 	MaxApplicationRelayFlowActions  = 64
@@ -405,7 +406,7 @@ func (relay *ApplicationRelay) Handle(event ApplicationRelayEvent) ([]Applicatio
 		return nil, ErrInvalidApplicationRelayEvent
 	}
 
-	if (errors.Is(err, ErrApplicationRelaySendLimit) || errors.Is(err, ErrApplicationRelayAttemptLimit)) && !relay.converging() {
+	if errors.Is(err, ErrApplicationRelayAttemptLimit) && !relay.converging() {
 		resetErr := relay.applyLifecycleEvent(flow.LifecycleResetRequested, 0, protocol.ResetResourceLimit, &actions)
 		err = errors.Join(err, resetErr)
 	}
@@ -648,22 +649,17 @@ func (relay *ApplicationRelay) handleSendResult(event ApplicationRelayEvent, act
 		return err
 	}
 	delete(relay.pendingSends, event.Generation)
+	var result error
 	switch pending.kind {
 	case applicationRelayPendingAttempt:
 		relay.recordAttemptResult(pending, outcome, event.WriteCompletedAt)
-		return relay.applyFlowEvent(flow.FlowEvent{
+		result = relay.applyFlowEvent(flow.FlowEvent{
 			Kind: flow.FlowAttemptResult, ItemID: pending.itemID,
 			AttemptGeneration: pending.attemptGeneration,
 			Attachment:        pending.attachment, AttemptOutcome: outcome,
 		}, actions)
 	case applicationRelayPendingControl:
 		delete(relay.controlPending, pending.attachment)
-		message, deferred := relay.deferredControls[pending.attachment]
-		delete(relay.deferredControls, pending.attachment)
-		if !deferred || relay.terminal() || !relay.published(pending.attachment) {
-			return nil
-		}
-		return relay.emitControlOnAttachment(message, pending.attachment, actions)
 	case applicationRelayPendingReset:
 		if pending.resetGeneration != relay.resetGeneration || relay.resetPending == 0 {
 			return nil
@@ -671,13 +667,17 @@ func (relay *ApplicationRelay) handleSendResult(event ApplicationRelayEvent, act
 		relay.resetPending--
 		if outcome == flow.AttemptSucceeded {
 			relay.resetPending = 0
-			return relay.applyLifecycleEvent(flow.LifecycleResetSendCompleted, pending.resetGeneration, 0, actions)
+			result = relay.applyLifecycleEvent(flow.LifecycleResetSendCompleted, pending.resetGeneration, 0, actions)
+			break
 		}
 		if relay.resetPending == 0 {
-			return relay.applyLifecycleEvent(flow.LifecycleResetSendFailed, pending.resetGeneration, 0, actions)
+			result = relay.applyLifecycleEvent(flow.LifecycleResetSendFailed, pending.resetGeneration, 0, actions)
 		}
 	}
-	return nil
+	if relay.terminal() || relay.converging() {
+		return result
+	}
+	return errors.Join(result, relay.drainDeferredControls(actions))
 }
 
 func (relay *ApplicationRelay) handleSendAdmitted(event ApplicationRelayEvent) error {
@@ -799,8 +799,10 @@ func (relay *ApplicationRelay) placeTxItem(item flow.TxItem, actions *[]Applicat
 		if applicationRelayAttemptedAttachment(history.attempted, placement.Attachment) {
 			continue
 		}
+		// A full send ledger is expected when the transport is slower than the
+		// application. Leave the item in Flow's replay window and let its retry
+		// deadline retry placement after a send completion frees a slot.
 		if len(relay.pendingSends) >= MaxApplicationRelayPendingSends {
-			result = errors.Join(result, ErrApplicationRelaySendLimit)
 			continue
 		}
 		attemptActions, err := relay.machine.Handle(flow.FlowEvent{
@@ -948,6 +950,10 @@ func (relay *ApplicationRelay) emitControlOnAttachment(message protocol.Message,
 		relay.deferredControls[attachment] = cloneApplicationRelayMessage(message)
 		return nil
 	}
+	if len(relay.pendingSends) >= MaxApplicationRelayPendingSends {
+		relay.deferredControls[attachment] = cloneApplicationRelayMessage(message)
+		return nil
+	}
 	err := relay.emitSend(message, transport.FrameControl, attachment, applicationRelayPendingSend{
 		kind: applicationRelayPendingControl, attachment: attachment,
 	}, actions)
@@ -1060,6 +1066,25 @@ func (relay *ApplicationRelay) flushDeferredControls(actions *[]ApplicationRelay
 			Kind: ApplicationRelayActionSendMessage, Generation: generation, Attachment: placement.Attachment,
 			Message: cloneApplicationRelayMessage(message), Class: transport.FrameControl,
 		})
+	}
+	return result
+}
+
+func (relay *ApplicationRelay) drainDeferredControls(actions *[]ApplicationRelayAction) error {
+	var result error
+	for _, placement := range relay.policy.ControlPlacements() {
+		message, ok := relay.deferredControls[placement.Attachment]
+		if !ok {
+			continue
+		}
+		if len(relay.pendingSends) >= MaxApplicationRelayPendingSends {
+			break
+		}
+		if err := relay.emitControlOnAttachment(message, placement.Attachment, actions); err != nil {
+			result = errors.Join(result, err)
+			continue
+		}
+		delete(relay.deferredControls, placement.Attachment)
 	}
 	return result
 }

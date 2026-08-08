@@ -1088,7 +1088,7 @@ func TestApplicationRelayResetClearsProvisionalAndDeadlineConverges(t *testing.T
 	}
 }
 
-func TestApplicationRelaySendLedgerHasExactHardLimitAndResetsOnlyTheFlow(t *testing.T) {
+func TestApplicationRelaySendLedgerBackpressureDoesNotResetFlow(t *testing.T) {
 	relay, machine := newRelayFixture(t, policy.Config{
 		Mode: protocol.DeliveryRedundant, Selection: protocol.PathNone,
 	})
@@ -1096,6 +1096,7 @@ func TestApplicationRelaySendLedgerHasExactHardLimitAndResetsOnlyTheFlow(t *test
 	completeRelaySends(t, relay, publishActions)
 
 	message := protocol.Data{FlowID: testRelayFlowID, Offset: 1, Bytes: []byte("x")}
+	var firstGeneration uint64
 	for index := 0; index < MaxApplicationRelayPendingSends; index++ {
 		var ignored []ApplicationRelayAction
 		err := relay.emitSend(message, transport.FrameData, testRelayA, applicationRelayPendingSend{
@@ -1104,23 +1105,28 @@ func TestApplicationRelaySendLedgerHasExactHardLimitAndResetsOnlyTheFlow(t *test
 		if err != nil || len(ignored) != 1 {
 			t.Fatalf("enqueue %d: %v", index, err)
 		}
+		if index == 0 {
+			firstGeneration = ignored[0].Generation
+		}
 	}
 	if got := relay.Snapshot().PendingSends; got != MaxApplicationRelayPendingSends {
 		t.Fatalf("pending sends = %d, want %d", got, MaxApplicationRelayPendingSends)
 	}
 	actions, err := relay.Handle(ApplicationRelayEvent{Kind: ApplicationRelayRemoteMessage, Attachment: testRelayA, Message: message})
-	if !errors.Is(err, ErrApplicationRelaySendLimit) {
-		t.Fatalf("overflow error = %v", err)
+	if err != nil {
+		t.Fatalf("backpressure error = %v", err)
 	}
-	if state := relay.Snapshot().Flow.Lifecycle.State; state != flow.Resetting {
-		t.Fatalf("overflow flow state = %v, want Resetting", state)
+	if state := relay.Snapshot().Flow.Lifecycle.State; state != flow.Relaying {
+		t.Fatalf("backpressure flow state = %v, want Relaying", state)
 	}
-	if relay.Snapshot().PendingSends > MaxApplicationRelayPendingSends {
-		t.Fatalf("pending sends exceeded hard limit: %d", relay.Snapshot().PendingSends)
+	if countRelayActions(actions, ApplicationRelayActionSendMessage) != 0 || len(relay.deferredControls) != 1 {
+		t.Fatalf("backpressure actions=%#v deferred=%d", actions, len(relay.deferredControls))
 	}
-	reset := requireMessageAction[protocol.Reset](t, actions)
-	if reset.Message.(protocol.Reset).Reason != protocol.ResetResourceLimit {
-		t.Fatalf("overflow RESET = %#v", reset.Message)
+	actions, err = relay.Handle(ApplicationRelayEvent{
+		Kind: ApplicationRelaySendResult, Generation: firstGeneration, AttemptOutcome: flow.AttemptSucceeded,
+	})
+	if err != nil || len(messageAttachments[protocol.ACK](t, actions)) != 1 {
+		t.Fatalf("deferred ACK actions=%#v err=%v", actions, err)
 	}
 }
 
