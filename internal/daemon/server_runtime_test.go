@@ -888,6 +888,10 @@ func (harness *serverRuntimeHarness) close() {
 	if harness == nil || harness.closed.Swap(true) {
 		return
 	}
+	harness.daemon.openCommitMu.Lock()
+	harness.daemon.draining.Store(true)
+	harness.daemon.openCommitMu.Unlock()
+	harness.daemon.cancelDials()
 	harness.daemon.closeAll()
 	harness.daemon.cancelRuntime()
 	_ = harness.peer.Close()
