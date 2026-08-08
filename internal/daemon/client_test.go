@@ -17,30 +17,43 @@ import (
 	"github.com/adrianceding/via/internal/transport"
 )
 
-func TestClientFlowEventOverflowCancelsOnlyFlowWithoutBlocking(t *testing.T) {
+func TestClientFlowEventBackpressureDoesNotCancelFlow(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	instance := &clientFlow{ctx: ctx, cancel: cancel, events: make(chan any, 1)}
-	instance.events <- struct{}{}
+	instance.events <- "sentinel"
 
+	want := "event"
 	done := make(chan struct{})
 	go func() {
-		instance.emit(struct{}{})
+		instance.emit(want)
 		close(done)
 	}()
 	select {
 	case <-done:
-	case <-time.After(250 * time.Millisecond):
-		cancel()
-		<-done
-		t.Fatal("full flow event queue blocked its caller")
+		t.Fatal("full flow event queue did not apply backpressure")
+	case <-time.After(50 * time.Millisecond):
 	}
 	select {
 	case <-ctx.Done():
+		t.Fatal("full flow event queue cancelled the flow")
 	default:
-		t.Fatal("full flow event queue did not cancel the over-limit flow")
 	}
-	if got := protocol.ResetReason(instance.cancelCode.Load()); got != protocol.ResetResourceLimit {
-		t.Fatalf("overflow reset reason = %d, want %d", got, protocol.ResetResourceLimit)
+	if got := <-instance.events; got != "sentinel" {
+		t.Fatalf("queued event = %#v, want sentinel", got)
+	}
+	select {
+	case got := <-instance.events:
+		if got != want {
+			t.Fatalf("backpressured event = %#v, want %#v", got, want)
+		}
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("backpressured event was not delivered")
+	}
+	select {
+	case <-done:
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("event sender did not return after queue space became available")
 	}
 }
 

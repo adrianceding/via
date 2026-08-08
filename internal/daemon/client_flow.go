@@ -88,6 +88,8 @@ type clientFlow struct {
 	openJoinTimers map[openJoinTimerKey]*time.Timer
 	relayTimers    map[relayTimerKey]*time.Timer
 	publications   map[flow.AttachmentKey]uint64
+	// Events emitted synchronously by the actor bypass the bounded external queue.
+	ownedEvents    []any
 	recoveringSlot bool
 	lastReason     statusapi.TransitionReason
 }
@@ -134,6 +136,7 @@ func (instance *clientFlow) run() {
 		})
 	}
 	instance.handleOpenJoin(clientcore.OpenJoinEvent{Kind: clientcore.OpenJoinStart})
+	instance.drainOwnedEvents()
 	for {
 		select {
 		case <-instance.ctx.Done():
@@ -146,48 +149,69 @@ func (instance *clientFlow) run() {
 			instance.shutdown()
 			return
 		case raw := <-instance.events:
-			switch event := raw.(type) {
-			case clientcore.OpenJoinEvent:
-				instance.handleOpenJoin(event)
-			case clientcore.ApplicationRelayEvent:
-				instance.handleRelay(event)
-			case clientFlowOpenJoinTimer:
-				instance.consumeOpenJoinTimer(event.key)
-				instance.handleOpenJoin(event.event)
-			case clientFlowRelayTimer:
-				instance.consumeRelayTimer(event.key)
-				instance.handleRelay(event.event)
-			case clientFlowRemote:
-				instance.handleRemote(event)
-			case clientFlowSessionReady:
-				instance.handleOpenJoin(clientcore.OpenJoinEvent{
-					Kind: clientcore.OpenJoinSessionReady, SessionGeneration: event.generation,
-					SessionRTT: event.rtt, SessionStall: event.stall,
-				})
-			case clientFlowSessionQuality:
-				instance.handleOpenJoin(clientcore.OpenJoinEvent{
-					Kind: clientcore.OpenJoinSessionQuality, SessionGeneration: event.generation,
-					SessionRTT: event.rtt, SessionStall: event.stall,
-				})
-			case clientFlowSessionLost:
-				if instance.relay != nil {
-					instance.handleRelay(clientcore.ApplicationRelayEvent{Kind: clientcore.ApplicationRelaySessionClosed, Generation: event.generation})
-				}
-				instance.handleOpenJoin(clientcore.OpenJoinEvent{Kind: clientcore.OpenJoinSessionLost, SessionGeneration: event.generation})
-			case clientFlowApplicationEnabled:
-				if instance.relay != nil {
-					instance.handleRelay(clientcore.ApplicationRelayEvent{Kind: clientcore.ApplicationRelayEnableApplication})
-				}
-			case clientFlowSnapshotRequest:
-				if instance.relay != nil {
-					event.response <- instance.relay.Snapshot()
-				}
-			}
+			instance.dispatch(raw)
+			instance.drainOwnedEvents()
 		}
 		if instance.relay != nil {
 			state := instance.machine.LifecycleState()
 			if state == flow.Closed || state == flow.Reset {
 				return
+			}
+		}
+	}
+}
+
+func (instance *clientFlow) dispatch(raw any) {
+	switch event := raw.(type) {
+	case clientcore.OpenJoinEvent:
+		instance.handleOpenJoin(event)
+	case clientcore.ApplicationRelayEvent:
+		instance.handleRelay(event)
+	case clientFlowOpenJoinTimer:
+		instance.consumeOpenJoinTimer(event.key)
+		instance.handleOpenJoin(event.event)
+	case clientFlowRelayTimer:
+		instance.consumeRelayTimer(event.key)
+		instance.handleRelay(event.event)
+	case clientFlowRemote:
+		instance.handleRemote(event)
+	case clientFlowSessionReady:
+		instance.handleOpenJoin(clientcore.OpenJoinEvent{
+			Kind: clientcore.OpenJoinSessionReady, SessionGeneration: event.generation,
+			SessionRTT: event.rtt, SessionStall: event.stall,
+		})
+	case clientFlowSessionQuality:
+		instance.handleOpenJoin(clientcore.OpenJoinEvent{
+			Kind: clientcore.OpenJoinSessionQuality, SessionGeneration: event.generation,
+			SessionRTT: event.rtt, SessionStall: event.stall,
+		})
+	case clientFlowSessionLost:
+		if instance.relay != nil {
+			instance.handleRelay(clientcore.ApplicationRelayEvent{Kind: clientcore.ApplicationRelaySessionClosed, Generation: event.generation})
+		}
+		instance.handleOpenJoin(clientcore.OpenJoinEvent{Kind: clientcore.OpenJoinSessionLost, SessionGeneration: event.generation})
+	case clientFlowApplicationEnabled:
+		if instance.relay != nil {
+			instance.handleRelay(clientcore.ApplicationRelayEvent{Kind: clientcore.ApplicationRelayEnableApplication})
+		}
+	case clientFlowSnapshotRequest:
+		if instance.relay != nil {
+			event.response <- instance.relay.Snapshot()
+		}
+	}
+}
+
+func (instance *clientFlow) drainOwnedEvents() {
+	for len(instance.ownedEvents) != 0 {
+		events := instance.ownedEvents
+		instance.ownedEvents = nil
+		for _, event := range events {
+			instance.dispatch(event)
+			if instance.relay != nil {
+				state := instance.machine.LifecycleState()
+				if state == flow.Closed || state == flow.Reset {
+					return
+				}
 			}
 		}
 	}
@@ -236,15 +260,14 @@ func (instance *clientFlow) emit(event any) {
 		return
 	}
 	select {
-	case <-instance.ctx.Done():
-		return
-	default:
-	}
-	select {
 	case instance.events <- event:
 	case <-instance.ctx.Done():
-	default:
-		instance.requestCancel(protocol.ResetResourceLimit)
+	}
+}
+
+func (instance *clientFlow) emitOwned(event any) {
+	if instance != nil {
+		instance.ownedEvents = append(instance.ownedEvents, event)
 	}
 }
 
@@ -341,7 +364,7 @@ func (instance *clientFlow) executeOpenJoin(actions []clientcore.OpenJoinAction)
 			session := instance.host.session(action.SessionGeneration)
 			if session == nil {
 				failedReservations[action.Generation] = struct{}{}
-				instance.emit(clientcore.OpenJoinEvent{
+				instance.emitOwned(clientcore.OpenJoinEvent{
 					Kind: clientcore.OpenJoinJoinReservationFailed, Generation: action.Generation, SessionGeneration: action.SessionGeneration,
 				})
 				continue
@@ -354,7 +377,7 @@ func (instance *clientFlow) executeOpenJoin(actions []clientcore.OpenJoinAction)
 				failedReservations[action.Generation] = struct{}{}
 				instance.handleRelay(clientcore.ApplicationRelayEvent{Kind: clientcore.ApplicationRelayReleaseAttachment, Attachment: action.Attachment})
 				session.release(instance.flowID, action.Attachment)
-				instance.emit(clientcore.OpenJoinEvent{
+				instance.emitOwned(clientcore.OpenJoinEvent{
 					Kind: clientcore.OpenJoinJoinReservationFailed, Generation: action.Generation, SessionGeneration: action.SessionGeneration,
 				})
 			}
@@ -773,7 +796,7 @@ func (instance *clientFlow) executeRelay(actions []clientcore.ApplicationRelayAc
 		case clientcore.ApplicationRelayActionSendMessage:
 			pending, ok := instance.admitRelaySend(action)
 			if !ok {
-				instance.emit(clientcore.ApplicationRelayEvent{
+				instance.emitOwned(clientcore.ApplicationRelayEvent{
 					Kind: clientcore.ApplicationRelaySendResult, Generation: action.Generation, AttemptOutcome: flow.AttemptFailed,
 				})
 				continue
@@ -827,8 +850,8 @@ func (instance *clientFlow) executeRelay(actions []clientcore.ApplicationRelayAc
 			session := instance.host.session(action.Attachment.SessionGeneration)
 			generation := instance.publications[action.Attachment]
 			if session == nil || generation == 0 || session.publish(instance.flowID, action.Attachment) != nil {
-				instance.emit(clientcore.ApplicationRelayEvent{Kind: clientcore.ApplicationRelayReleaseAttachment, Attachment: action.Attachment})
-				instance.emit(clientcore.OpenJoinEvent{
+				instance.emitOwned(clientcore.ApplicationRelayEvent{Kind: clientcore.ApplicationRelayReleaseAttachment, Attachment: action.Attachment})
+				instance.emitOwned(clientcore.OpenJoinEvent{
 					Kind: clientcore.OpenJoinAttachmentPublishFailed, Generation: generation,
 					SessionGeneration: action.Attachment.SessionGeneration,
 				})
@@ -837,7 +860,7 @@ func (instance *clientFlow) executeRelay(actions []clientcore.ApplicationRelayAc
 					Kind: clientcore.ApplicationRelaySetSessionQuality, Attachment: action.Attachment,
 					Quality: session.qualitySnapshot(),
 				})
-				instance.emit(clientcore.OpenJoinEvent{
+				instance.emitOwned(clientcore.OpenJoinEvent{
 					Kind: clientcore.OpenJoinAttachmentPublished, Generation: generation,
 					SessionGeneration: action.Attachment.SessionGeneration,
 				})
