@@ -471,7 +471,8 @@ func (coordinator *OpenJoinCoordinator) openRetryDue(generation uint64, batch *o
 				}
 			}
 			if coordinator.capability != (protocol.Capability{}) && coordinator.attachmentCount != 0 {
-				coordinator.state = OpenJoinActive
+				coordinator.cancelOpenDeadline(batch)
+				coordinator.finishRedundantJoinRound(batch)
 			}
 			return
 		}
@@ -496,6 +497,10 @@ func (coordinator *OpenJoinCoordinator) openRetryDue(generation uint64, batch *o
 
 func (coordinator *OpenJoinCoordinator) openDeadlineReached(generation uint64, batch *openJoinActionBatch) {
 	if generation == 0 || generation != coordinator.openDeadlineGeneration {
+		return
+	}
+	if coordinator.parallelEstablishment() {
+		coordinator.redundantOpenDeadlineReached(batch)
 		return
 	}
 	coordinator.openDeadlineGeneration = 0
@@ -791,6 +796,7 @@ func (coordinator *OpenJoinCoordinator) redundantOpenResultReceived(event OpenJo
 	session.openFinished = true
 	if !coordinator.hasPendingRedundantOpen() {
 		coordinator.cancelOpenRetry(batch)
+		coordinator.cancelOpenDeadline(batch)
 	}
 	if !coordinator.validOpenResult(event.OpenResult) {
 		if coordinator.capability != (protocol.Capability{}) {
@@ -819,7 +825,6 @@ func (coordinator *OpenJoinCoordinator) redundantOpenResultReceived(event OpenJo
 		coordinator.capability = event.OpenResult.Capability
 		coordinator.redundantOpenFailure = 0
 		coordinator.redundantOpenResult = 0
-		coordinator.cancelOpenDeadline(batch)
 		coordinator.startRedundantOpenFallbackJoins(batch)
 	}
 	if event.OpenResult.ImplicitAttachment {
@@ -1038,10 +1043,6 @@ func (coordinator *OpenJoinCoordinator) redundantAttachmentPublicationCompleted(
 		coordinator.fail(OpenJoinFailureProtocol, 0, batch)
 		return
 	}
-	if !coordinator.applicationAccepted {
-		coordinator.applicationAccepted = true
-		batch.add(OpenJoinAction{Kind: OpenJoinActionReplyApplicationSuccess})
-	}
 	coordinator.finishRedundantJoinRound(batch)
 }
 
@@ -1059,7 +1060,7 @@ func (coordinator *OpenJoinCoordinator) redundantJoinDeadlineReached(batch *open
 		session.joinFinished = false
 	}
 	if coordinator.attachmentCount != 0 {
-		coordinator.state = OpenJoinActive
+		coordinator.finishRedundantJoinRound(batch)
 		return
 	}
 	if !coordinator.applicationAccepted {
@@ -1071,13 +1072,17 @@ func (coordinator *OpenJoinCoordinator) redundantJoinDeadlineReached(batch *open
 }
 
 func (coordinator *OpenJoinCoordinator) finishRedundantJoinRound(batch *openJoinActionBatch) {
-	if coordinator.hasPendingRedundantJoin() {
+	if coordinator.hasPendingRedundantEstablishment() {
 		coordinator.state = OpenJoinJoining
 		return
 	}
 	if coordinator.attachmentCount != 0 {
 		coordinator.cancelJoinDeadline(batch)
 		coordinator.state = OpenJoinActive
+		if !coordinator.applicationAccepted {
+			coordinator.applicationAccepted = true
+			batch.add(OpenJoinAction{Kind: OpenJoinActionReplyApplicationSuccess})
+		}
 		return
 	}
 	if coordinator.sessionCount == 0 {
@@ -1152,6 +1157,40 @@ func (coordinator *OpenJoinCoordinator) hasPendingRedundantJoin() bool {
 		}
 	}
 	return false
+}
+
+func (coordinator *OpenJoinCoordinator) hasPendingRedundantEstablishment() bool {
+	if coordinator.hasPendingRedundantOpen() {
+		return true
+	}
+	for index := 0; index < coordinator.sessionCount; index++ {
+		session := &coordinator.sessions[index]
+		if !session.openSucceeded {
+			continue
+		}
+		if session.joinAttempt.Kind == OpenJoinAttemptJoin || session.joinAttempt.Kind == OpenJoinAttemptPublish {
+			return true
+		}
+	}
+	return false
+}
+
+func (coordinator *OpenJoinCoordinator) redundantOpenDeadlineReached(batch *openJoinActionBatch) {
+	coordinator.openDeadlineGeneration = 0
+	coordinator.cancelOpenRetry(batch)
+	for index := 0; index < coordinator.sessionCount; index++ {
+		session := &coordinator.sessions[index]
+		if session.openAttempt.Kind != OpenJoinAttemptOpen {
+			continue
+		}
+		session.openAttempt = OpenJoinAttempt{}
+		session.openFinished = true
+	}
+	if coordinator.capability != (protocol.Capability{}) && coordinator.attachmentCount != 0 {
+		coordinator.finishRedundantJoinRound(batch)
+		return
+	}
+	coordinator.fail(OpenJoinFailureOpenDeadline, 0, batch)
 }
 
 func (coordinator *OpenJoinCoordinator) beginOpenAttempt(preferred uint64, batch *openJoinActionBatch) {
