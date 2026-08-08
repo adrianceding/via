@@ -668,11 +668,7 @@ func (instance *clientFlow) stopTerminalQuality(state flow.LifecycleState) {
 }
 
 func (instance *clientFlow) refreshSessionQualities(kind clientcore.ApplicationRelayEventKind) error {
-	switch kind {
-	case clientcore.ApplicationRelayObserveDataQuality, clientcore.ApplicationRelayObserveProbeQuality,
-		clientcore.ApplicationRelaySetAttachmentLoad, clientcore.ApplicationRelaySetStallPenalty,
-		clientcore.ApplicationRelaySetSessionQuality, clientcore.ApplicationRelaySetSessionQualities,
-		clientcore.ApplicationRelaySendAdmitted:
+	if instance.qualityStopped.Load() || !clientRelayNeedsSessionRefresh(kind) {
 		return nil
 	}
 	attachments := instance.relay.Attachments()
@@ -688,6 +684,21 @@ func (instance *clientFlow) refreshSessionQualities(kind clientcore.ApplicationR
 		Kind: clientcore.ApplicationRelaySetSessionQualities, SessionQualities: qualities,
 	})
 	return err
+}
+
+func clientRelayNeedsSessionRefresh(kind clientcore.ApplicationRelayEventKind) bool {
+	switch kind {
+	case clientcore.ApplicationRelayStart, clientcore.ApplicationRelayApplyFlowActions,
+		clientcore.ApplicationRelayReserveAttachment, clientcore.ApplicationRelayPublishAttachment,
+		clientcore.ApplicationRelayReleaseAttachment, clientcore.ApplicationRelaySessionClosed,
+		clientcore.ApplicationRelayReadResult, clientcore.ApplicationRelaySendResult,
+		clientcore.ApplicationRelayRetryDeadline, clientcore.ApplicationRelayNoProgressDeadline,
+		clientcore.ApplicationRelayRecoveryDeadline, clientcore.ApplicationRelayClosingDeadline,
+		clientcore.ApplicationRelayResetDeadline, clientcore.ApplicationRelayResetRequested:
+		return true
+	default:
+		return false
+	}
 }
 
 func clientRelayEventCategory(event clientcore.ApplicationRelayEvent) string {

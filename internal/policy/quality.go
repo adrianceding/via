@@ -13,6 +13,7 @@ const (
 	MaximumRetryEstimate = 2 * time.Second
 	minimumRTTVariation  = 50 * time.Millisecond
 	defaultCapacity      = 1 << 20
+	unmeasuredCapacity   = 64 << 10
 	staleCapacityHorizon = 60 * time.Second
 	maximumSamplePeriod  = 30 * time.Second
 	minimumDataFreshness = 3 * time.Second
@@ -176,10 +177,10 @@ func effectiveCapacity(snapshot QualitySnapshot) float64 {
 		return defaultCapacity
 	}
 	if !finitePositive(snapshot.LastDataCapacity) {
-		if finitePositive(snapshot.CapacityBytesSec) {
+		if (snapshot.DataSamples != 0 || snapshot.ProbeSamples == 0) && finitePositive(snapshot.CapacityBytesSec) {
 			return snapshot.CapacityBytesSec
 		}
-		return defaultCapacity
+		return unmeasuredCapacity
 	}
 	if snapshot.DataSampleAge <= 0 {
 		return snapshot.LastDataCapacity

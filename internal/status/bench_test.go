@@ -28,3 +28,20 @@ func BenchmarkRepositoryTerminalBurstPublication(b *testing.B) {
 		repository.publish(now)
 	}
 }
+
+func BenchmarkRepositoryActiveFlowPublication(b *testing.B) {
+	now := time.Unix(20_000, 0).UTC()
+	repository, err := NewRepositoryWithClock(DefaultLimits(), func() time.Time { return now })
+	if err != nil {
+		b.Fatal(err)
+	}
+	for index := 0; index < 1024; index++ {
+		if err := repository.apply(Event{Kind: EventUpsertFlow, Flow: validTestFlow(uint64(index + 1))}, now); err != nil {
+			b.Fatal(err)
+		}
+	}
+	b.ResetTimer()
+	for iteration := 0; iteration < b.N; iteration++ {
+		repository.publish(now)
+	}
+}

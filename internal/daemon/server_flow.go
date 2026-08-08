@@ -129,11 +129,7 @@ func (instance *serverFlow) handle(event servercore.RelayEvent) error {
 }
 
 func (instance *serverFlow) refreshSessionQualitiesLocked(kind servercore.RelayEventKind) error {
-	switch kind {
-	case servercore.RelayObserveDataQuality, servercore.RelayObserveProbeQuality,
-		servercore.RelaySetAttachmentLoad, servercore.RelaySetStallPenalty,
-		servercore.RelaySetSessionQuality, servercore.RelaySetSessionQualities,
-		servercore.RelaySendAdmitted:
+	if instance.qualityStopped.Load() || !serverRelayNeedsSessionRefresh(kind) {
 		return nil
 	}
 	attachments := instance.relay.Attachments()
@@ -149,6 +145,19 @@ func (instance *serverFlow) refreshSessionQualitiesLocked(kind servercore.RelayE
 		Kind: servercore.RelaySetSessionQualities, SessionQualities: qualities,
 	})
 	return err
+}
+
+func serverRelayNeedsSessionRefresh(kind servercore.RelayEventKind) bool {
+	switch kind {
+	case servercore.RelayStart, servercore.RelayApplyFlowActions,
+		servercore.RelayTargetReadResult, servercore.RelaySendResult,
+		servercore.RelayRetryDeadline, servercore.RelayNoProgressDeadline,
+		servercore.RelayRecoveryDeadline, servercore.RelayClosingDeadline,
+		servercore.RelayResetDeadline, servercore.RelayResetRequested:
+		return true
+	default:
+		return false
+	}
 }
 
 func (instance *serverFlow) snapshot() servercore.RelaySnapshot {
@@ -357,6 +366,11 @@ func (instance *serverFlow) executeLocked(actions []servercore.RelayAction) ([]s
 			session := instance.host.session(action.Attachment.SessionGeneration)
 			if session == nil || session.publish(instance.key.FlowID, action.Attachment) != nil {
 				lost = append(lost, action.Attachment)
+			} else {
+				followups = append(followups, servercore.RelayEvent{
+					Kind: servercore.RelaySetSessionQuality, Attachment: action.Attachment,
+					Quality: session.qualitySnapshot(),
+				})
 			}
 		case servercore.RelayActionAttachmentWithdrawn:
 			if session := instance.host.session(action.Attachment.SessionGeneration); session != nil {

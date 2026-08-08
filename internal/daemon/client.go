@@ -461,7 +461,9 @@ func (daemon *clientDaemon) readClientSession(session *wireSession) {
 		Kind: clientcore.SessionConnectionLost, Generation: session.generation,
 	}})
 	for {
-		message, err := session.read(session.ctx)
+		// Closing a session closes the transport connection, which interrupts the
+		// read. Avoid installing a redundant cancellation callback for every frame.
+		message, err := session.read(context.Background())
 		if err != nil {
 			return
 		}

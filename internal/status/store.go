@@ -84,8 +84,11 @@ type repositoryState struct {
 	resources    Resources
 	rejected     Rejected
 	interfaces   map[int]Interface
+	interfaceIDs []int
 	sessions     map[string]Session
+	sessionIDs   []string
 	flows        map[string]Flow
+	flowIDs      []string
 	terminals    []Terminal
 	terminalAt   map[string]int
 	terminalNext int
@@ -133,6 +136,8 @@ func newRepository(limits Limits, role Role, now func() time.Time) (*Repository,
 		state: repositoryState{
 			healthy: true, interfaces: make(map[int]Interface, limits.Interfaces),
 			sessions: make(map[string]Session, limits.Sessions), flows: make(map[string]Flow, limits.Flows),
+			interfaceIDs: make([]int, 0, limits.Interfaces), sessionIDs: make([]string, 0, limits.Sessions),
+			flowIDs:   make([]string, 0, limits.Flows),
 			terminals: make([]Terminal, 0, MaxTerminalSummaries), terminalAt: make(map[string]int, MaxTerminalSummaries),
 		},
 	}
@@ -324,42 +329,100 @@ func (repository *Repository) apply(event Event, now time.Time) error {
 		if err != nil {
 			return err
 		}
-		if _, exists := repository.state.interfaces[value.Index]; !exists && len(repository.state.interfaces) >= repository.limits.Interfaces {
+		_, exists := repository.state.interfaces[value.Index]
+		if !exists && len(repository.state.interfaces) >= repository.limits.Interfaces {
 			return ErrRepositoryLimit
+		}
+		if !exists {
+			repository.state.interfaceIDs = insertSortedInt(repository.state.interfaceIDs, value.Index)
 		}
 		repository.state.interfaces[value.Index] = value
 	case EventRemoveInterface:
-		delete(repository.state.interfaces, event.InterfaceIndex)
+		if _, exists := repository.state.interfaces[event.InterfaceIndex]; exists {
+			delete(repository.state.interfaces, event.InterfaceIndex)
+			repository.state.interfaceIDs = removeSortedInt(repository.state.interfaceIDs, event.InterfaceIndex)
+		}
 	case EventUpsertSession:
 		if !validSession(event.Session) {
 			return ErrInvalidModel
 		}
-		if _, exists := repository.state.sessions[event.Session.IDHash]; !exists && len(repository.state.sessions) >= repository.limits.Sessions {
+		_, exists := repository.state.sessions[event.Session.IDHash]
+		if !exists && len(repository.state.sessions) >= repository.limits.Sessions {
 			return ErrRepositoryLimit
+		}
+		if !exists {
+			repository.state.sessionIDs = insertSortedString(repository.state.sessionIDs, event.Session.IDHash)
 		}
 		repository.state.sessions[event.Session.IDHash] = event.Session
 	case EventRemoveSession:
-		delete(repository.state.sessions, event.SessionID)
+		if _, exists := repository.state.sessions[event.SessionID]; exists {
+			delete(repository.state.sessions, event.SessionID)
+			repository.state.sessionIDs = removeSortedString(repository.state.sessionIDs, event.SessionID)
+		}
 	case EventUpsertFlow:
 		if !validFlow(event.Flow) {
 			return ErrInvalidModel
 		}
-		if _, exists := repository.state.flows[event.Flow.IDHash]; !exists && len(repository.state.flows) >= repository.limits.Flows {
+		_, exists := repository.state.flows[event.Flow.IDHash]
+		if !exists && len(repository.state.flows) >= repository.limits.Flows {
 			return ErrRepositoryLimit
+		}
+		if !exists {
+			repository.state.flowIDs = insertSortedString(repository.state.flowIDs, event.Flow.IDHash)
 		}
 		repository.state.flows[event.Flow.IDHash] = event.Flow
 	case EventRemoveFlow:
-		delete(repository.state.flows, event.FlowID)
+		if _, exists := repository.state.flows[event.FlowID]; exists {
+			delete(repository.state.flows, event.FlowID)
+			repository.state.flowIDs = removeSortedString(repository.state.flowIDs, event.FlowID)
+		}
 	case EventFlowTerminal:
 		if !validTerminal(event.Terminal) {
 			return ErrInvalidModel
 		}
-		delete(repository.state.flows, event.Terminal.IDHash)
+		if _, exists := repository.state.flows[event.Terminal.IDHash]; exists {
+			delete(repository.state.flows, event.Terminal.IDHash)
+			repository.state.flowIDs = removeSortedString(repository.state.flowIDs, event.Terminal.IDHash)
+		}
 		repository.upsertTerminal(event.Terminal)
 	default:
 		return ErrInvalidModel
 	}
 	return nil
+}
+
+func insertSortedString(values []string, value string) []string {
+	index := sort.SearchStrings(values, value)
+	values = append(values, "")
+	copy(values[index+1:], values[index:])
+	values[index] = value
+	return values
+}
+
+func removeSortedString(values []string, value string) []string {
+	index := sort.SearchStrings(values, value)
+	if index == len(values) || values[index] != value {
+		return values
+	}
+	copy(values[index:], values[index+1:])
+	return values[:len(values)-1]
+}
+
+func insertSortedInt(values []int, value int) []int {
+	index := sort.SearchInts(values, value)
+	values = append(values, 0)
+	copy(values[index+1:], values[index:])
+	values[index] = value
+	return values
+}
+
+func removeSortedInt(values []int, value int) []int {
+	index := sort.SearchInts(values, value)
+	if index == len(values) || values[index] != value {
+		return values
+	}
+	copy(values[index:], values[index+1:])
+	return values[:len(values)-1]
 }
 
 func (repository *Repository) publish(now time.Time) {
@@ -375,24 +438,17 @@ func (repository *Repository) publish(now time.Time) {
 		Flows:       make([]Flow, 0, len(repository.state.flows)),
 		Terminals:   append([]Terminal(nil), repository.state.terminals...),
 	}
-	for _, value := range repository.state.interfaces {
+	for _, id := range repository.state.interfaceIDs {
+		value := repository.state.interfaces[id]
 		value.Addresses = append([]string(nil), value.Addresses...)
 		snapshot.Interfaces = append(snapshot.Interfaces, value)
 	}
-	for _, value := range repository.state.sessions {
-		snapshot.Sessions = append(snapshot.Sessions, value)
+	for _, id := range repository.state.sessionIDs {
+		snapshot.Sessions = append(snapshot.Sessions, repository.state.sessions[id])
 	}
-	for _, value := range repository.state.flows {
-		snapshot.Flows = append(snapshot.Flows, value)
+	for _, id := range repository.state.flowIDs {
+		snapshot.Flows = append(snapshot.Flows, repository.state.flows[id])
 	}
-	sort.Slice(snapshot.Interfaces, func(i, j int) bool {
-		if snapshot.Interfaces[i].Index != snapshot.Interfaces[j].Index {
-			return snapshot.Interfaces[i].Index < snapshot.Interfaces[j].Index
-		}
-		return snapshot.Interfaces[i].Name < snapshot.Interfaces[j].Name
-	})
-	sort.Slice(snapshot.Sessions, func(i, j int) bool { return snapshot.Sessions[i].IDHash < snapshot.Sessions[j].IDHash })
-	sort.Slice(snapshot.Flows, func(i, j int) bool { return snapshot.Flows[i].IDHash < snapshot.Flows[j].IDHash })
 	sort.Slice(snapshot.Terminals, func(i, j int) bool {
 		if !snapshot.Terminals[i].FinishedAt.Equal(snapshot.Terminals[j].FinishedAt) {
 			return snapshot.Terminals[i].FinishedAt.Before(snapshot.Terminals[j].FinishedAt)

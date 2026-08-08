@@ -78,6 +78,25 @@ func BenchmarkRxReceiveData64KB(b *testing.B) {
 	}
 }
 
+// BenchmarkRxReceiveSequentialWindow measures DATA arriving while the first
+// local write is still pending. Adjacent immutable segments must not be merged
+// into an ever-growing allocation.
+func BenchmarkRxReceiveSequentialWindow(b *testing.B) {
+	payload := make([]byte, protocol.MaxDataLength)
+	segments := int(ReceiveWindowSize / protocol.MaxDataLength)
+	b.SetBytes(int64(segments * len(payload)))
+	b.ResetTimer()
+	for iteration := 0; iteration < b.N; iteration++ {
+		receiver := NewReceiver()
+		for segment := 0; segment < segments; segment++ {
+			offset := uint64(segment * len(payload))
+			if _, err := receiver.ReceiveData(offset, payload); err != nil {
+				b.Fatal(err)
+			}
+		}
+	}
+}
+
 // BenchmarkTxRetryDue measures the retransmission path: earliestGap scan plus
 // segmentAt linear search across a full send window (80 x 4 KiB segments fills
 // SendWindowSize without hitting MaxReplaySegments).

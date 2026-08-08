@@ -177,3 +177,17 @@ func TestQualityStaleCapacityDecaysFromLastMeasuredValue(t *testing.T) {
 		t.Fatalf("expired stale capacity = %v, want %v", got, defaultCapacity)
 	}
 }
+
+func TestUnmeasuredCapacityIsConservative(t *testing.T) {
+	quality := NewQuality()
+	if err := quality.ObserveProbe(20 * time.Millisecond); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := quality.Snapshot()
+	if snapshot.DataSamples != 0 || snapshot.LastDataCapacity != 0 {
+		t.Fatalf("new quality snapshot = %#v", snapshot)
+	}
+	if got := effectiveCapacity(snapshot); got != unmeasuredCapacity {
+		t.Fatalf("unmeasured effective capacity = %v, want %v", got, unmeasuredCapacity)
+	}
+}

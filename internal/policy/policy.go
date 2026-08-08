@@ -138,6 +138,7 @@ type attachmentState struct {
 	qualitySnapshot QualitySnapshot
 	hasSnapshot     bool
 	assigned        uint64
+	tie             uint64
 }
 
 type Policy struct {
@@ -151,6 +152,7 @@ type Policy struct {
 	stableACKs     uint64
 	stableBytes    uint64
 	attachments    map[flow.AttachmentKey]*attachmentState
+	ordered        []flow.AttachmentKey
 	incumbent      flow.AttachmentKey
 	hasIncumbent   bool
 	incumbentSince time.Time
@@ -185,7 +187,9 @@ func (policy *Policy) AddAttachment(attachment flow.AttachmentKey) error {
 	if len(policy.attachments) >= MaxAttachments {
 		return ErrAttachmentLimit
 	}
-	policy.attachments[attachment] = &attachmentState{quality: NewQuality()}
+	policy.attachments[attachment] = &attachmentState{quality: NewQuality(), tie: stableTie(policy.flowID, attachment)}
+	policy.ordered = append(policy.ordered, attachment)
+	policy.sortAttachments()
 	policy.resetStable()
 	if policy.state == AdaptiveWaiting {
 		if policy.pending {
@@ -206,6 +210,13 @@ func (policy *Policy) RemoveAttachment(attachment flow.AttachmentKey) {
 		return
 	}
 	delete(policy.attachments, attachment)
+	for index, current := range policy.ordered {
+		if current == attachment {
+			copy(policy.ordered[index:], policy.ordered[index+1:])
+			policy.ordered = policy.ordered[:len(policy.ordered)-1]
+			break
+		}
+	}
 	if policy.hasIncumbent && policy.incumbent == attachment {
 		policy.clearIncumbent()
 	}
@@ -458,7 +469,7 @@ func (policy *Policy) Snapshot() Snapshot {
 		snapshot.Preferred = preferred
 		snapshot.HasPreferred = true
 	}
-	keys := policy.sortedAttachments()
+	keys := policy.ordered
 	for _, attachment := range keys {
 		state := policy.attachments[attachment]
 		snapshot.Attachments = append(snapshot.Attachments, AttachmentSnapshot{
@@ -483,9 +494,10 @@ func (policy *Policy) StatusSnapshot() StatusSnapshot {
 	}
 	var bestEstimate time.Duration
 	var bestTie uint64
-	for attachment, state := range policy.attachments {
+	for _, attachment := range policy.ordered {
+		state := policy.attachments[attachment]
 		estimate := deliveryEstimate(policy.qualitySnapshot(state), 0)
-		tie := stableTie(policy.flowID, attachment)
+		tie := state.tie
 		if !status.HasPreferred || estimate < bestEstimate || estimate == bestEstimate && tie < bestTie {
 			status.Preferred = attachment
 			status.HasPreferred = true
@@ -504,7 +516,7 @@ func (policy *Policy) StatusSnapshot() StatusSnapshot {
 
 func (policy *Policy) placeAll(attempted []flow.AttachmentKey, payloadBytes uint64) []Placement {
 	excluded := attemptedSet(attempted)
-	keys := policy.sortedAttachments()
+	keys := policy.ordered
 	placementsKeys := make([]flow.AttachmentKey, 0, len(keys))
 	for _, attachment := range keys {
 		if _, exists := excluded[attachment]; !exists {
@@ -535,7 +547,7 @@ func (policy *Policy) placeAll(attempted []flow.AttachmentKey, payloadBytes uint
 				if leftEstimate != rightEstimate {
 					return leftEstimate < rightEstimate
 				}
-				return stableTie(policy.flowID, placementsKeys[left]) < stableTie(policy.flowID, placementsKeys[right])
+				return policy.attachments[placementsKeys[left]].tie < policy.attachments[placementsKeys[right]].tie
 			})
 			placementsKeys = placementsKeys[:copyLimit]
 		}
@@ -616,7 +628,8 @@ type candidate struct {
 
 func (policy *Policy) candidates(payloadBytes uint64, excluded map[flow.AttachmentKey]struct{}) []candidate {
 	result := make([]candidate, 0, len(policy.attachments))
-	for attachment, state := range policy.attachments {
+	for _, attachment := range policy.ordered {
+		state := policy.attachments[attachment]
 		if _, exists := excluded[attachment]; exists {
 			continue
 		}
@@ -625,7 +638,7 @@ func (policy *Policy) candidates(payloadBytes uint64, excluded map[flow.Attachme
 			attachment: attachment,
 			estimate:   deliveryEstimate(snapshot, payloadBytes),
 			capacity:   effectiveCapacity(snapshot),
-			tie:        stableTie(policy.flowID, attachment),
+			tie:        state.tie,
 		})
 	}
 	sort.Slice(result, func(i, j int) bool {
@@ -773,22 +786,21 @@ func (policy *Policy) currentNow() time.Time {
 }
 
 func (policy *Policy) sortedAttachments() []flow.AttachmentKey {
-	keys := make([]flow.AttachmentKey, 0, len(policy.attachments))
-	for attachment := range policy.attachments {
-		keys = append(keys, attachment)
-	}
-	sort.Slice(keys, func(i, j int) bool {
-		left := stableTie(policy.flowID, keys[i])
-		right := stableTie(policy.flowID, keys[j])
+	return append([]flow.AttachmentKey(nil), policy.ordered...)
+}
+
+func (policy *Policy) sortAttachments() {
+	sort.Slice(policy.ordered, func(i, j int) bool {
+		left := policy.attachments[policy.ordered[i]].tie
+		right := policy.attachments[policy.ordered[j]].tie
 		if left != right {
 			return left < right
 		}
-		if keys[i].SessionGeneration != keys[j].SessionGeneration {
-			return keys[i].SessionGeneration < keys[j].SessionGeneration
+		if policy.ordered[i].SessionGeneration != policy.ordered[j].SessionGeneration {
+			return policy.ordered[i].SessionGeneration < policy.ordered[j].SessionGeneration
 		}
-		return keys[i].AttachmentGeneration < keys[j].AttachmentGeneration
+		return policy.ordered[i].AttachmentGeneration < policy.ordered[j].AttachmentGeneration
 	})
-	return keys
 }
 
 func (policy *Policy) resetStable() {

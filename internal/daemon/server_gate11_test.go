@@ -157,6 +157,27 @@ func TestServerTerminalFlowIgnoresProbeQuality(t *testing.T) {
 	}
 }
 
+func TestServerRelayNeedsSessionRefresh(t *testing.T) {
+	tests := []struct {
+		kind servercore.RelayEventKind
+		want bool
+	}{
+		{servercore.RelayApplyFlowActions, true},
+		{servercore.RelayTargetReadResult, true},
+		{servercore.RelaySendResult, true},
+		{servercore.RelayRetryDeadline, true},
+		{servercore.RelayRemoteMessage, false},
+		{servercore.RelayTargetWriteResult, false},
+		{servercore.RelaySendAdmitted, false},
+		{servercore.RelaySetSessionQuality, false},
+	}
+	for _, test := range tests {
+		if got := serverRelayNeedsSessionRefresh(test.kind); got != test.want {
+			t.Fatalf("serverRelayNeedsSessionRefresh(%v) = %v, want %v", test.kind, got, test.want)
+		}
+	}
+}
+
 func TestServerShutdownWaitsForRunningTimerCallback(t *testing.T) {
 	harness := newServerRuntimeHarness(t)
 	defer harness.close()

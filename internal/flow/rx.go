@@ -178,7 +178,12 @@ func (r *Receiver) ACKSnapshot() ACKSnapshot {
 		if start <= r.writtenOffset || start >= buffered.end() {
 			continue
 		}
-		ranges = append(ranges, ByteRange{Start: start, End: buffered.end()})
+		end := buffered.end()
+		if len(ranges) != 0 && start <= ranges[len(ranges)-1].End {
+			ranges[len(ranges)-1].End = max(ranges[len(ranges)-1].End, end)
+			continue
+		}
+		ranges = append(ranges, ByteRange{Start: start, End: end})
 		if len(ranges) == MaxACKRanges {
 			break
 		}
@@ -335,6 +340,13 @@ func (r *Receiver) insertRange(start, end uint64, data []byte) error {
 		length := overlapEnd - overlapStart
 		if !bytes.Equal(data[incomingStart:incomingStart+length], existing.data[existingStart:existingStart+length]) {
 			return ErrDataConflict
+		}
+	}
+	if len(r.ranges) > 0 {
+		last := &r.ranges[len(r.ranges)-1]
+		if last.end() == start {
+			last.data = append(last.data, data...)
+			return nil
 		}
 	}
 

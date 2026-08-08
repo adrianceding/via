@@ -196,6 +196,20 @@ func TestReceiverWindowOverflowAndRangeLimits(t *testing.T) {
 	})
 }
 
+func TestReceiverSequentialMaximumWindowRemainsCanonical(t *testing.T) {
+	const window = 4 << 20
+	rx := NewReceiverWithWindow(window)
+	payload := make([]byte, 16<<10)
+	for offset := uint64(0); offset < window; offset += uint64(len(payload)) {
+		if _, err := rx.ReceiveData(offset, payload); err != nil {
+			t.Fatalf("receive offset %d: %v", offset, err)
+		}
+	}
+	if snapshot := rx.Snapshot(); snapshot.BufferedBytes != window || snapshot.RangeCount != 1 {
+		t.Fatalf("sequential window snapshot = %#v", snapshot)
+	}
+}
+
 func TestReceiverACKSnapshotIsCanonicalAndBounded(t *testing.T) {
 	rx := NewReceiver()
 	for i := 0; i < 20; i++ {
@@ -219,6 +233,19 @@ func TestReceiverACKSnapshotIsCanonicalAndBounded(t *testing.T) {
 		if i > 0 && snapshot.Ranges[i-1].End >= r.Start {
 			t.Fatalf("ranges overlap or touch: %+v", snapshot.Ranges)
 		}
+	}
+}
+
+func TestReceiverACKSnapshotCoalescesAdjacentInternalRanges(t *testing.T) {
+	rx := NewReceiver()
+	rx.ranges = []receiveRange{
+		{start: 0, data: []byte("ab")},
+		{start: 2, data: []byte("cd")},
+		{start: 4, data: []byte("ef")},
+	}
+	snapshot := rx.ACKSnapshot()
+	if snapshot.NextOffset != 0 || !reflect.DeepEqual(snapshot.Ranges, []ByteRange{{Start: 1, End: 6}}) {
+		t.Fatalf("canonical ACK snapshot = %#v", snapshot)
 	}
 }
 

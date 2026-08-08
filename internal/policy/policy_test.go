@@ -98,6 +98,28 @@ func TestPolicyBoundsRetryAfterByEstimatedDelivery(t *testing.T) {
 	}
 }
 
+func TestFastestPolicyDoesNotPreferUnmeasuredCapacityOverKnownPath(t *testing.T) {
+	policy := newTestPolicy(t, Config{Mode: protocol.DeliveryAdaptive, Selection: protocol.PathFastest})
+	addTestAttachments(t, policy)
+	if err := policy.SetQualitySnapshot(testAttachmentA, QualitySnapshot{
+		DataSamples: 1, SRTT: 20 * time.Millisecond, CapacityBytesSec: 512 << 10,
+		LastDataCapacity: 512 << 10, DataSampleFresh: true, QueuedBytes: 128 << 10,
+		RetryEstimate: MinimumRetryEstimate,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := policy.SetQualitySnapshot(testAttachmentB, QualitySnapshot{
+		ProbeSamples: 1, SRTT: 20 * time.Millisecond, CapacityBytesSec: defaultCapacity,
+		RetryEstimate: MinimumRetryEstimate,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	placements := policy.PlaceNew(PlacementRequest{Bytes: 64 << 10})
+	if len(placements) != 1 || placements[0].Attachment != testAttachmentA {
+		t.Fatalf("placement preferred unmeasured path: %#v", placements)
+	}
+}
+
 func TestPolicyTelemetryMutatesActiveQualitySnapshot(t *testing.T) {
 	policy := newTestPolicy(t, Config{Mode: protocol.DeliveryAdaptive, Selection: protocol.PathFastest})
 	if err := policy.AddAttachment(testAttachmentA); err != nil {

@@ -18,6 +18,28 @@ import (
 	"github.com/adrianceding/via/internal/transport"
 )
 
+func TestClientRelayNeedsSessionRefresh(t *testing.T) {
+	tests := []struct {
+		kind clientcore.ApplicationRelayEventKind
+		want bool
+	}{
+		{clientcore.ApplicationRelayApplyFlowActions, true},
+		{clientcore.ApplicationRelayPublishAttachment, true},
+		{clientcore.ApplicationRelayReadResult, true},
+		{clientcore.ApplicationRelaySendResult, true},
+		{clientcore.ApplicationRelayRetryDeadline, true},
+		{clientcore.ApplicationRelayRemoteMessage, false},
+		{clientcore.ApplicationRelayWriteResult, false},
+		{clientcore.ApplicationRelaySendAdmitted, false},
+		{clientcore.ApplicationRelaySetSessionQuality, false},
+	}
+	for _, test := range tests {
+		if got := clientRelayNeedsSessionRefresh(test.kind); got != test.want {
+			t.Fatalf("clientRelayNeedsSessionRefresh(%v) = %v, want %v", test.kind, got, test.want)
+		}
+	}
+}
+
 func TestClientFlowEventBackpressureDoesNotCancelFlow(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
