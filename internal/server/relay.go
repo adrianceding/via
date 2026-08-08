@@ -106,8 +106,8 @@ const (
 	RelayActionDataCredit
 )
 
-// RelayAction is an I/O-free executor description. Write payloads are exposed
-// only through copying helpers so an executor cannot mutate Flow-owned bytes.
+// RelayAction is an I/O-free executor description. Borrowed write payloads are
+// immutable and remain valid until the matching executor result is delivered.
 type RelayAction struct {
 	Kind              RelayActionKind
 	Generation        uint64
@@ -133,6 +133,10 @@ func (action RelayAction) DataLen() int { return len(action.data) }
 func (action RelayAction) AppendData(dst []byte) []byte { return append(dst, action.data...) }
 
 func (action RelayAction) CopyData() []byte { return bytes.Clone(action.data) }
+
+func (action RelayAction) BorrowData() []byte {
+	return action.data[:len(action.data):len(action.data)]
+}
 
 type RelaySnapshot struct {
 	Flow                       flow.FlowSnapshot
@@ -719,7 +723,7 @@ func (relay *Relay) consumeRxAction(action flow.RxAction, actions *[]RelayAction
 		relay.writeGeneration = action.Generation
 		*actions = append(*actions, RelayAction{
 			Kind: RelayActionWriteTarget, Generation: action.Generation,
-			Offset: action.Offset, data: action.CopyData(),
+			Offset: action.Offset, data: action.BorrowData(),
 		})
 	case flow.RxCloseWriteLocal:
 		if relay.writeGeneration != 0 || relay.closeWriteGeneration != 0 || action.Generation == 0 {

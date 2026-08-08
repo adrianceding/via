@@ -78,7 +78,7 @@ func (executor *TargetIOExecutor) Execute(action RelayAction) (event RelayEvent,
 		if action.DataLen() < 1 || action.DataLen() > executor.maxWriteBytes {
 			return RelayEvent{}, false, ErrInvalidTargetIOAction
 		}
-		data := action.CopyData()
+		data := action.BorrowData()
 		n, writeErr := executor.connection.Write(data)
 		if n < 0 || n > len(data) {
 			writeErr = errors.Join(ErrTargetIOContract, writeErr)

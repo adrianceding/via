@@ -391,8 +391,14 @@ func validHash(value string) bool {
 	if len(value) != 2*HashBytes {
 		return false
 	}
-	_, err := hex.DecodeString(value)
-	return err == nil
+	for index := 0; index < len(value); index++ {
+		character := value[index]
+		if character >= '0' && character <= '9' || character >= 'a' && character <= 'f' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func validOptionalHash(value string) bool {

@@ -38,6 +38,12 @@ func (action RxAction) AppendData(dst []byte) []byte { return append(dst, action
 
 func (action RxAction) CopyData() []byte { return bytes.Clone(action.data) }
 
+// BorrowData returns the immutable write payload. The caller may retain it
+// until the matching write result is delivered, but must not modify it.
+func (action RxAction) BorrowData() []byte {
+	return action.data[:len(action.data):len(action.data)]
+}
+
 // RxSnapshot contains bounded scalar state suitable for tests and diagnostics.
 type RxSnapshot struct {
 	State                  RxState
@@ -134,7 +140,6 @@ func (r *Receiver) Failed() error {
 
 func (r *Receiver) Discard() {
 	for index := range r.ranges {
-		clear(r.ranges[index].data)
 		r.ranges[index] = receiveRange{}
 	}
 	r.ranges = nil
@@ -391,7 +396,7 @@ func (r *Receiver) scheduleWrite() (*RxAction, error) {
 	r.pendingWrite = &pendingRxWrite{
 		generation: generation,
 		offset:     r.writtenOffset,
-		data:       bytes.Clone(r.ranges[0].data),
+		data:       r.ranges[0].data,
 	}
 	return &RxAction{
 		Kind:       RxWriteLocal,

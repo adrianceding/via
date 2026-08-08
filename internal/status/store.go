@@ -80,13 +80,16 @@ type metricCounters struct {
 }
 
 type repositoryState struct {
-	healthy    bool
-	resources  Resources
-	rejected   Rejected
-	interfaces map[int]Interface
-	sessions   map[string]Session
-	flows      map[string]Flow
-	terminals  []Terminal
+	healthy      bool
+	resources    Resources
+	rejected     Rejected
+	interfaces   map[int]Interface
+	sessions     map[string]Session
+	flows        map[string]Flow
+	terminals    []Terminal
+	terminalAt   map[string]int
+	terminalNext int
+	lastPrune    time.Time
 }
 
 // The Repository event queue is the only mutable boundary between data paths and
@@ -130,7 +133,7 @@ func newRepository(limits Limits, role Role, now func() time.Time) (*Repository,
 		state: repositoryState{
 			healthy: true, interfaces: make(map[int]Interface, limits.Interfaces),
 			sessions: make(map[string]Session, limits.Sessions), flows: make(map[string]Flow, limits.Flows),
-			terminals: make([]Terminal, 0, MaxTerminalSummaries),
+			terminals: make([]Terminal, 0, MaxTerminalSummaries), terminalAt: make(map[string]int, MaxTerminalSummaries),
 		},
 	}
 	repository.publish(now())
@@ -179,8 +182,9 @@ func (repository *Repository) AddCounter(kind CounterKind, delta uint64) bool {
 // Run consumes events serially. The caller injects ticks for deterministic
 // terminal-summary eviction; nil ticks disable active eviction, while subsequent
 // business events still trigger eviction based on their receive time. Changes
-// limited to flow progress fields are coalesced on a fixed publication interval;
-// control state and terminal state are still published immediately.
+// for high-volume flow, terminal, and resource updates are coalesced on a fixed
+// publication interval. Health and low-volume session/interface control state
+// still publish immediately.
 func (repository *Repository) Run(ctx context.Context, ticks <-chan time.Time) error {
 	publicationTicker := time.NewTicker(statusPublicationInterval)
 	defer publicationTicker.Stop()
@@ -267,20 +271,15 @@ func (repository *Repository) run(ctx context.Context, ticks, publicationTicks <
 func (repository *Repository) eventRequiresImmediatePublication(event Event) bool {
 	switch event.Kind {
 	case EventUpsertFlow:
-		current, exists := repository.state.flows[event.Flow.IDHash]
-		return !exists || !sameFlowControlState(current, event.Flow)
+		return false
 	case EventUpsertSession:
 		current, exists := repository.state.sessions[event.Session.IDHash]
 		return !exists || !sameSessionControlState(current, event.Session)
+	case EventSetResources, EventSetRejected, EventRemoveFlow, EventFlowTerminal:
+		return false
 	default:
 		return true
 	}
-}
-
-func sameFlowControlState(left, right Flow) bool {
-	return left.IDHash == right.IDHash && left.TargetType == right.TargetType && left.TargetHash == right.TargetHash &&
-		left.DeliveryMode == right.DeliveryMode && left.PathSelection == right.PathSelection &&
-		left.AdaptiveState == right.AdaptiveState && left.State == right.State && left.Reason == right.Reason
 }
 
 // sameSessionControlState reports whether two session events differ only in
@@ -312,7 +311,7 @@ func (repository *Repository) apply(event Event, now time.Time) error {
 	if repository == nil || !validEvent(event) {
 		return ErrInvalidModel
 	}
-	repository.prune(now)
+	repository.pruneIfDue(now)
 	switch event.Kind {
 	case EventSetHealth:
 		repository.state.healthy = event.Healthy
@@ -356,12 +355,7 @@ func (repository *Repository) apply(event Event, now time.Time) error {
 			return ErrInvalidModel
 		}
 		delete(repository.state.flows, event.Terminal.IDHash)
-		repository.removeTerminal(event.Terminal.IDHash)
-		if len(repository.state.terminals) == MaxTerminalSummaries {
-			copy(repository.state.terminals, repository.state.terminals[1:])
-			repository.state.terminals = repository.state.terminals[:MaxTerminalSummaries-1]
-		}
-		repository.state.terminals = append(repository.state.terminals, event.Terminal)
+		repository.upsertTerminal(event.Terminal)
 	default:
 		return ErrInvalidModel
 	}
@@ -429,16 +423,41 @@ func (repository *Repository) prune(now time.Time) {
 		}
 	}
 	repository.state.terminals = kept
+	repository.reindexTerminals()
+	repository.state.lastPrune = now
 }
 
-func (repository *Repository) removeTerminal(id string) {
-	kept := repository.state.terminals[:0]
-	for _, terminal := range repository.state.terminals {
-		if terminal.IDHash != id {
-			kept = append(kept, terminal)
-		}
+func (repository *Repository) pruneIfDue(now time.Time) {
+	if !repository.state.lastPrune.IsZero() && !now.Before(repository.state.lastPrune) &&
+		now.Sub(repository.state.lastPrune) < statusPublicationInterval {
+		return
 	}
-	repository.state.terminals = kept
+	repository.prune(now)
+}
+
+func (repository *Repository) upsertTerminal(terminal Terminal) {
+	if index, exists := repository.state.terminalAt[terminal.IDHash]; exists {
+		repository.state.terminals[index] = terminal
+		return
+	}
+	if len(repository.state.terminals) < MaxTerminalSummaries {
+		repository.state.terminalAt[terminal.IDHash] = len(repository.state.terminals)
+		repository.state.terminals = append(repository.state.terminals, terminal)
+		return
+	}
+	index := repository.state.terminalNext
+	delete(repository.state.terminalAt, repository.state.terminals[index].IDHash)
+	repository.state.terminals[index] = terminal
+	repository.state.terminalAt[terminal.IDHash] = index
+	repository.state.terminalNext = (index + 1) % MaxTerminalSummaries
+}
+
+func (repository *Repository) reindexTerminals() {
+	clear(repository.state.terminalAt)
+	for index, terminal := range repository.state.terminals {
+		repository.state.terminalAt[terminal.IDHash] = index
+	}
+	repository.state.terminalNext = 0
 }
 
 func validEvent(event Event) bool {

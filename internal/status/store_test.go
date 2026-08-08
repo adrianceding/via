@@ -214,7 +214,7 @@ func TestRepositoryRunCoalescesFlowProgressUntilPublicationTick(t *testing.T) {
 	}
 }
 
-func TestRepositoryRunPublishesTerminalAheadOfPendingProgress(t *testing.T) {
+func TestRepositoryRunCoalescesTerminalWithPendingProgress(t *testing.T) {
 	now := time.Unix(5_000, 0).UTC()
 	repository, err := NewRepositoryWithClock(DefaultLimits(), func() time.Time { return now })
 	if err != nil {
@@ -229,7 +229,8 @@ func TestRepositoryRunPublishesTerminalAheadOfPendingProgress(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)
-	go func() { done <- repository.run(ctx, nil, make(chan time.Time)) }()
+	publicationTicks := make(chan time.Time, 1)
+	go func() { done <- repository.run(ctx, nil, publicationTicks) }()
 
 	progress := initial
 	progress.TxAllocatedOffset = 100
@@ -238,6 +239,11 @@ func TestRepositoryRunPublishesTerminalAheadOfPendingProgress(t *testing.T) {
 		!repository.TryRecord(Event{Kind: EventFlowTerminal, Terminal: terminal}) {
 		t.Fatal("status event rejected")
 	}
+	waitForStatus(t, time.Second, func() bool { return len(repository.events) == 0 }, "terminal consumption")
+	if snapshot := repository.Snapshot(); len(snapshot.Flows) != 1 || len(snapshot.Terminals) != 0 {
+		t.Fatalf("terminal published before tick: %#v", snapshot)
+	}
+	publicationTicks <- now.Add(100 * time.Millisecond)
 	waitForStatus(t, time.Second, func() bool {
 		snapshot := repository.Snapshot()
 		return len(snapshot.Flows) == 0 && len(snapshot.Terminals) == 1 && snapshot.Terminals[0].IDHash == initial.IDHash
@@ -249,7 +255,7 @@ func TestRepositoryRunPublishesTerminalAheadOfPendingProgress(t *testing.T) {
 	}
 }
 
-func TestRepositoryRunPublishesFlowControlChangesImmediately(t *testing.T) {
+func TestRepositoryRunCoalescesFlowControlChanges(t *testing.T) {
 	now := time.Unix(6_000, 0).UTC()
 	repository, err := NewRepositoryWithClock(DefaultLimits(), func() time.Time { return now })
 	if err != nil {
@@ -263,7 +269,8 @@ func TestRepositoryRunPublishesFlowControlChangesImmediately(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- repository.run(ctx, nil, make(chan time.Time)) }()
+	publicationTicks := make(chan time.Time, 1)
+	go func() { done <- repository.run(ctx, nil, publicationTicks) }()
 
 	recovering := initial
 	recovering.State = FlowRecovering
@@ -271,6 +278,11 @@ func TestRepositoryRunPublishesFlowControlChangesImmediately(t *testing.T) {
 	if !repository.TryRecord(Event{Kind: EventUpsertFlow, Flow: recovering}) {
 		t.Fatal("control event rejected")
 	}
+	waitForStatus(t, time.Second, func() bool { return len(repository.events) == 0 }, "flow control consumption")
+	if snapshot := repository.Snapshot(); snapshot.Flows[0].State != initial.State {
+		t.Fatalf("flow control published before tick: %#v", snapshot.Flows[0])
+	}
+	publicationTicks <- now.Add(100 * time.Millisecond)
 	waitForStatus(t, time.Second, func() bool {
 		snapshot := repository.Snapshot()
 		return len(snapshot.Flows) == 1 && snapshot.Flows[0].State == FlowRecovering &&
@@ -366,7 +378,10 @@ func TestRepositoryRunPreservesFIFOAcrossRejectedBatchEvent(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- repository.run(ctx, nil, make(chan time.Time)) }()
+	publicationTicks := make(chan time.Time, 1)
+	go func() { done <- repository.run(ctx, nil, publicationTicks) }()
+	waitForStatus(t, time.Second, func() bool { return len(repository.events) == 0 }, "batch consumption")
+	publicationTicks <- now.Add(100 * time.Millisecond)
 	waitForStatus(t, time.Second, func() bool {
 		snapshot := repository.Snapshot()
 		return len(snapshot.Flows) == 1 && snapshot.Flows[0].TxAllocatedOffset == progress.TxAllocatedOffset &&

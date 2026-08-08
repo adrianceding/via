@@ -80,7 +80,7 @@ func (executor *ApplicationIOExecutor) Execute(action ApplicationRelayAction) (e
 		if action.DataLen() < 1 || action.DataLen() > executor.maxWriteBytes {
 			return ApplicationRelayEvent{}, false, ErrInvalidApplicationIOAction
 		}
-		data := action.data
+		data := action.BorrowData()
 		n, writeErr := executor.connection.Write(data)
 		if n < 0 || n > len(data) {
 			writeErr = errors.Join(ErrApplicationIOContract, writeErr)

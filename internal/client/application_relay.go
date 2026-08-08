@@ -116,8 +116,8 @@ const (
 	ApplicationRelayActionDataCredit
 )
 
-// ApplicationRelayAction describes work without performing I/O. Write payloads
-// are exposed only through copying methods, so executors cannot modify bytes held by the flow.
+// ApplicationRelayAction describes work without performing I/O. Borrowed write
+// payloads are immutable and remain valid until the matching result is delivered.
 type ApplicationRelayAction struct {
 	Kind              ApplicationRelayActionKind
 	Generation        uint64
@@ -146,6 +146,10 @@ func (action ApplicationRelayAction) AppendData(dst []byte) []byte {
 
 func (action ApplicationRelayAction) CopyData() []byte {
 	return bytes.Clone(action.data)
+}
+
+func (action ApplicationRelayAction) BorrowData() []byte {
+	return action.data[:len(action.data):len(action.data)]
 }
 
 type ApplicationRelaySnapshot struct {
@@ -869,7 +873,7 @@ func (relay *ApplicationRelay) consumeRxAction(action flow.RxAction, actions *[]
 		relay.writeGeneration = action.Generation
 		if err := relay.emitApplicationAction(ApplicationRelayAction{
 			Kind: ApplicationRelayActionWrite, Generation: action.Generation,
-			Offset: action.Offset, data: action.CopyData(),
+			Offset: action.Offset, data: action.BorrowData(),
 		}, actions); err != nil {
 			return err
 		}

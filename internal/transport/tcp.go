@@ -215,6 +215,23 @@ type writeEntry struct {
 	started    bool
 }
 
+var tcpWriteEntryPool = sync.Pool{New: func() any {
+	return &writeEntry{result: make(chan error, 1)}
+}}
+
+func acquireWriteEntry() *writeEntry {
+	return tcpWriteEntryPool.Get().(*writeEntry)
+}
+
+func releaseWriteEntry(entry *writeEntry) {
+	if entry == nil {
+		return
+	}
+	result := entry.result
+	*entry = writeEntry{result: result}
+	tcpWriteEntryPool.Put(entry)
+}
+
 type tcpConnection struct {
 	conn         net.Conn
 	config       TCPConfig
@@ -368,15 +385,15 @@ func (connection *tcpConnection) WriteFrame(ctx context.Context, request WriteRe
 	if err := request.Validate(connection.capabilities); err != nil {
 		return err
 	}
-	entry := &writeEntry{
-		request: WriteRequest{Class: request.Class, Encoded: request.Encoded},
-		ctx:     ctx,
-		result:  make(chan error, 1),
-		bytes:   uint64(len(request.Encoded)),
-	}
+	entry := acquireWriteEntry()
+	entry.request = WriteRequest{Class: request.Class, Encoded: request.Encoded}
+	entry.ctx = ctx
+	entry.bytes = uint64(len(request.Encoded))
 	if err := connection.enqueue(entry); err != nil {
+		releaseWriteEntry(entry)
 		return err
 	}
+	defer releaseWriteEntry(entry)
 	select {
 	case err := <-entry.result:
 		return err
@@ -391,20 +408,25 @@ func (connection *tcpConnection) WriteFrame(ctx context.Context, request WriteRe
 }
 
 func (connection *tcpConnection) CloseWrite() error {
-	entry := &writeEntry{ctx: context.Background(), closeWrite: true, result: make(chan error, 1)}
+	entry := acquireWriteEntry()
+	entry.ctx = context.Background()
+	entry.closeWrite = true
 	connection.queueMu.Lock()
 	if connection.state != tcpOpen {
 		connection.queueMu.Unlock()
+		releaseWriteEntry(entry)
 		return ErrClosed
 	}
 	if !connection.fitsLocked(FrameControl, 0) {
 		connection.queueMu.Unlock()
+		releaseWriteEntry(entry)
 		return ErrQueueFull
 	}
 	connection.state = tcpDraining
 	connection.addLocked(entry)
 	connection.queueMu.Unlock()
 	connection.signalWriter()
+	defer releaseWriteEntry(entry)
 	select {
 	case err := <-entry.result:
 		return err
@@ -497,10 +519,13 @@ func (connection *tcpConnection) runWriter() {
 		}
 		err := connection.executeWrite(entry)
 		connection.finishWrite(entry, err)
-		entry.result <- err
-		if err != nil && (entry.started || (!errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded))) {
+		fatal := err != nil && (entry.started || (!errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded)))
+		if fatal {
 			_ = connection.closeConnection()
 			connection.failQueued(err)
+		}
+		entry.result <- err
+		if fatal {
 			return
 		}
 	}

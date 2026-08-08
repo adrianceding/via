@@ -64,7 +64,8 @@ func BenchmarkTxAppendEncoded64KB(b *testing.B) {
 }
 
 // BenchmarkRxReceiveData64KB measures one maximum DATA interval into a fresh
-// Receiver: overlap scan, range insert and the ACK snapshot ranges slice.
+// Receiver, including its single defensive payload copy. Downstream write
+// actions borrow that immutable copy without allocating another payload.
 func BenchmarkRxReceiveData64KB(b *testing.B) {
 	payload := make([]byte, protocol.MaxDataLength)
 	b.SetBytes(int64(len(payload)))
