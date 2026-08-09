@@ -549,6 +549,35 @@ func TestApplicationRelayRemoteDataSerializesApplicationShortWritesAndACKsActual
 	}
 }
 
+func TestApplicationRelayAdaptiveFastestSendsAcknowledgementOnce(t *testing.T) {
+	relay, machine := newRelayFixture(t, policy.Config{
+		Mode: protocol.DeliveryAdaptive, Selection: protocol.PathFastest,
+	})
+	attachments := make([]flow.AttachmentKey, 8)
+	for index := range attachments {
+		attachments[index] = flow.AttachmentKey{
+			SessionGeneration:    uint64(index + 1),
+			AttachmentGeneration: uint64(index + 1),
+		}
+		publishRelayAttachment(t, relay, machine, attachments[index])
+	}
+
+	actions, err := relay.Handle(ApplicationRelayEvent{
+		Kind: ApplicationRelayRemoteMessage, Attachment: attachments[0],
+		Message: protocol.Data{FlowID: testRelayFlowID, Bytes: []byte("data")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	acknowledgements := messageAttachments[protocol.ACK](t, actions)
+	if len(acknowledgements) != 1 {
+		t.Fatalf("adaptive fastest ACK copies = %d, want 1: %#v", len(acknowledgements), actions)
+	}
+	if countRelayActions(actions, ApplicationRelayActionWrite) != 1 {
+		t.Fatalf("adaptive fastest write actions = %#v", actions)
+	}
+}
+
 func TestApplicationRelayOutOfOrderAndDuplicateDataWritesApplicationOnce(t *testing.T) {
 	relay, machine := newRelayFixture(t, policy.Config{
 		Mode: protocol.DeliveryRedundant, Selection: protocol.PathNone,
@@ -1237,6 +1266,80 @@ func TestApplicationRelaySendLedgerBackpressureDoesNotResetFlow(t *testing.T) {
 	})
 	if err != nil || len(messageAttachments[protocol.ACK](t, actions)) != 1 {
 		t.Fatalf("deferred ACK actions=%#v err=%v", actions, err)
+	}
+}
+
+func TestApplicationRelayRedundantSlowCopiesBackpressureApplicationReadBeforeAttemptHistoryLimit(t *testing.T) {
+	relay, machine := newRelayFixture(t, policy.Config{
+		Mode: protocol.DeliveryRedundant, Selection: protocol.PathNone,
+	})
+	attachments := make([]flow.AttachmentKey, 6)
+	for index := range attachments {
+		attachments[index] = flow.AttachmentKey{
+			SessionGeneration:    uint64(index + 1),
+			AttachmentGeneration: uint64(index + 1),
+		}
+		publishRelayAttachment(t, relay, machine, attachments[index])
+	}
+
+	const chunkBytes = 16 << 10
+	data := make([]byte, chunkBytes)
+	held := make([]uint64, 0, MaxApplicationRelayPendingSends)
+	var acknowledged uint64
+	paused := false
+	for iteration := 0; iteration <= MaxApplicationRelayAttemptItems; iteration++ {
+		readGeneration := relay.Snapshot().ApplicationReadGeneration
+		if readGeneration == 0 {
+			paused = true
+			break
+		}
+		actions, err := relay.Handle(ApplicationRelayEvent{
+			Kind: ApplicationRelayReadResult, Generation: readGeneration, Data: data,
+		})
+		if err != nil {
+			t.Fatalf("application read %d reset under redundant backpressure: %v", iteration, err)
+		}
+		dataActions := dataMessageActions(t, actions)
+		if len(dataActions) != len(attachments) {
+			t.Fatalf("application read %d produced %d DATA copies, want %d", iteration, len(dataActions), len(attachments))
+		}
+		fastGeneration := dataActions[0].Generation
+		for _, action := range dataActions[1:] {
+			held = append(held, action.Generation)
+		}
+		if _, err := relay.Handle(ApplicationRelayEvent{
+			Kind: ApplicationRelaySendResult, Generation: fastGeneration, AttemptOutcome: flow.AttemptSucceeded,
+		}); err != nil {
+			t.Fatalf("fast send %d: %v", iteration, err)
+		}
+		acknowledged += chunkBytes
+		if _, err := relay.Handle(ApplicationRelayEvent{
+			Kind: ApplicationRelayRemoteMessage, Attachment: attachments[0],
+			Message: protocol.ACK{FlowID: testRelayFlowID, NextOffset: acknowledged},
+		}); err != nil {
+			t.Fatalf("acknowledgement %d: %v", iteration, err)
+		}
+	}
+	if !paused {
+		t.Fatal("application reads did not pause before redundant send bookkeeping exhausted")
+	}
+	if snapshot := relay.Snapshot(); snapshot.Flow.Lifecycle.State != flow.Relaying || snapshot.PendingSends == 0 {
+		t.Fatalf("backpressured redundant application relay = %#v", snapshot)
+	}
+
+	resumed := false
+	for _, generation := range held {
+		actions, err := relay.Handle(ApplicationRelayEvent{
+			Kind: ApplicationRelaySendResult, Generation: generation, AttemptOutcome: flow.AttemptSucceeded,
+		})
+		if err != nil {
+			t.Fatalf("slow send completion: %v", err)
+		}
+		resumed = resumed || countRelayActions(actions, ApplicationRelayActionRead) != 0
+	}
+	if snapshot := relay.Snapshot(); !resumed || snapshot.ApplicationReadGeneration == 0 ||
+		snapshot.Flow.Lifecycle.State != flow.Relaying {
+		t.Fatalf("redundant application relay did not resume after send capacity returned: %#v", snapshot)
 	}
 }
 

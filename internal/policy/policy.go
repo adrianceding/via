@@ -272,6 +272,13 @@ func (policy *Policy) Attachments() []flow.AttachmentKey {
 	return policy.sortedAttachments()
 }
 
+func (policy *Policy) AttachmentCount() int {
+	if policy == nil {
+		return 0
+	}
+	return len(policy.attachments)
+}
+
 func (policy *Policy) State() AdaptiveState {
 	if policy == nil {
 		return AdaptiveWaiting
@@ -418,6 +425,21 @@ func (policy *Policy) RetryDue(request PlacementRequest) []Placement {
 
 func (policy *Policy) ControlPlacements() []Placement {
 	return policy.placeAll(nil, 0)
+}
+
+func (policy *Policy) AcknowledgementPlacements() []Placement {
+	if policy == nil {
+		return nil
+	}
+	if policy.config.Mode != protocol.DeliveryAdaptive ||
+		policy.config.Selection != protocol.PathFastest {
+		return policy.ControlPlacements()
+	}
+	candidates := policy.candidates(0, nil)
+	if len(candidates) == 0 {
+		return nil
+	}
+	return []Placement{policy.placementFor(candidates[0])}
 }
 
 func (policy *Policy) RecordCumulativeProgress(acknowledgedBytes uint64) {

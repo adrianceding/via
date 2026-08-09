@@ -60,8 +60,35 @@ func TestRedundantPolicyPlacesEveryCopyAndControl(t *testing.T) {
 		}
 	}
 	assertPlacementSet(t, policy.ControlPlacements(), testAttachmentA, testAttachmentB)
+	assertPlacementSet(t, policy.AcknowledgementPlacements(), testAttachmentA, testAttachmentB)
 	placements = policy.RetryDue(PlacementRequest{Attempted: []flow.AttachmentKey{testAttachmentA}})
 	assertPlacementSet(t, placements, testAttachmentB)
+}
+
+func TestAdaptiveFastestAcknowledgementUsesOneBestPathWithoutNarrowingControlFanout(t *testing.T) {
+	var missing *Policy
+	if placements := missing.AcknowledgementPlacements(); len(placements) != 0 {
+		t.Fatalf("nil policy acknowledgement placements = %#v", placements)
+	}
+
+	policy := newTestPolicy(t, Config{Mode: protocol.DeliveryAdaptive, Selection: protocol.PathFastest})
+	addTestAttachments(t, policy)
+	for attachment, rtt := range map[flow.AttachmentKey]time.Duration{
+		testAttachmentA: 10 * time.Millisecond,
+		testAttachmentB: 30 * time.Millisecond,
+	} {
+		if err := policy.SetQualitySnapshot(attachment, QualitySnapshot{
+			SRTT: rtt, CapacityBytesSec: 1 << 20, RetryEstimate: MinimumRetryEstimate,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	placements := policy.AcknowledgementPlacements()
+	if len(placements) != 1 || placements[0].Attachment != testAttachmentA {
+		t.Fatalf("acknowledgement placements = %#v, want best path", placements)
+	}
+	assertPlacementSet(t, policy.ControlPlacements(), testAttachmentA, testAttachmentB)
 }
 
 func TestPolicyBoundsRetryAfterByEstimatedDelivery(t *testing.T) {

@@ -806,6 +806,15 @@ func (relay *ApplicationRelay) placeTxItem(item flow.TxItem, actions *[]Applicat
 	if len(placements) > flow.MaxAttachments {
 		return ErrInvalidApplicationRelay
 	}
+	required := 0
+	for _, placement := range placements {
+		if !applicationRelayAttemptedAttachment(history.attempted, placement.Attachment) {
+			required++
+		}
+	}
+	if required > MaxApplicationRelayPendingSends-len(relay.pendingSends) {
+		return nil
+	}
 	var result error
 	for _, placement := range placements {
 		retryAfter := placement.RetryAfter
@@ -816,12 +825,6 @@ func (relay *ApplicationRelay) placeTxItem(item flow.TxItem, actions *[]Applicat
 			history.retryAfter = retryAfter
 		}
 		if applicationRelayAttemptedAttachment(history.attempted, placement.Attachment) {
-			continue
-		}
-		// A full send ledger is expected when the transport is slower than the
-		// application. Leave the item in Flow's replay window and let its retry
-		// deadline retry placement after a send completion frees a slot.
-		if len(relay.pendingSends) >= MaxApplicationRelayPendingSends {
 			continue
 		}
 		attemptActions, err := relay.machine.Handle(flow.FlowEvent{
@@ -956,7 +959,7 @@ func (relay *ApplicationRelay) consumeLifecycleAction(action flow.LifecycleActio
 }
 
 func (relay *ApplicationRelay) emitControl(message protocol.Message, actions *[]ApplicationRelayAction) error {
-	placements := relay.policy.ControlPlacements()
+	placements := relay.policy.AcknowledgementPlacements()
 	var result error
 	for _, placement := range placements {
 		result = errors.Join(result, relay.emitControlOnAttachment(message, placement.Attachment, actions))
@@ -1139,6 +1142,16 @@ func (relay *ApplicationRelay) scheduleRead(actions *[]ApplicationRelayAction) e
 		return nil
 	}
 	if relay.machine.LifecycleState() != flow.Relaying || relay.machine.TxState() != flow.TxOpen || relay.machine.TxAvailableWindow() == 0 {
+		return nil
+	}
+	requiredSends := 1
+	if relay.policy.Mode() == protocol.DeliveryRedundant {
+		requiredSends = relay.policy.AttachmentCount()
+	}
+	// An application read cannot be undone. Reserve one attempt-history item
+	// and enough send-ledger entries to place the complete redundant copy set.
+	if requiredSends == 0 || requiredSends > MaxApplicationRelayPendingSends-len(relay.pendingSends) ||
+		len(relay.attemptHistory) >= MaxApplicationRelayAttemptItems {
 		return nil
 	}
 	limit := int(min(relay.machine.TxAvailableWindow(), uint64(MaxApplicationReadBytes)))

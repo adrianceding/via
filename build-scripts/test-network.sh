@@ -599,11 +599,17 @@ assert_distributed_aggregation() {
 	wait "$window_sampler_pid"
 	echo "test-network: 双路 Flow 窗口 $(cat "$window_summary")"
 	local dual="$LAST_TRANSFER_NANOS"
-	after_a="$(server_session_written "$CLIENT_A_ADDRESS")"
-	after_b="$(server_session_written "$CLIENT_B_ADDRESS")"
-	delta_a=$((after_a - before_a))
-	delta_b=$((after_b - before_b))
-	total=$((delta_a + delta_b))
+	# The transfer completion can precede the throttled read-only session
+	# snapshot. Wait for diagnostics to catch up before asserting DATA shares.
+	for _ in {1..100}; do
+		after_a="$(server_session_written "$CLIENT_A_ADDRESS")"
+		after_b="$(server_session_written "$CLIENT_B_ADDRESS")"
+		delta_a=$((after_a - before_a))
+		delta_b=$((after_b - before_b))
+		total=$((delta_a + delta_b))
+		((total >= size)) && break
+		sleep 0.05
+	done
 	fastest="$single_a"
 	((single_b < fastest)) && fastest="$single_b"
 	echo "test-network: 聚合耗时 A=${single_a}ns B=${single_b}ns dual=${dual}ns，DATA A=${delta_a} B=${delta_b}"
