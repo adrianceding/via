@@ -305,16 +305,13 @@ func (policy *Policy) SetQualitySnapshot(attachment flow.AttachmentKey, snapshot
 }
 
 func (policy *Policy) SetQualitySnapshots(snapshots map[flow.AttachmentKey]QualitySnapshot) error {
-	if len(snapshots) != len(policy.attachments) {
-		return ErrUnknownAttachment
-	}
 	for attachment := range snapshots {
 		if _, ok := policy.attachments[attachment]; !ok {
 			return ErrUnknownAttachment
 		}
 	}
-	for attachment, state := range policy.attachments {
-		next := snapshots[attachment]
+	for attachment, next := range snapshots {
+		state := policy.attachments[attachment]
 		state.qualitySnapshot = next
 		state.hasSnapshot = true
 	}

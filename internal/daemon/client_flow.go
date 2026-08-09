@@ -676,7 +676,7 @@ func (instance *clientFlow) refreshSessionQualities(kind clientcore.ApplicationR
 	for _, attachment := range attachments {
 		session := instance.host.session(attachment.SessionGeneration)
 		if session == nil {
-			return nil
+			continue
 		}
 		qualities[attachment] = session.qualitySnapshot()
 	}

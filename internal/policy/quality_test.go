@@ -155,26 +155,26 @@ func TestQualityStaleDataRTTFallsBackToProbe(t *testing.T) {
 	}
 }
 
-func TestQualityStaleCapacityDecaysFromLastMeasuredValue(t *testing.T) {
+func TestQualityStaleCapacityDecaysConservatively(t *testing.T) {
 	now := time.Unix(500, 0)
 	quality := NewQualityWithClock(func() time.Time { return now })
-	if err := quality.ObserveData(0, 64<<10, time.Second); err != nil {
+	if err := quality.ObserveData(0, 32<<10, time.Second); err != nil {
 		t.Fatal(err)
 	}
 
 	now = now.Add(4 * time.Second)
 	snapshot := quality.Snapshot()
-	if snapshot.DataSampleFresh || snapshot.CapacityBytesSec != defaultCapacity || snapshot.LastDataCapacity != 64<<10 {
+	if snapshot.DataSampleFresh || snapshot.CapacityBytesSec != defaultCapacity || snapshot.LastDataCapacity != 32<<10 {
 		t.Fatalf("stale capacity snapshot = %#v", snapshot)
 	}
 	capacity := effectiveCapacity(snapshot)
-	if capacity <= snapshot.LastDataCapacity || capacity >= defaultCapacity {
-		t.Fatalf("stale capacity was not retained with decay: got %v, snapshot=%#v", capacity, snapshot)
+	if capacity != snapshot.LastDataCapacity {
+		t.Fatalf("known slow capacity was inflated while stale: got %v, snapshot=%#v", capacity, snapshot)
 	}
 
 	now = now.Add(staleCapacityHorizon)
-	if got := effectiveCapacity(quality.Snapshot()); got != defaultCapacity {
-		t.Fatalf("expired stale capacity = %v, want %v", got, defaultCapacity)
+	if got := effectiveCapacity(quality.Snapshot()); got != snapshot.LastDataCapacity {
+		t.Fatalf("expired stale capacity = %v, want %v", got, snapshot.LastDataCapacity)
 	}
 }
 

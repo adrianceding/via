@@ -137,7 +137,7 @@ func (instance *serverFlow) refreshSessionQualitiesLocked(kind servercore.RelayE
 	for _, attachment := range attachments {
 		session := instance.host.session(attachment.SessionGeneration)
 		if session == nil {
-			return nil
+			continue
 		}
 		qualities[attachment] = session.qualitySnapshot()
 	}

@@ -146,25 +146,31 @@ func TestFlowCumulativeACKAndSelectiveACKDeadlineSemantics(t *testing.T) {
 		t.Fatal(err)
 	}
 	afterSelective := machine.Snapshot()
-	if afterSelective.NoProgressGeneration == before.NoProgressGeneration || afterSelective.RetryGeneration == before.RetryGeneration {
-		t.Fatalf("selective ACK did not refresh data deadlines: before=%#v after=%#v", before, afterSelective)
+	if afterSelective.NoProgressGeneration != before.NoProgressGeneration || afterSelective.RetryGeneration == before.RetryGeneration {
+		t.Fatalf("selective ACK changed absolute no-progress deadline or did not refresh retry: before=%#v after=%#v", before, afterSelective)
 	}
 	if !hasFlowAction(actions, FlowActionCancelRetryDeadline) || !hasFlowAction(actions, FlowActionArmRetryDeadline) ||
-		!hasFlowAction(actions, FlowActionCancelNoProgressDeadline) || !hasFlowAction(actions, FlowActionArmNoProgressDeadline) {
+		hasFlowAction(actions, FlowActionCancelNoProgressDeadline) || hasFlowAction(actions, FlowActionArmNoProgressDeadline) {
 		t.Fatalf("selective ACK deadline actions = %#v", actions)
 	}
-	staleActions, err := machine.Handle(FlowEvent{Kind: FlowNoProgressDeadline, Generation: before.NoProgressGeneration})
-	if err != nil || len(staleActions) != 0 || machine.LifecycleState() == Resetting {
-		t.Fatalf("stale no-progress deadline affected flow: actions=%#v err=%v snapshot=%#v", staleActions, err, machine.Snapshot())
+	deadlineActions, err := machine.Handle(FlowEvent{Kind: FlowNoProgressDeadline, Generation: before.NoProgressGeneration})
+	if err != nil || machine.LifecycleState() != Resetting || !hasLifecycleAction(deadlineActions, LifecycleActionSendReset) {
+		t.Fatalf("absolute no-progress deadline did not reset flow: actions=%#v err=%v snapshot=%#v", deadlineActions, err, machine.Snapshot())
 	}
+}
 
-	actions, err = machine.Handle(FlowEvent{Kind: FlowRemoteACK, Offset: 3})
+func TestFlowCumulativeACKReleasesPendingDeadlines(t *testing.T) {
+	machine := newRelayingFlow(t, AttachmentKey{SessionGeneration: 1, AttachmentGeneration: 1})
+	if _, err := machine.Handle(FlowEvent{Kind: FlowLocalData, Data: []byte("abc")}); err != nil {
+		t.Fatal(err)
+	}
+	actions, err := machine.Handle(FlowEvent{Kind: FlowRemoteACK, Offset: 3})
 	if err != nil {
 		t.Fatal(err)
 	}
-	afterCumulative := machine.Snapshot()
-	if afterCumulative.TxReplayBytes != 0 || afterCumulative.RetryGeneration != 0 || afterCumulative.NoProgressGeneration != 0 {
-		t.Fatalf("cumulative ACK did not release idle flow: %#v", afterCumulative)
+	after := machine.Snapshot()
+	if after.TxReplayBytes != 0 || after.RetryGeneration != 0 || after.NoProgressGeneration != 0 {
+		t.Fatalf("cumulative ACK did not release idle flow: %#v", after)
 	}
 	if !hasFlowAction(actions, FlowActionCancelRetryDeadline) || !hasFlowAction(actions, FlowActionCancelNoProgressDeadline) {
 		t.Fatalf("deadline cancellation actions = %#v", actions)

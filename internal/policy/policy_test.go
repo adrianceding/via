@@ -337,6 +337,19 @@ func TestFastestPolicyMovesFromStalledIncumbentWhileDataIsPending(t *testing.T) 
 	}
 }
 
+func TestPolicySetQualitySnapshotsUpdatesAvailableSubset(t *testing.T) {
+	selection := newTestPolicy(t, Config{Mode: protocol.DeliveryAdaptive, Selection: protocol.PathFastest})
+	addTestAttachments(t, selection)
+	if err := selection.SetQualitySnapshots(map[flow.AttachmentKey]QualitySnapshot{
+		testAttachmentA: {SRTT: 20 * time.Millisecond, CapacityBytesSec: 1 << 20},
+	}); err != nil {
+		t.Fatalf("partial quality refresh: %v", err)
+	}
+	if got := selection.PlaceNew(PlacementRequest{Bytes: 1})[0].Attachment; got != testAttachmentA {
+		t.Fatalf("placement after partial quality refresh = %+v, want %+v", got, testAttachmentA)
+	}
+}
+
 func TestDistributedPolicyWeightsByCapacityAndIsDeterministic(t *testing.T) {
 	build := func() *Policy {
 		policy := newTestPolicy(t, Config{Mode: protocol.DeliveryAdaptive, Selection: protocol.PathDistributed})

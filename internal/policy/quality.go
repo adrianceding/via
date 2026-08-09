@@ -166,9 +166,8 @@ func deliveryEstimate(snapshot QualitySnapshot, payloadBytes uint64) time.Durati
 	return saturatingDurationSum(base, serialization, snapshot.StallPenalty)
 }
 
-// effectiveCapacity keeps the last measured capacity useful after its fresh
-// window expires. A path should not immediately become indistinguishable from
-// an unmeasured path just because no DATA sample arrived recently.
+// effectiveCapacity decays stale measurements toward the conservative prior.
+// In particular, staleness must never make a known slow path look faster.
 func effectiveCapacity(snapshot QualitySnapshot) float64 {
 	if snapshot.DataSampleFresh {
 		if finitePositive(snapshot.CapacityBytesSec) {
@@ -185,11 +184,12 @@ func effectiveCapacity(snapshot QualitySnapshot) float64 {
 	if snapshot.DataSampleAge <= 0 {
 		return snapshot.LastDataCapacity
 	}
+	staleBaseline := math.Min(snapshot.LastDataCapacity, unmeasuredCapacity)
 	if snapshot.DataSampleAge >= staleCapacityHorizon {
-		return defaultCapacity
+		return staleBaseline
 	}
 	weight := float64(snapshot.DataSampleAge) / float64(staleCapacityHorizon)
-	return snapshot.LastDataCapacity + (float64(defaultCapacity)-snapshot.LastDataCapacity)*weight
+	return snapshot.LastDataCapacity + (staleBaseline-snapshot.LastDataCapacity)*weight
 }
 
 func (quality *Quality) preferredRTT(now time.Time) (time.Duration, time.Duration) {
