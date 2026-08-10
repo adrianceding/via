@@ -76,11 +76,19 @@ func newSimulationHarness(t *testing.T, mode protocol.DeliveryMode, selection pr
 	return newSimulationHarnessConfigured(t, mode, selection, nil, true)
 }
 
+func newSimulationHarnessWithSessionLimit(t *testing.T, mode protocol.DeliveryMode, selection protocol.PathSelection, sessions int) *simulationHarness {
+	return newSimulationHarnessConfiguredWithSessionLimit(t, mode, selection, nil, true, sessions)
+}
+
 func newSimulationHarnessWithTarget(t *testing.T, mode protocol.DeliveryMode, selection protocol.PathSelection, targetHandle func(*simulationHarness, net.Conn)) *simulationHarness {
 	return newSimulationHarnessConfigured(t, mode, selection, targetHandle, true)
 }
 
 func newSimulationHarnessConfigured(t *testing.T, mode protocol.DeliveryMode, selection protocol.PathSelection, targetHandle func(*simulationHarness, net.Conn), authentication bool) *simulationHarness {
+	return newSimulationHarnessConfiguredWithSessionLimit(t, mode, selection, targetHandle, authentication, 2)
+}
+
+func newSimulationHarnessConfiguredWithSessionLimit(t *testing.T, mode protocol.DeliveryMode, selection protocol.PathSelection, targetHandle func(*simulationHarness, net.Conn), authentication bool, sessions int) *simulationHarness {
 	t.Helper()
 	target, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -89,7 +97,7 @@ func newSimulationHarnessConfigured(t *testing.T, mode protocol.DeliveryMode, se
 	relayAddress := reserveAddress(t)
 	socksAddress := reserveAddress(t)
 	serverConfiguration := decodeSimulationServer(t, relayAddress)
-	clientConfiguration := decodeSimulationClient(t, relayAddress, socksAddress, mode, selection)
+	clientConfiguration := decodeSimulationClientWithSessionLimit(t, relayAddress, socksAddress, mode, selection, sessions)
 	if !authentication {
 		clientConfiguration.SOCKSAuth = nil
 	}
@@ -477,6 +485,10 @@ deadlines: {drain_cleanup: "1s"}
 }
 
 func decodeSimulationClient(t *testing.T, relayAddress, socksAddress string, mode protocol.DeliveryMode, selection protocol.PathSelection) config.Client {
+	return decodeSimulationClientWithSessionLimit(t, relayAddress, socksAddress, mode, selection, 2)
+}
+
+func decodeSimulationClientWithSessionLimit(t *testing.T, relayAddress, socksAddress string, mode protocol.DeliveryMode, selection protocol.PathSelection, sessions int) config.Client {
 	t.Helper()
 	delivery := "delivery: {mode: redundant}"
 	if mode == protocol.DeliveryAdaptive {
@@ -499,9 +511,9 @@ transport: {type: tcp, address: %q}
 interfaces: {include: ["sim-*"]}
 principal_id: client-01
 psk: "MTIzNDU2Nzg5MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTI="
-limits: {sessions: 2, auth_in_progress: 2}
+limits: {sessions: %d, auth_in_progress: %d}
 deadlines: {drain_cleanup: "1s"}
-`, socksAddress, daemonSOCKSUsername, daemonSOCKSPassword, relayAddress, delivery)))
+`, socksAddress, daemonSOCKSUsername, daemonSOCKSPassword, relayAddress, delivery, sessions, sessions)))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -577,7 +577,7 @@ func TestAdaptiveEscalationRecoveryAndStableDeescalation(t *testing.T) {
 	if policy.Snapshot().State != AdaptiveFull || policy.Snapshot().Transition != TransitionRetryEscalated {
 		t.Fatalf("full escalation = %#v", policy.Snapshot())
 	}
-	if len(placements) != 1 {
+	if len(placements) != 2 {
 		t.Fatalf("fastest full recovery copy count = %#v", placements)
 	}
 	placements = policy.PlaceNew(PlacementRequest{Bytes: 100})
@@ -623,7 +623,42 @@ func TestAdaptiveRecoverySkipsStalledDataAttachments(t *testing.T) {
 	assertPlacementSet(t, policy.ControlPlacements(), testAttachmentA, testAttachmentB)
 }
 
-func TestAdaptiveFullRecoveryLimitsDataCopiesToBestAttachments(t *testing.T) {
+func TestAdaptiveFastestGapRecoveryFansOutToEveryUnattemptedHealthyAttachment(t *testing.T) {
+	policy := newTestPolicy(t, Config{Mode: protocol.DeliveryAdaptive, Selection: protocol.PathFastest})
+	attachments := make([]flow.AttachmentKey, MaxAttachments)
+	for index := range attachments {
+		attachments[index] = flow.AttachmentKey{
+			SessionGeneration:    uint64(index + 1),
+			AttachmentGeneration: 1,
+		}
+		if err := policy.AddAttachment(attachments[index]); err != nil {
+			t.Fatal(err)
+		}
+		if err := policy.SetQualitySnapshot(attachments[index], QualitySnapshot{
+			SRTT:             time.Duration(index+1) * 10 * time.Millisecond,
+			CapacityBytesSec: 1 << 20,
+			RetryEstimate:    MinimumRetryEstimate,
+			DataSampleFresh:  true,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := policy.SetStallPenalty(attachments[len(attachments)-1], time.Second); err != nil {
+		t.Fatal(err)
+	}
+
+	placements := policy.GapDue(PlacementRequest{
+		Bytes:     100,
+		Attempted: []flow.AttachmentKey{attachments[0]},
+	})
+	assertPlacementSet(t, placements, attachments[1:len(attachments)-1]...)
+	if snapshot := policy.Snapshot(); snapshot.State != AdaptiveTargeted ||
+		snapshot.Transition != TransitionAcknowledgementGap {
+		t.Fatalf("gap recovery state = %#v", snapshot)
+	}
+}
+
+func TestAdaptiveFastestFullRecoveryFansOutAndKeepsNewDataSingle(t *testing.T) {
 	policy := newTestPolicy(t, Config{Mode: protocol.DeliveryAdaptive, Selection: protocol.PathFastest})
 	addTestAttachments(t, policy)
 	third := flow.AttachmentKey{SessionGeneration: 3, AttachmentGeneration: 1}
@@ -646,9 +681,7 @@ func TestAdaptiveFullRecoveryLimitsDataCopiesToBestAttachments(t *testing.T) {
 	}
 
 	placements := policy.RetryDue(PlacementRequest{Bytes: 100})
-	if len(placements) != 1 {
-		t.Fatalf("fastest adaptive full copy count = %#v, want 1", placements)
-	}
+	assertPlacementSet(t, placements, testAttachmentA, testAttachmentB, third)
 	placements = policy.PlaceNew(PlacementRequest{Bytes: 100})
 	if len(placements) != 1 || placements[0].Attachment != testAttachmentA {
 		t.Fatalf("new DATA recovery placement = %#v", placements)

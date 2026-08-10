@@ -13,17 +13,17 @@ import (
 )
 
 const (
-	MaxAttachments               = flow.MaxAttachments
-	StableACKCount               = 8
-	StableAcknowledged           = 64 << 10
-	MinimumConstraint            = protocol.MinimumDeliveryConstraint
-	MaximumConstraint            = protocol.MaximumDeliveryConstraint
-	fastestImprovementPercent    = 15
-	fastestImprovementAbsolute   = 5 * time.Millisecond
-	fastestChallengeDuration     = 300 * time.Millisecond
-	fastestHoldDownDuration      = time.Second
-	maximumAdaptiveDataCopies    = 2
-	MaximumDeliveryRetryEstimate = 10 * time.Second
+	MaxAttachments                   = flow.MaxAttachments
+	StableACKCount                   = 8
+	StableAcknowledged               = 64 << 10
+	MinimumConstraint                = protocol.MinimumDeliveryConstraint
+	MaximumConstraint                = protocol.MaximumDeliveryConstraint
+	fastestImprovementPercent        = 15
+	fastestImprovementAbsolute       = 5 * time.Millisecond
+	fastestChallengeDuration         = 300 * time.Millisecond
+	fastestHoldDownDuration          = time.Second
+	maximumDistributedRecoveryCopies = 2
+	MaximumDeliveryRetryEstimate     = 10 * time.Second
 )
 
 var (
@@ -397,13 +397,12 @@ func (policy *Policy) GapDue(request PlacementRequest) []Placement {
 		policy.setRecoveryIncumbent(placements, request.Bytes)
 		return placements
 	}
-	placements := policy.placeOne(request, attemptedSet(request.Attempted))
-	if policy.config.Selection == protocol.PathFastest && len(placements) != 0 {
-		// The incumbent just failed to advance the cumulative ACK. Keep new
-		// DATA on the alternate that received the targeted recovery instead of
-		// immediately sending the next segment back to the failed path.
-		policy.setIncumbent(placements[0].Attachment, policy.currentNow(), true)
+	if policy.config.Selection == protocol.PathFastest {
+		placements := policy.placeAll(request.Attempted, request.Bytes)
+		policy.setRecoveryIncumbent(placements, request.Bytes)
+		return placements
 	}
+	placements := policy.placeOne(request, attemptedSet(request.Attempted))
 	return placements
 }
 
@@ -553,11 +552,9 @@ func (policy *Policy) placeAll(attempted []flow.AttachmentKey, payloadBytes uint
 		if len(eligible) != 0 {
 			placementsKeys = eligible
 		}
-		copyLimit := maximumAdaptiveDataCopies
-		if policy.config.Selection == protocol.PathFastest {
-			copyLimit = 1
-		}
-		if policy.config.Mode == protocol.DeliveryAdaptive && policy.state == AdaptiveFull && len(placementsKeys) > copyLimit {
+		adaptiveRecovery := policy.config.Mode == protocol.DeliveryAdaptive &&
+			(policy.state == AdaptiveFull || policy.config.Selection == protocol.PathFastest)
+		if adaptiveRecovery && len(placementsKeys) > 1 {
 			sort.SliceStable(placementsKeys, func(left, right int) bool {
 				leftQuality := policy.qualitySnapshot(policy.attachments[placementsKeys[left]])
 				rightQuality := policy.qualitySnapshot(policy.attachments[placementsKeys[right]])
@@ -568,7 +565,9 @@ func (policy *Policy) placeAll(attempted []flow.AttachmentKey, payloadBytes uint
 				}
 				return policy.attachments[placementsKeys[left]].tie < policy.attachments[placementsKeys[right]].tie
 			})
-			placementsKeys = placementsKeys[:copyLimit]
+			if policy.config.Selection != protocol.PathFastest && len(placementsKeys) > maximumDistributedRecoveryCopies {
+				placementsKeys = placementsKeys[:maximumDistributedRecoveryCopies]
+			}
 		}
 	}
 	placements := make([]Placement, 0, len(placementsKeys))

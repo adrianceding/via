@@ -271,12 +271,14 @@ func TestApplicationRelayAdaptiveFastestPlacesNewDataOnceAcrossTwoAttachments(t 
 	}
 }
 
-func TestApplicationRelayAdaptiveFirstRetryApplicationsTheOtherAttachmentThenEscalates(t *testing.T) {
+func TestApplicationRelayAdaptiveFirstRetryFansOutThenEscalates(t *testing.T) {
 	relay, machine := newRelayFixture(t, policy.Config{
 		Mode: protocol.DeliveryAdaptive, Selection: protocol.PathFastest,
 	})
+	third := flow.AttachmentKey{SessionGeneration: 3, AttachmentGeneration: 33}
 	publishRelayAttachment(t, relay, machine, testRelayA)
 	publishRelayAttachment(t, relay, machine, testRelayB)
+	publishRelayAttachment(t, relay, machine, third)
 	actions, err := relay.Handle(ApplicationRelayEvent{
 		Kind: ApplicationRelayReadResult, Generation: relay.Snapshot().ApplicationReadGeneration, Data: []byte("gap"),
 	})
@@ -294,9 +296,14 @@ func TestApplicationRelayAdaptiveFirstRetryApplicationsTheOtherAttachmentThenEsc
 		t.Fatal(err)
 	}
 	second := messageAttachments[protocol.Data](t, actions)
-	if len(second) != 1 || second[0] == first[0] {
-		t.Fatalf("applicationed placements first=%#v second=%#v", first, second)
+	wantSecond := []flow.AttachmentKey{testRelayA, testRelayB, third}
+	for index, attachment := range wantSecond {
+		if attachment == first[0] {
+			wantSecond = append(wantSecond[:index], wantSecond[index+1:]...)
+			break
+		}
 	}
+	assertAttachmentSet(t, second, wantSecond...)
 	if state := relay.Snapshot().Policy.State; state != policy.AdaptiveTargeted {
 		t.Fatalf("policy state after applicationed retry = %v", state)
 	}
@@ -306,9 +313,7 @@ func TestApplicationRelayAdaptiveFirstRetryApplicationsTheOtherAttachmentThenEsc
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := messageAttachments[protocol.Data](t, actions); len(got) != 1 {
-		t.Fatalf("fastest full recovery DATA copies = %#v", got)
-	}
+	assertAttachmentSet(t, messageAttachments[protocol.Data](t, actions), testRelayA, testRelayB, third)
 	if state := relay.Snapshot().Policy.State; state != policy.AdaptiveFull {
 		t.Fatalf("policy state after full retry = %v", state)
 	}

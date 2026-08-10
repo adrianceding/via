@@ -419,6 +419,48 @@ func TestSimulatedFullChainAdaptiveFastestRecoversFromSustainedOneWayBlackhole(t
 	}, "server retransmission status counter")
 }
 
+func TestSimulatedFullChainAdaptiveFastestFirstGapFansOutWithinBudget(t *testing.T) {
+	harness := newSimulationHarnessWithSessionLimit(t, protocol.DeliveryAdaptive, protocol.PathFastest, 3)
+	defer harness.close()
+	harness.enumerator.set(
+		simulatedInterface(1, "sim-a", simulationAddressA),
+		simulatedInterface(2, "sim-b", simulationAddressB),
+		simulatedInterface(3, "sim-c", simulationAddressC),
+	)
+	harness.tickPaths()
+	harness.waitSessions(3)
+	harness.waitSessionAddresses(simulationAddressA, simulationAddressB, simulationAddressC)
+	setSimulationSessionQuality(t, harness, simulationAddressA, 10*time.Millisecond)
+	setSimulationSessionQuality(t, harness, simulationAddressB, 2*time.Second)
+	setSimulationSessionQuality(t, harness, simulationAddressC, 2100*time.Millisecond)
+
+	application := harness.openApplication()
+	defer application.Close()
+	harness.waitAttachments(3)
+	primary := harness.network.controller(simulationAddressA, simulatedDownlink)
+	secondary := harness.network.controller(simulationAddressB, simulatedDownlink)
+	healthy := harness.network.controller(simulationAddressC, simulatedDownlink)
+	primary.set(simulatedFault{kind: simulatedFaultDrop, frameType: protocol.TypeData, remaining: -1})
+	secondary.set(simulatedFault{kind: simulatedFaultDrop, frameType: protocol.TypeData, remaining: -1})
+
+	result := startSimulationRoundTrip(application, []byte("first-gap-fanout"))
+	waitFor(t, time.Second, func() bool { return primary.matchCount() != 0 }, "blackholed fastest-path DATA")
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(1600 * time.Millisecond):
+		t.Fatal("fastest first-gap recovery exceeded 1.6s budget")
+	}
+	waitFor(t, time.Second, func() bool {
+		return secondary.count(protocol.TypeData) != 0 && healthy.count(protocol.TypeData) != 0
+	}, "first-gap DATA fanout")
+	if harness.targetTotal.Load() != 1 {
+		t.Fatalf("target connections = %d, want 1", harness.targetTotal.Load())
+	}
+}
+
 func TestSimulatedFullChainNewAdaptiveFlowUsesExistingFastestSessionQuality(t *testing.T) {
 	harness := newSimulationHarness(t, protocol.DeliveryAdaptive, protocol.PathFastest)
 	defer harness.close()
