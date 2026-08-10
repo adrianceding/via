@@ -966,19 +966,19 @@ func (instance *clientFlow) executeRelay(actions []clientcore.ApplicationRelayAc
 			go func(action clientcore.ApplicationRelayAction, pending *pendingSessionWrite) {
 				defer instance.host.wg.Done()
 				outcome := flow.AttemptFailed
-				writeCompletedAt, err := pending.wait()
+				writeCompletedAt, capacityEligible, err := pending.wait()
 				if err == nil {
 					outcome = flow.AttemptSucceeded
 				}
 				instance.emit(clientcore.ApplicationRelayEvent{
 					Kind: clientcore.ApplicationRelaySendResult, Generation: action.Generation, AttemptOutcome: outcome,
-					WriteCompletedAt: writeCompletedAt,
+					WriteCompletedAt: writeCompletedAt, CapacityEligible: capacityEligible,
 				})
 			}(action, pending)
 		case clientcore.ApplicationRelayActionDataCredit:
 			session := instance.host.session(action.Attachment.SessionGeneration)
 			if session != nil {
-				session.runtime.observeDataCredit(action.DataCreditBytes, action.WriteCompletedAt, action.AcknowledgedAt)
+				session.runtime.observeDataCredit(action.DataCreditBytes, action.WriteCompletedAt, action.AcknowledgedAt, action.CapacityEligible)
 			}
 		case clientcore.ApplicationRelayActionArmRetryDeadline:
 			instance.armRelayTimer(relayTimerRetry, action.Generation, action.After)

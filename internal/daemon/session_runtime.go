@@ -39,6 +39,7 @@ type sessionRuntimeRequest struct {
 	encoded           []byte
 	result            chan error
 	completedAt       time.Time
+	capacityEligible  bool
 	state             sessionRuntimeRequestState
 }
 
@@ -455,6 +456,7 @@ func (runtime *sessionRuntime) completeWrite(request *sessionRuntimeRequest, err
 	runtime.inFlightFrames--
 	runtime.inFlightBytes -= minUint64(runtime.inFlightBytes, uint64(len(request.encoded)))
 	if request.class == transport.FrameData {
+		request.capacityEligible = runtime.queuedData != 0
 		runtime.inFlightData -= minUint64(runtime.inFlightData, request.dataPayload)
 		if err == nil {
 			runtime.writtenData = saturatingUint64(runtime.writtenData, request.dataPayload)
@@ -505,27 +507,53 @@ func (runtime *sessionRuntime) setStallPenalty(penalty time.Duration) {
 	}
 }
 
-func (runtime *sessionRuntime) observeDataCredit(acknowledgedBytes uint64, writeCompletedAt, acknowledgedAt time.Time) {
+func (runtime *sessionRuntime) observeDataCredit(acknowledgedBytes uint64, writeCompletedAt, acknowledgedAt time.Time, capacityEligible bool) {
 	if runtime == nil || acknowledgedBytes == 0 || writeCompletedAt.IsZero() || acknowledgedAt.IsZero() || acknowledgedAt.Before(writeCompletedAt) {
 		return
 	}
 	runtime.mu.Lock()
-	if runtime.dataWindowBytes != 0 && runtime.dataWindowLastACK.Before(writeCompletedAt) &&
+	runtime.eligibleAckedData = saturatingUint64(runtime.eligibleAckedData, acknowledgedBytes)
+	if !capacityEligible {
+		runtime.dataWindowStart = time.Time{}
+		runtime.dataWindowLastACK = time.Time{}
+		runtime.dataWindowBytes = 0
+		snapshot, notify := runtime.snapshotIfNotifyDueLocked()
+		runtime.mu.Unlock()
+		if notify {
+			runtime.notifySnapshot(snapshot)
+		}
+		return
+	}
+	if !runtime.dataWindowLastACK.IsZero() && runtime.dataWindowLastACK.Before(writeCompletedAt) &&
 		writeCompletedAt.Sub(runtime.dataWindowLastACK) >= dataCapacityWindowTime {
 		runtime.dataWindowStart = time.Time{}
 		runtime.dataWindowLastACK = time.Time{}
 		runtime.dataWindowBytes = 0
 	}
-	if runtime.dataWindowBytes == 0 {
-		runtime.dataWindowStart = writeCompletedAt
+	if runtime.dataWindowLastACK.IsZero() {
+		runtime.dataWindowStart = acknowledgedAt
 		runtime.dataWindowLastACK = acknowledgedAt
+		snapshot, notify := runtime.snapshotIfNotifyDueLocked()
+		runtime.mu.Unlock()
+		if notify {
+			runtime.notifySnapshot(snapshot)
+		}
+		return
 	}
-	if runtime.dataWindowLastACK.IsZero() || acknowledgedAt.After(runtime.dataWindowLastACK) {
+	if acknowledgedAt.Before(runtime.dataWindowLastACK) ||
+		acknowledgedAt.Equal(runtime.dataWindowLastACK) && runtime.dataWindowBytes == 0 {
+		snapshot, notify := runtime.snapshotIfNotifyDueLocked()
+		runtime.mu.Unlock()
+		if notify {
+			runtime.notifySnapshot(snapshot)
+		}
+		return
+	}
+	if acknowledgedAt.After(runtime.dataWindowLastACK) {
 		runtime.dataWindowLastACK = acknowledgedAt
 	}
 	runtime.dataWindowBytes = saturatingUint64(runtime.dataWindowBytes, acknowledgedBytes)
-	runtime.eligibleAckedData = saturatingUint64(runtime.eligibleAckedData, acknowledgedBytes)
-	if runtime.dataWindowBytes < dataCapacityWindowBytes && runtime.now().Sub(runtime.dataWindowStart) < dataCapacityWindowTime {
+	if runtime.dataWindowBytes < dataCapacityWindowBytes {
 		snapshot, notify := runtime.snapshotIfNotifyDueLocked()
 		runtime.mu.Unlock()
 		if notify {

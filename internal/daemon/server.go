@@ -419,9 +419,12 @@ func (daemon *serverDaemon) dispatch(session *wireSession, message protocol.Mess
 
 func (daemon *serverDaemon) probeServerSession(session *wireSession) {
 	probe := func() bool {
-		message, ok, expired := session.startProbe(time.Now())
+		message, ok, expired, dead := session.startProbe(time.Now())
 		if expired {
 			daemon.notifyServerProbeStallPenalty(session, probeTimeout)
+		}
+		if dead {
+			return false
 		}
 		return !ok || session.send(message) == nil
 	}

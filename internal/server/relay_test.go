@@ -527,6 +527,7 @@ func TestRelayACKReleasesReverseReplayAndLateSendResultIsHarmless(t *testing.T) 
 	}
 	actions, err = relay.Handle(RelayEvent{
 		Kind: RelaySendResult, Generation: dataSend.Generation, AttemptOutcome: flow.AttemptSucceeded,
+		CapacityEligible: true,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -536,7 +537,7 @@ func TestRelayACKReleasesReverseReplayAndLateSendResultIsHarmless(t *testing.T) 
 	}
 	credit := requireRelayAction(t, actions, RelayActionDataCredit)
 	if credit.Attachment != dataSend.Attachment || credit.DataCreditBytes != 8 ||
-		credit.WriteCompletedAt.IsZero() || credit.AcknowledgedAt.Before(credit.WriteCompletedAt) {
+		credit.WriteCompletedAt.IsZero() || credit.AcknowledgedAt.Before(credit.WriteCompletedAt) || !credit.CapacityEligible {
 		t.Fatalf("late send completion DATA credit = %#v", credit)
 	}
 }
@@ -558,7 +559,7 @@ func TestRelayCreditsUniqueAttemptToSendingAttachment(t *testing.T) {
 	writeCompletedAt := now.Add(10 * time.Millisecond)
 	if _, err := relay.Handle(RelayEvent{
 		Kind: RelaySendResult, Generation: send.Generation,
-		AttemptOutcome: flow.AttemptSucceeded, WriteCompletedAt: writeCompletedAt,
+		AttemptOutcome: flow.AttemptSucceeded, WriteCompletedAt: writeCompletedAt, CapacityEligible: true,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -576,7 +577,7 @@ func TestRelayCreditsUniqueAttemptToSendingAttachment(t *testing.T) {
 	}
 	credit := requireRelayAction(t, actions, RelayActionDataCredit)
 	if credit.Attachment != send.Attachment || credit.DataCreditBytes != 8 ||
-		credit.WriteCompletedAt != writeCompletedAt || credit.AcknowledgedAt != now {
+		credit.WriteCompletedAt != writeCompletedAt || credit.AcknowledgedAt != now || !credit.CapacityEligible {
 		t.Fatalf("DATA credit = %#v, send attachment = %#v", credit, send.Attachment)
 	}
 }

@@ -79,6 +79,7 @@ type RelayEvent struct {
 	InFlightBytes    uint64
 	StallPenalty     time.Duration
 	WriteCompletedAt time.Time
+	CapacityEligible bool
 	Quality          policy.QualitySnapshot
 	SessionQualities map[flow.AttachmentKey]policy.QualitySnapshot
 }
@@ -125,6 +126,7 @@ type RelayAction struct {
 	DataCreditBytes   uint64
 	WriteCompletedAt  time.Time
 	AcknowledgedAt    time.Time
+	CapacityEligible  bool
 	data              []byte
 }
 
@@ -185,6 +187,7 @@ type relayAttempt struct {
 	writeSucceeded         bool
 	invalid                bool
 	writeCompletedAt       time.Time
+	capacityEligible       bool
 	credited               []flow.ByteRange
 	pendingAcknowledgments []relayAcknowledgment
 }
@@ -531,7 +534,7 @@ func (relay *Relay) handleSendResult(event RelayEvent, actions *[]RelayAction) e
 	var result error
 	switch pending.kind {
 	case relayPendingAttempt:
-		relay.recordAttemptResult(pending, outcome, event.WriteCompletedAt, actions)
+		relay.recordAttemptResult(pending, outcome, event.WriteCompletedAt, event.CapacityEligible, actions)
 		relay.pruneAttemptHistory(relay.machine.TxAcknowledgedOffset(), false)
 		result = relay.applyFlowEvent(flow.FlowEvent{
 			Kind: flow.FlowAttemptResult, ItemID: pending.itemID,
@@ -1129,7 +1132,7 @@ func (relay *Relay) recordAttemptStart(item flow.TxItem, attachment flow.Attachm
 	history.attempts = append(history.attempts, attempt)
 }
 
-func (relay *Relay) recordAttemptResult(pending relayPendingSend, outcome flow.AttemptOutcome, completedAt time.Time, actions *[]RelayAction) {
+func (relay *Relay) recordAttemptResult(pending relayPendingSend, outcome flow.AttemptOutcome, completedAt time.Time, capacityEligible bool, actions *[]RelayAction) {
 	history := relay.attemptHistory[pending.itemID]
 	if history == nil || history.generation != pending.attemptGeneration {
 		return
@@ -1153,6 +1156,7 @@ func (relay *Relay) recordAttemptResult(pending relayPendingSend, outcome flow.A
 		}
 		attempt.writeSucceeded = true
 		attempt.writeCompletedAt = completedAt
+		attempt.capacityEligible = capacityEligible
 		for _, acknowledgment := range attempt.pendingAcknowledgments {
 			relay.appendDataCredit(attempt, acknowledgment, actions)
 		}
@@ -1249,6 +1253,7 @@ func (relay *Relay) appendDataCredit(attempt *relayAttempt, acknowledgment relay
 		DataCreditBytes:  acknowledgment.rangeValue.Len(),
 		WriteCompletedAt: attempt.writeCompletedAt,
 		AcknowledgedAt:   acknowledgedAt,
+		CapacityEligible: attempt.capacityEligible,
 	})
 }
 

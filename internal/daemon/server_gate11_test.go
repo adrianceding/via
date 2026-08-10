@@ -139,6 +139,25 @@ func TestServerProbeTimeoutPenaltyAndRecoveryUpdatePublishedFlow(t *testing.T) {
 	}
 }
 
+func TestServerProbeWithoutInboundProgressClosesSession(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	connection := &clientTestTransportConnection{}
+	session, err := newWireSession(ctx, 7, connection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, expired, dead := session.startProbe(time.Now().Add(-probeTimeout)); !ok || expired || dead {
+		t.Fatalf("initial probe = ok=%t expired=%t dead=%t", ok, expired, dead)
+	}
+
+	(&serverDaemon{}).probeServerSession(session)
+
+	if !connection.closed.Load() || session.ctx.Err() == nil {
+		t.Fatal("half-open server session remained open")
+	}
+}
+
 func TestServerTerminalFlowIgnoresProbeQuality(t *testing.T) {
 	harness := newServerRuntimeHarness(t)
 	defer harness.close()

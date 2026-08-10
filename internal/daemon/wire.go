@@ -44,13 +44,14 @@ type wireSession struct {
 	closeOnce     sync.Once
 	status        *runtimeStatus
 
-	probeMu    sync.Mutex
-	nextProbe  uint64
-	probeToken uint64
-	probeSent  time.Time
-	lastProbe  time.Time
-	probeSRTT  time.Duration
-	probeStall bool
+	probeMu       sync.Mutex
+	nextProbe     uint64
+	probeToken    uint64
+	probeSent     time.Time
+	lastProbe     time.Time
+	probeSRTT     time.Duration
+	probeStall    bool
+	probeProgress bool
 }
 
 type pendingSessionWrite struct {
@@ -79,13 +80,14 @@ func newWireSession(ctx context.Context, generation uint64, connection transport
 	}, nil
 }
 
-func (session *wireSession) startProbe(now time.Time) (protocol.Probe, bool, bool) {
+func (session *wireSession) startProbe(now time.Time) (protocol.Probe, bool, bool, bool) {
 	if session == nil || now.IsZero() {
-		return protocol.Probe{}, false, false
+		return protocol.Probe{}, false, false, false
 	}
 	session.probeMu.Lock()
 	defer session.probeMu.Unlock()
 	expired := session.probeToken != 0 && now.Sub(session.probeSent) >= probeTimeout
+	dead := expired && !session.probeProgress
 	if expired {
 		session.probeStall = true
 		session.runtime.setStallPenalty(probeTimeout)
@@ -93,13 +95,25 @@ func (session *wireSession) startProbe(now time.Time) (protocol.Probe, bool, boo
 	if session.probeToken != 0 && !expired ||
 		!session.lastProbe.IsZero() && now.Sub(session.lastProbe) < probeInterval ||
 		session.nextProbe == math.MaxUint64 {
-		return protocol.Probe{}, false, expired
+		return protocol.Probe{}, false, expired, dead
 	}
 	session.nextProbe++
 	session.probeToken = session.nextProbe
 	session.probeSent = now
 	session.lastProbe = now
-	return protocol.Probe{Token: session.probeToken}, true, expired
+	session.probeProgress = false
+	return protocol.Probe{Token: session.probeToken}, true, expired, dead
+}
+
+func (session *wireSession) noteInboundProgress() {
+	if session == nil {
+		return
+	}
+	session.probeMu.Lock()
+	if session.probeToken != 0 {
+		session.probeProgress = true
+	}
+	session.probeMu.Unlock()
 }
 
 func (session *wireSession) completeProbe(token uint64, now time.Time) (time.Duration, bool) {
@@ -115,6 +129,7 @@ func (session *wireSession) completeProbe(token uint64, now time.Time) (time.Dur
 	session.probeToken = 0
 	session.probeSent = time.Time{}
 	session.probeStall = false
+	session.probeProgress = false
 	if session.probeSRTT == 0 {
 		session.probeSRTT = rtt
 	} else {
@@ -177,7 +192,7 @@ func (session *wireSession) sendContext(parent context.Context, message protocol
 	if err != nil {
 		return err
 	}
-	_, err = pending.wait()
+	_, _, err = pending.wait()
 	return err
 }
 
@@ -231,7 +246,8 @@ func (session *wireSession) sendEncodedContextMetadataWithCompletion(parent cont
 	if err != nil {
 		return time.Time{}, err
 	}
-	return pending.wait()
+	completedAt, _, err := pending.wait()
+	return completedAt, err
 }
 
 func (session *wireSession) admitEncodedContextMetadata(parent context.Context, class transport.FrameClass, encoded []byte, flowID protocol.FlowID, itemID, attemptGeneration, dataPayload uint64) (*pendingSessionWrite, error) {
@@ -259,16 +275,16 @@ func (session *wireSession) admitEncodedContextMetadata(parent context.Context, 
 	}, nil
 }
 
-func (pending *pendingSessionWrite) wait() (time.Time, error) {
+func (pending *pendingSessionWrite) wait() (time.Time, bool, error) {
 	if pending == nil || pending.session == nil || pending.request == nil || pending.ctx == nil || pending.cancel == nil {
-		return time.Time{}, ErrWireProtocol
+		return time.Time{}, false, ErrWireProtocol
 	}
 	defer pending.cancel()
 	completedAt, err := pending.session.runtime.waitCompletion(pending.ctx, pending.request)
 	if err == nil && pending.session.status != nil {
 		pending.session.status.frameSent(pending.encoded)
 	}
-	return completedAt, err
+	return completedAt, pending.request.capacityEligible, err
 }
 
 func (session *wireSession) read(ctx context.Context) (protocol.Message, error) {
@@ -286,6 +302,7 @@ func (session *wireSession) read(ctx context.Context) (protocol.Message, error) 
 	if err != nil {
 		return nil, err
 	}
+	session.noteInboundProgress()
 	if data, ok := message.(protocol.Data); ok && session.status != nil {
 		session.status.observeSessionDataReceived(session.generation, uint64(len(data.Bytes)))
 	}

@@ -354,6 +354,30 @@ func TestClientProbeTimeoutPenaltyAndRecoveryReachPublishedFlow(t *testing.T) {
 	}
 }
 
+func TestClientProbeWithoutInboundProgressReportsConnectionLost(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	session, err := newWireSession(ctx, 7, &clientTestTransportConnection{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, expired, dead := session.startProbe(time.Now().Add(-probeTimeout)); !ok || expired || dead {
+		t.Fatalf("initial probe = ok=%t expired=%t dead=%t", ok, expired, dead)
+	}
+	daemon := &clientDaemon{runtimeCtx: ctx, poolEvents: make(chan poolEvent, 1)}
+
+	daemon.probeClientSession(session)
+
+	select {
+	case event := <-daemon.poolEvents:
+		if event.manager.Kind != clientcore.SessionConnectionLost || event.manager.Generation != session.generation {
+			t.Fatalf("probe loss event = %#v", event.manager)
+		}
+	default:
+		t.Fatal("half-open client session did not report connection loss")
+	}
+}
+
 func TestSelectRelayAddressPrefersIPv4RegardlessOfResolverOrder(t *testing.T) {
 	ipv4 := netip.MustParseAddr("149.28.139.39")
 	ipv6 := netip.MustParseAddr("2001:db8::39")

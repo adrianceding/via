@@ -340,7 +340,7 @@ func (instance *serverFlow) executeLocked(actions []servercore.RelayAction) ([]s
 		case servercore.RelayActionDataCredit:
 			session := instance.host.session(action.Attachment.SessionGeneration)
 			if session != nil {
-				session.runtime.observeDataCredit(action.DataCreditBytes, action.WriteCompletedAt, action.AcknowledgedAt)
+				session.runtime.observeDataCredit(action.DataCreditBytes, action.WriteCompletedAt, action.AcknowledgedAt, action.CapacityEligible)
 			}
 		case servercore.RelayActionArmRetryDeadline:
 			instance.armTimer(relayTimerRetry, action.Generation, action.After)
@@ -437,13 +437,13 @@ func (instance *serverFlow) admitSend(action servercore.RelayAction) (*pendingSe
 
 func (instance *serverFlow) completeSend(action servercore.RelayAction, pending *pendingSessionWrite) {
 	outcome := flow.AttemptFailed
-	writeCompletedAt, err := pending.wait()
+	writeCompletedAt, capacityEligible, err := pending.wait()
 	if err == nil {
 		outcome = flow.AttemptSucceeded
 	}
 	_ = instance.handle(servercore.RelayEvent{
 		Kind: servercore.RelaySendResult, Generation: action.Generation, AttemptOutcome: outcome,
-		WriteCompletedAt: writeCompletedAt,
+		WriteCompletedAt: writeCompletedAt, CapacityEligible: capacityEligible,
 	})
 }
 

@@ -497,9 +497,12 @@ func (daemon *clientDaemon) readClientSession(session *wireSession) {
 
 func (daemon *clientDaemon) probeClientSession(session *wireSession) {
 	probe := func() bool {
-		message, ok, expired := session.startProbe(time.Now())
+		message, ok, expired, dead := session.startProbe(time.Now())
 		if expired {
 			daemon.notifyProbeStallPenalty(session, probeTimeout)
+		}
+		if dead {
+			return false
 		}
 		return !ok || session.send(message) == nil
 	}

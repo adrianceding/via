@@ -137,22 +137,22 @@ func TestWireProbeRateAndGenerationAreBounded(t *testing.T) {
 		t.Fatal(err)
 	}
 	start := time.Unix(100, 0)
-	first, ok, expired := session.startProbe(start)
-	if !ok || expired || first.Token != 1 {
-		t.Fatalf("first probe = %#v, %t, expired=%t", first, ok, expired)
+	first, ok, expired, dead := session.startProbe(start)
+	if !ok || expired || dead || first.Token != 1 {
+		t.Fatalf("first probe = %#v, %t, expired=%t dead=%t", first, ok, expired, dead)
 	}
-	if _, ok, _ := session.startProbe(start.Add(time.Second - 1)); ok {
+	if _, ok, _, _ := session.startProbe(start.Add(time.Second - 1)); ok {
 		t.Fatal("probe rate limit accepted an early probe")
 	}
-	if _, ok, expired := session.startProbe(start.Add(probeInterval)); ok || expired {
+	if _, ok, expired, dead := session.startProbe(start.Add(probeInterval)); ok || expired || dead {
 		t.Fatal("second probe replaced an in-flight sample")
 	}
 	rtt, ok := session.completeProbe(first.Token, start.Add(1050*time.Millisecond))
 	if !ok || rtt != 1050*time.Millisecond {
 		t.Fatalf("first probe RTT = %v, %t", rtt, ok)
 	}
-	second, ok, expired := session.startProbe(start.Add(2 * probeInterval))
-	if !ok || expired || second.Token != 2 {
+	second, ok, expired, dead := session.startProbe(start.Add(2 * probeInterval))
+	if !ok || expired || dead || second.Token != 2 {
 		t.Fatalf("second probe = %#v, %t", second, ok)
 	}
 	rtt, ok = session.completeProbe(second.Token, start.Add(2100*time.Millisecond))
@@ -165,16 +165,16 @@ func TestWireProbeRateAndGenerationAreBounded(t *testing.T) {
 	if _, ok := session.completeProbe(second.Token, start.Add(2200*time.Millisecond)); ok {
 		t.Fatal("duplicate probe acknowledgement updated quality")
 	}
-	third, ok, expired := session.startProbe(start.Add(3 * probeInterval))
-	if !ok || expired || third.Token != 3 {
+	third, ok, expired, dead := session.startProbe(start.Add(3 * probeInterval))
+	if !ok || expired || dead || third.Token != 3 {
 		t.Fatalf("third probe = %#v, %t", third, ok)
 	}
-	if _, ok, expired := session.startProbe(start.Add(3*probeInterval + probeTimeout - time.Nanosecond)); ok || expired {
+	if _, ok, expired, dead := session.startProbe(start.Add(3*probeInterval + probeTimeout - time.Nanosecond)); ok || expired || dead {
 		t.Fatal("in-flight probe was replaced before its timeout")
 	}
-	fourth, ok, expired := session.startProbe(start.Add(3*probeInterval + probeTimeout))
-	if !ok || !expired || fourth.Token != 4 {
-		t.Fatalf("timed-out probe replacement = %#v, %t, expired=%t", fourth, ok, expired)
+	fourth, ok, expired, dead := session.startProbe(start.Add(3*probeInterval + probeTimeout))
+	if !ok || !expired || !dead || fourth.Token != 4 {
+		t.Fatalf("timed-out probe replacement = %#v, %t, expired=%t dead=%t", fourth, ok, expired, dead)
 	}
 	if _, ok := session.completeProbe(third.Token, start.Add(3*probeInterval+probeTimeout+50*time.Millisecond)); ok {
 		t.Fatal("timed-out probe acknowledgement updated quality")
@@ -185,7 +185,7 @@ func TestWireProbeRateAndGenerationAreBounded(t *testing.T) {
 	session.probeMu.Lock()
 	session.nextProbe = ^uint64(0)
 	session.probeMu.Unlock()
-	if _, ok, _ := session.startProbe(start.Add(3*probeInterval + probeTimeout + probeInterval)); ok {
+	if _, ok, _, _ := session.startProbe(start.Add(3*probeInterval + probeTimeout + probeInterval)); ok {
 		t.Fatal("exhausted probe generation wrapped")
 	}
 }
@@ -257,13 +257,13 @@ func TestWireProbePublishesSessionQualitySnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	start := time.Unix(200, 0)
-	probe, ok, expired := session.startProbe(start)
-	if !ok || expired {
-		t.Fatalf("probe = %#v, ok=%t, expired=%t", probe, ok, expired)
+	probe, ok, expired, dead := session.startProbe(start)
+	if !ok || expired || dead {
+		t.Fatalf("probe = %#v, ok=%t, expired=%t dead=%t", probe, ok, expired, dead)
 	}
-	replacement, ok, expired := session.startProbe(start.Add(probeTimeout))
-	if !ok || !expired {
-		t.Fatalf("probe timeout = %#v, ok=%t expired=%t", replacement, ok, expired)
+	replacement, ok, expired, dead := session.startProbe(start.Add(probeTimeout))
+	if !ok || !expired || !dead {
+		t.Fatalf("probe timeout = %#v, ok=%t expired=%t dead=%t", replacement, ok, expired, dead)
 	}
 	if snapshot := session.qualitySnapshot(); snapshot.StallPenalty != probeTimeout {
 		t.Fatalf("stalled session quality = %#v", snapshot)
@@ -271,9 +271,10 @@ func TestWireProbePublishesSessionQualitySnapshot(t *testing.T) {
 	if _, ok := session.completeProbe(probe.Token, start.Add(probeTimeout+25*time.Millisecond)); ok {
 		t.Fatal("timed-out probe acknowledgement was accepted")
 	}
-	latest, ok, expired := session.startProbe(start.Add(2 * probeTimeout))
-	if !ok || !expired {
-		t.Fatalf("latest probe = %#v, ok=%t, expired=%t", latest, ok, expired)
+	session.noteInboundProgress()
+	latest, ok, expired, dead := session.startProbe(start.Add(2 * probeTimeout))
+	if !ok || !expired || dead {
+		t.Fatalf("latest probe = %#v, ok=%t, expired=%t dead=%t", latest, ok, expired, dead)
 	}
 	rtt, ok := session.completeProbe(latest.Token, start.Add(2*probeTimeout+25*time.Millisecond))
 	if !ok || rtt != 25*time.Millisecond {

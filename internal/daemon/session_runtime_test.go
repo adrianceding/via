@@ -56,6 +56,9 @@ func TestSessionRuntimeControlPriorityAndFlowRoundRobin(t *testing.T) {
 	if err := runtime.wait(context.Background(), thirdRequest); err != nil {
 		t.Fatal(err)
 	}
+	if !firstRequest.capacityEligible || !secondRequest.capacityEligible || thirdRequest.capacityEligible {
+		t.Fatalf("capacity eligibility = first=%t second=%t third=%t", firstRequest.capacityEligible, secondRequest.capacityEligible, thirdRequest.capacityEligible)
+	}
 	writes := connection.writesSnapshot()
 	if len(writes) != 4 || writes[0].Class != transport.FrameData || writes[1].Class != transport.FrameControl || writes[2].Encoded[0] != 2 || writes[3].Encoded[0] != 1 {
 		t.Fatalf("write order = %#v", writes)
@@ -325,15 +328,21 @@ func TestSessionRuntimeAggregatesEligibleDataCreditsAtBoundaries(t *testing.T) {
 	}
 	defer runtime.close(transport.ErrClosed)
 	start := now
-	runtime.observeDataCredit(32<<10, start, start.Add(100*time.Millisecond))
+	runtime.observeDataCredit(32<<10, start, start.Add(100*time.Millisecond), true)
 	if snapshot := runtime.snapshot(); snapshot.Quality.DataSamples != 0 || snapshot.EligibleAckedData != 32<<10 {
 		t.Fatalf("partial credit window = %#v", snapshot)
 	}
 
 	now = start.Add(200 * time.Millisecond)
-	runtime.observeDataCredit(32<<10, start.Add(120*time.Millisecond), now)
+	runtime.observeDataCredit(16<<10, start.Add(120*time.Millisecond), now, true)
+	runtime.observeDataCredit(16<<10, start.Add(130*time.Millisecond), now, true)
+	if snapshot := runtime.snapshot(); snapshot.Quality.DataSamples != 0 || snapshot.EligibleAckedData != 64<<10 {
+		t.Fatalf("credit after baseline = %#v", snapshot)
+	}
+	now = start.Add(300 * time.Millisecond)
+	runtime.observeDataCredit(32<<10, start.Add(220*time.Millisecond), now, true)
 	snapshot := runtime.snapshot()
-	if snapshot.Quality.DataSamples != 1 || snapshot.Quality.SRTT != 0 || snapshot.EligibleAckedData != 64<<10 {
+	if snapshot.Quality.DataSamples != 1 || snapshot.Quality.SRTT != 0 || snapshot.EligibleAckedData != 96<<10 {
 		t.Fatalf("byte threshold snapshot = %#v", snapshot)
 	}
 	wantCapacity := float64(64<<10) / (200 * time.Millisecond).Seconds()
@@ -342,11 +351,11 @@ func TestSessionRuntimeAggregatesEligibleDataCreditsAtBoundaries(t *testing.T) {
 	}
 
 	now = start.Add(time.Second)
-	runtime.observeDataCredit(1024, now, now.Add(10*time.Millisecond))
-	now = start.Add(time.Second + dataCapacityWindowTime)
-	runtime.observeDataCredit(1, now, now.Add(time.Millisecond))
-	if snapshot := runtime.snapshot(); snapshot.Quality.DataSamples != 2 {
-		t.Fatalf("time threshold snapshot = %#v", snapshot)
+	runtime.observeDataCredit(1024, start.Add(500*time.Millisecond), now, true)
+	now = start.Add(2 * time.Second)
+	runtime.observeDataCredit(1, start.Add(1100*time.Millisecond), now, true)
+	if snapshot := runtime.snapshot(); snapshot.Quality.DataSamples != 1 || snapshot.EligibleAckedData != 96<<10+1025 {
+		t.Fatalf("low-volume credit produced a capacity sample = %#v", snapshot)
 	}
 }
 
@@ -359,7 +368,7 @@ func TestSessionRuntimeRejectsOutOfOrderDataCredit(t *testing.T) {
 	}
 	defer runtime.close(transport.ErrClosed)
 	runtime.observeProbe(20 * time.Millisecond)
-	runtime.observeDataCredit(64<<10, now, now.Add(-time.Millisecond))
+	runtime.observeDataCredit(64<<10, now, now.Add(-time.Millisecond), true)
 	if snapshot := runtime.snapshot(); snapshot.Quality.DataSamples != 0 || snapshot.EligibleAckedData != 0 {
 		t.Fatalf("out-of-order credit accepted = %#v", snapshot)
 	}
@@ -374,14 +383,19 @@ func TestSessionRuntimeDropsIncompleteDataWindowAcrossIdleGap(t *testing.T) {
 	}
 	defer runtime.close(transport.ErrClosed)
 
-	runtime.observeDataCredit(32<<10, now, now.Add(100*time.Millisecond))
+	runtime.observeDataCredit(32<<10, now, now.Add(100*time.Millisecond), true)
 	now = now.Add(10 * time.Second)
-	runtime.observeDataCredit(32<<10, now, now.Add(100*time.Millisecond))
+	runtime.observeDataCredit(32<<10, now, now.Add(100*time.Millisecond), true)
 	if snapshot := runtime.snapshot(); snapshot.Quality.DataSamples != 0 {
 		t.Fatalf("idle gap completed stale DATA window = %#v", snapshot)
 	}
 	now = now.Add(100 * time.Millisecond)
-	runtime.observeDataCredit(32<<10, now, now.Add(100*time.Millisecond))
+	runtime.observeDataCredit(32<<10, now, now.Add(100*time.Millisecond), true)
+	if snapshot := runtime.snapshot(); snapshot.Quality.DataSamples != 0 {
+		t.Fatalf("first credit after new baseline completed DATA window = %#v", snapshot)
+	}
+	now = now.Add(100 * time.Millisecond)
+	runtime.observeDataCredit(32<<10, now, now.Add(100*time.Millisecond), true)
 	snapshot := runtime.snapshot()
 	if snapshot.Quality.DataSamples != 1 {
 		t.Fatalf("new continuous DATA window = %#v", snapshot)
@@ -389,6 +403,46 @@ func TestSessionRuntimeDropsIncompleteDataWindowAcrossIdleGap(t *testing.T) {
 	wantCapacity := float64(64<<10) / (200 * time.Millisecond).Seconds()
 	if snapshot.Quality.CapacityBytesSec != wantCapacity {
 		t.Fatalf("capacity after idle gap = %v, want %v", snapshot.Quality.CapacityBytesSec, wantCapacity)
+	}
+}
+
+func TestSessionRuntimeSamplesCompleteDataWindowAtThreshold(t *testing.T) {
+	connection := newRuntimeTestConnection()
+	start := time.Unix(800, 0)
+	runtime, err := newSessionRuntimeWithClock(context.Background(), connection, nil, func() time.Time { return start })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.close(transport.ErrClosed)
+
+	runtime.observeDataCredit(1, start, start.Add(100*time.Millisecond), true)
+	runtime.observeDataCredit(48<<10, start.Add(110*time.Millisecond), start.Add(200*time.Millisecond), true)
+	runtime.observeDataCredit(32<<10, start.Add(120*time.Millisecond), start.Add(200*time.Millisecond), true)
+	snapshot := runtime.snapshot()
+	if snapshot.Quality.DataSamples != 1 || snapshot.EligibleAckedData != 80<<10+1 {
+		t.Fatalf("complete ACK window = %#v", snapshot)
+	}
+	wantCapacity := float64(80<<10) / (100 * time.Millisecond).Seconds()
+	if snapshot.Quality.CapacityBytesSec != wantCapacity {
+		t.Fatalf("capacity before idle gap = %v, want %v", snapshot.Quality.CapacityBytesSec, wantCapacity)
+	}
+}
+
+func TestSessionRuntimeRejectsCapacityCreditWithoutSendPressure(t *testing.T) {
+	connection := newRuntimeTestConnection()
+	start := time.Unix(850, 0)
+	runtime, err := newSessionRuntimeWithClock(context.Background(), connection, nil, func() time.Time { return start })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.close(transport.ErrClosed)
+
+	runtime.observeDataCredit(32<<10, start, start.Add(100*time.Millisecond), true)
+	runtime.observeDataCredit(64<<10, start.Add(110*time.Millisecond), start.Add(200*time.Millisecond), false)
+	runtime.observeDataCredit(64<<10, start.Add(210*time.Millisecond), start.Add(300*time.Millisecond), true)
+	snapshot := runtime.snapshot()
+	if snapshot.Quality.DataSamples != 0 || snapshot.EligibleAckedData != 160<<10 {
+		t.Fatalf("credit without send pressure = %#v", snapshot)
 	}
 }
 
