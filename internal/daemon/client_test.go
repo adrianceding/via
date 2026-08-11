@@ -132,6 +132,52 @@ func TestClientFlowInitialOpenHeadStartUsesBoundedSessionRTT(t *testing.T) {
 	}
 }
 
+func TestClientFlowBlockedPreferredOpenDoesNotDelayFallback(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	preferred := &gate11BlockingConnection{started: make(chan struct{}), release: make(chan struct{})}
+	fallback := &clientOpenWriteConnection{written: make(chan struct{}, 1)}
+	preferredSession, err := newWireSession(ctx, 1, preferred)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fallbackSession, err := newWireSession(ctx, 2, fallback)
+	if err != nil {
+		preferredSession.close()
+		t.Fatal(err)
+	}
+	host := &clientDaemon{
+		runtimeCtx: ctx, poolEvents: make(chan poolEvent, 2),
+		sessions: map[uint64]*wireSession{1: preferredSession, 2: fallbackSession},
+	}
+	instance := &clientFlow{ctx: ctx, host: host}
+	defer func() {
+		close(preferred.release)
+		cancel()
+		preferredSession.close()
+		fallbackSession.close()
+		host.wg.Wait()
+	}()
+
+	open := protocol.Open{
+		FlowID: protocol.FlowID{1}, OpenToken: protocol.OpenToken{1}, DeliveryMode: protocol.DeliveryAdaptive,
+		PathSelection: protocol.PathFastest, Target: protocol.Target{Address: netip.MustParseAddr("192.0.2.1"), Port: 80},
+	}
+	instance.sendOrderedOpens([]clientcore.OpenJoinAction{
+		{Kind: clientcore.OpenJoinActionSendOpen, SessionGeneration: 1, Open: open},
+		{Kind: clientcore.OpenJoinActionSendOpen, SessionGeneration: 2, Open: open},
+	})
+	select {
+	case <-preferred.started:
+	case <-time.After(time.Second):
+		t.Fatal("preferred OPEN write did not start")
+	}
+	select {
+	case <-fallback.written:
+	case <-time.After(maximumInitialOpenHeadStart + 250*time.Millisecond):
+		t.Fatal("fallback OPEN waited for the preferred write to finish")
+	}
+}
+
 func TestClientFlowConsumesOwnedTimerRegistrations(t *testing.T) {
 	openTimer := time.NewTimer(time.Hour)
 	relayTimer := time.NewTimer(time.Hour)
@@ -449,6 +495,10 @@ type clientTestTransportConnection struct {
 	closed atomic.Bool
 }
 
+type clientOpenWriteConnection struct {
+	written chan struct{}
+}
+
 type clientTestNetConnection struct {
 	bytes.Buffer
 	writeDeadline time.Time
@@ -490,3 +540,22 @@ func (connection *clientTestTransportConnection) Close() error {
 	connection.closed.Store(true)
 	return nil
 }
+
+func (*clientOpenWriteConnection) Capabilities() transport.Capabilities {
+	capabilities, _ := transport.NewCapabilities(transport.CapabilitySpec{MaxEncodedFrame: protocol.MaxFrameSize})
+	return capabilities
+}
+func (*clientOpenWriteConnection) QueueLimits() transport.QueueLimits {
+	return transport.V1QueueLimits()
+}
+func (*clientOpenWriteConnection) LocalEndpoint() string  { return "127.0.0.1:1" }
+func (*clientOpenWriteConnection) RemoteEndpoint() string { return "127.0.0.1:2" }
+func (*clientOpenWriteConnection) ReadFrame(context.Context) ([]byte, error) {
+	return nil, net.ErrClosed
+}
+func (connection *clientOpenWriteConnection) WriteFrame(context.Context, transport.WriteRequest) error {
+	connection.written <- struct{}{}
+	return nil
+}
+func (*clientOpenWriteConnection) CloseWrite() error { return nil }
+func (*clientOpenWriteConnection) Close() error      { return nil }

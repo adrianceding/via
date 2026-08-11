@@ -554,7 +554,7 @@ func (instance *clientFlow) sendOrderedOpens(actions []clientcore.OpenJoinAction
 	go func() {
 		defer instance.host.wg.Done()
 		first := actions[0]
-		instance.sendNow(first.SessionGeneration, first.Open)
+		instance.send(first.SessionGeneration, first.Open)
 		if len(actions) == 1 {
 			return
 		}
