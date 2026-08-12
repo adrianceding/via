@@ -31,14 +31,17 @@ func TestRuntimeStatusMergesAuthoritativeSessionObservation(t *testing.T) {
 		t.Fatal(err)
 	}
 	connectionID := auth.CorrelationID{1, 2, 3}
+	pathGroupID := protocol.PathGroupID{4, 5, 6}
 	observer.upsertSessionObservation(runtimeSessionObservation{
 		generation: 1, transportName: "tcp", interfaceName: "eth0",
 		localAddress: netip.MustParseAddr("192.0.2.1"), localEndpoint: "192.0.2.1:40000",
 		remoteEndpoint: "198.51.100.2:9443", connectionID: connectionID.String(), principalID: "edge-1",
+		pathGroupID: pathGroupID, lane: 3,
 		state: statusapi.SessionReady, reason: statusapi.ReasonPathAdded, reconnects: 2,
 	})
 	first := observer.sessions[observer.hasher.SessionID(1)]
 	if first.ConnectionID != connectionID.String() || first.PrincipalHash == "" ||
+		first.PathGroupID != observer.hasher.PathGroupID(pathGroupID) || first.Lane != 3 ||
 		first.LocalEndpoint != "192.0.2.1:40000" || first.RemoteEndpoint != "198.51.100.2:9443" ||
 		first.StateSince != now || first.Reconnects != 2 {
 		t.Fatalf("first session = %#v", first)
@@ -49,6 +52,7 @@ func TestRuntimeStatusMergesAuthoritativeSessionObservation(t *testing.T) {
 	observer.observeSessionProbe(1, 20*time.Millisecond)
 	merged := observer.sessions[observer.hasher.SessionID(1)]
 	if merged.ConnectionID != first.ConnectionID || merged.PrincipalHash != first.PrincipalHash ||
+		merged.PathGroupID != first.PathGroupID || merged.Lane != first.Lane ||
 		merged.LocalEndpoint != first.LocalEndpoint || merged.RemoteEndpoint != first.RemoteEndpoint ||
 		merged.StateSince != first.StateSince || merged.LastProbeAt != now {
 		t.Fatalf("merged session = %#v", merged)

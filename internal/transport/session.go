@@ -93,6 +93,7 @@ type SessionAction struct {
 	Encoded              []byte
 	Class                FrameClass
 	PrincipalID          string
+	PathGroupID          protocol.PathGroupID
 	Message              protocol.Message
 	FlowID               protocol.FlowID
 	AttachmentGeneration uint64
@@ -107,6 +108,7 @@ type SessionSnapshot struct {
 	Role                SessionRole
 	State               SessionState
 	PrincipalID         string
+	PathGroupID         protocol.PathGroupID
 	ReadAllowed         bool
 	PendingDispatch     uint64
 	PendingSends        int
@@ -139,6 +141,7 @@ type Session struct {
 	state           SessionState
 	auth            authenticationMachine
 	principalID     string
+	pathGroupID     protocol.PathGroupID
 	readAllowed     bool
 	nextGeneration  uint64
 	pendingSends    map[uint64]pendingSend
@@ -180,6 +183,7 @@ func (session *Session) Snapshot() SessionSnapshot {
 		Role:                session.role,
 		State:               session.state,
 		PrincipalID:         session.principalID,
+		PathGroupID:         session.pathGroupID,
 		ReadAllowed:         session.readAllowed,
 		PendingDispatch:     session.pendingDispatch,
 		PendingSends:        len(session.pendingSends),
@@ -310,7 +314,10 @@ func (session *Session) applyAuth(authActions []auth.Action) []SessionAction {
 		case auth.ActionAuthenticationComplete:
 			session.state = SessionReady
 			session.principalID = action.PrincipalID
-			actions = append(actions, SessionAction{Kind: SessionActionAuthenticated, PrincipalID: action.PrincipalID})
+			session.pathGroupID = action.PathGroupID
+			actions = append(actions, SessionAction{
+				Kind: SessionActionAuthenticated, PrincipalID: action.PrincipalID, PathGroupID: action.PathGroupID,
+			})
 		case auth.ActionClose:
 			actions = append(actions, session.close(mapAuthCloseReason(action.Reason), true)...)
 		}

@@ -88,7 +88,14 @@ func newSimulationHarnessConfigured(t *testing.T, mode protocol.DeliveryMode, se
 	return newSimulationHarnessConfiguredWithSessionLimit(t, mode, selection, targetHandle, authentication, 2)
 }
 
-func newSimulationHarnessConfiguredWithSessionLimit(t *testing.T, mode protocol.DeliveryMode, selection protocol.PathSelection, targetHandle func(*simulationHarness, net.Conn), authentication bool, sessions int) *simulationHarness {
+func newSimulationHarnessConfiguredWithSessionLimit(t *testing.T, mode protocol.DeliveryMode, selection protocol.PathSelection, targetHandle func(*simulationHarness, net.Conn), authentication bool, authInProgress int) *simulationHarness {
+	return newSimulationHarnessConfiguredWithPaths(t, mode, selection, targetHandle, authentication, authInProgress, 1,
+		simulatedInterface(1, "sim-a", simulationAddressA),
+		simulatedInterface(2, "sim-b", simulationAddressB),
+	)
+}
+
+func newSimulationHarnessConfiguredWithPaths(t *testing.T, mode protocol.DeliveryMode, selection protocol.PathSelection, targetHandle func(*simulationHarness, net.Conn), authentication bool, authInProgress, lanesPerPath int, interfaces ...pathcore.Interface) *simulationHarness {
 	t.Helper()
 	target, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -97,7 +104,7 @@ func newSimulationHarnessConfiguredWithSessionLimit(t *testing.T, mode protocol.
 	relayAddress := reserveAddress(t)
 	socksAddress := reserveAddress(t)
 	serverConfiguration := decodeSimulationServer(t, relayAddress)
-	clientConfiguration := decodeSimulationClientWithSessionLimit(t, relayAddress, socksAddress, mode, selection, sessions)
+	clientConfiguration := decodeSimulationClientWithLanes(t, relayAddress, socksAddress, mode, selection, authInProgress, lanesPerPath)
 	if !authentication {
 		clientConfiguration.SOCKSAuth = nil
 	}
@@ -118,10 +125,7 @@ func newSimulationHarnessConfiguredWithSessionLimit(t *testing.T, mode protocol.
 		t.Fatal(err)
 	}
 	enumerator := &simulatedEnumerator{}
-	enumerator.set(
-		simulatedInterface(1, "sim-a", simulationAddressA),
-		simulatedInterface(2, "sim-b", simulationAddressB),
-	)
+	enumerator.set(interfaces...)
 	filter, err := pathcore.NewFilter(clientConfiguration.Interfaces.Include, clientConfiguration.Interfaces.Exclude)
 	if err != nil {
 		t.Fatal(err)
@@ -149,7 +153,7 @@ func newSimulationHarnessConfiguredWithSessionLimit(t *testing.T, mode protocol.
 	harness.cancelClient = cancelClient
 	go func() { harness.serverResult <- server.run(serverCtx) }()
 	go func() { harness.clientResult <- client.run(clientCtx) }()
-	harness.waitSessions(2)
+	harness.waitSessions(len(interfaces) * lanesPerPath)
 	return harness
 }
 
@@ -234,7 +238,7 @@ func (harness *simulationHarness) assertTransfer(application net.Conn, payload [
 
 func (harness *simulationHarness) assertTransferState(total uint64) {
 	harness.t.Helper()
-	waitFor(harness.t, 5*time.Second, func() bool {
+	converged := func() bool {
 		client := harness.client.statusRepository.Snapshot()
 		server := harness.server.statusRepository.Snapshot()
 		if len(client.Flows) != 1 || len(server.Flows) != 1 {
@@ -256,18 +260,63 @@ func (harness *simulationHarness) assertTransferState(total uint64) {
 		}
 		_, clientPreferredKnown := clientConnections[clientFlow.PreferredConnectionID]
 		return harness.targetBytes.Load() == total &&
+			harness.sessionLoadsConverged() &&
 			sharedConnection && clientFlow.FlowID != "" && clientFlow.FlowID == serverFlow.FlowID &&
 			(clientFlow.PreferredConnectionID == "" || clientPreferredKnown) &&
 			clientFlow.State == statusapi.FlowRelaying && serverFlow.State == statusapi.FlowRelaying &&
 			clientFlow.TxAllocatedOffset == total && clientFlow.TxAcknowledged == total && clientFlow.RxWrittenOffset == total &&
 			serverFlow.TxAllocatedOffset == total && serverFlow.TxAcknowledged == total && serverFlow.RxWrittenOffset == total
-	}, fmt.Sprintf("exact bidirectional transfer at offset %d", total))
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for !converged() && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !converged() {
+		for _, session := range harness.client.readySessions() {
+			quality := session.runtime.snapshot().Quality
+			harness.t.Logf("client session %d load: queued=%d outstanding=%d", session.generation, quality.QueuedBytes, quality.InFlightBytes)
+		}
+		harness.server.sessionsMu.RLock()
+		for _, session := range harness.server.sessions {
+			quality := session.runtime.snapshot().Quality
+			harness.t.Logf("server session %d load: queued=%d outstanding=%d", session.generation, quality.QueuedBytes, quality.InFlightBytes)
+		}
+		harness.server.sessionsMu.RUnlock()
+		client := harness.client.statusRepository.Snapshot()
+		server := harness.server.statusRepository.Snapshot()
+		if len(client.Flows) == 1 && len(server.Flows) == 1 {
+			clientFlow, serverFlow := client.Flows[0], server.Flows[0]
+			harness.t.Fatalf("timed out waiting for exact bidirectional transfer at offset %d: target=%d client=(state=%v allocated=%d acknowledged=%d written=%d) server=(state=%v allocated=%d acknowledged=%d written=%d)",
+				total, harness.targetBytes.Load(), clientFlow.State, clientFlow.TxAllocatedOffset, clientFlow.TxAcknowledged, clientFlow.RxWrittenOffset,
+				serverFlow.State, serverFlow.TxAllocatedOffset, serverFlow.TxAcknowledged, serverFlow.RxWrittenOffset)
+		}
+		harness.t.Fatalf("timed out waiting for exact bidirectional transfer at offset %d: target=%d client_flows=%d server_flows=%d",
+			total, harness.targetBytes.Load(), len(client.Flows), len(server.Flows))
+	}
 	if got := harness.targetBytes.Load(); got != total {
 		harness.t.Fatalf("target bytes = %d, want %d", got, total)
 	}
 	if got := harness.targetTotal.Load(); got != 1 {
 		harness.t.Fatalf("target connections = %d, want 1", got)
 	}
+}
+
+func (harness *simulationHarness) sessionLoadsConverged() bool {
+	for _, session := range harness.client.readySessions() {
+		quality := session.runtime.snapshot().Quality
+		if quality.QueuedBytes != 0 || quality.InFlightBytes != 0 {
+			return false
+		}
+	}
+	harness.server.sessionsMu.RLock()
+	defer harness.server.sessionsMu.RUnlock()
+	for _, session := range harness.server.sessions {
+		quality := session.runtime.snapshot().Quality
+		if quality.QueuedBytes != 0 || quality.InFlightBytes != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func (harness *simulationHarness) waitSessionAddresses(addresses ...netip.Addr) {
@@ -471,13 +520,13 @@ func releaseRateLimitedRoundTrip(t *testing.T, result <-chan error, controllers 
 
 func decodeSimulationServer(t *testing.T, relayAddress string) config.Server {
 	t.Helper()
-	value, err := config.DecodeServer([]byte(fmt.Sprintf(`transport: {type: tcp, listen: %q}
+	value, err := config.DecodeServer(fmt.Appendf(nil, `transport: {type: tcp, listen: %q}
 principals:
   - id: client-01
     psk: "MTIzNDU2Nzg5MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTI="
-limits: {sessions: 8, sessions_per_principal: 8, auth_in_progress: 8}
+limits: {transport_connections: 8, transport_connections_per_principal: 8, transport_auth_in_progress: 8}
 deadlines: {drain_cleanup: "1s"}
-`, relayAddress)))
+`, relayAddress))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -488,7 +537,11 @@ func decodeSimulationClient(t *testing.T, relayAddress, socksAddress string, mod
 	return decodeSimulationClientWithSessionLimit(t, relayAddress, socksAddress, mode, selection, 2)
 }
 
-func decodeSimulationClientWithSessionLimit(t *testing.T, relayAddress, socksAddress string, mode protocol.DeliveryMode, selection protocol.PathSelection, sessions int) config.Client {
+func decodeSimulationClientWithSessionLimit(t *testing.T, relayAddress, socksAddress string, mode protocol.DeliveryMode, selection protocol.PathSelection, authInProgress int) config.Client {
+	return decodeSimulationClientWithLanes(t, relayAddress, socksAddress, mode, selection, authInProgress, 1)
+}
+
+func decodeSimulationClientWithLanes(t *testing.T, relayAddress, socksAddress string, mode protocol.DeliveryMode, selection protocol.PathSelection, authInProgress, lanesPerPath int) config.Client {
 	t.Helper()
 	delivery := "delivery: {mode: redundant}"
 	if mode == protocol.DeliveryAdaptive {
@@ -504,16 +557,16 @@ func decodeSimulationClientWithSessionLimit(t *testing.T, relayAddress, socksAdd
 			delivery = "delivery: {mode: adaptive, path_selection: fastest}"
 		}
 	}
-	value, err := config.DecodeClient([]byte(fmt.Sprintf(`socks_listen: %q
+	value, err := config.DecodeClient(fmt.Appendf(nil, `socks_listen: %q
 socks_auth: {username: %q, password: %q}
-transport: {type: tcp, address: %q}
+transport: {type: tcp, address: %q, lanes_per_path: %d}
 %s
 interfaces: {include: ["sim-*"]}
 principal_id: client-01
 psk: "MTIzNDU2Nzg5MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTI="
-limits: {sessions: %d, auth_in_progress: %d}
+limits: {auth_in_progress: %d}
 deadlines: {drain_cleanup: "1s"}
-`, socksAddress, daemonSOCKSUsername, daemonSOCKSPassword, relayAddress, delivery, sessions, sessions)))
+`, socksAddress, daemonSOCKSUsername, daemonSOCKSPassword, relayAddress, lanesPerPath, delivery, authInProgress))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -620,6 +673,99 @@ func TestSimulatedFullChainDistributedUsesBothLoadedSessions(t *testing.T) {
 	waitSimulationResult(t, result)
 	if harness.targetTotal.Load() != 1 {
 		t.Fatalf("target connections = %d", harness.targetTotal.Load())
+	}
+}
+
+func TestSimulatedFullChainSinglePathUsesMultipleLanesAndSurvivesOneLaneLoss(t *testing.T) {
+	harness := newSimulationHarnessConfiguredWithPaths(
+		t, protocol.DeliveryAdaptive, protocol.PathFastest, nil, true, 4, 4,
+		simulatedInterface(1, "sim-a", simulationAddressA),
+	)
+	defer harness.close()
+	application := harness.openApplication()
+	defer application.Close()
+
+	waitFor(t, 5*time.Second, func() bool {
+		clientSessions := harness.client.statusRepository.Snapshot().Sessions
+		serverSessions := harness.server.statusRepository.Snapshot().Sessions
+		if len(clientSessions) != 4 || len(serverSessions) != 4 {
+			return false
+		}
+		clientGroup := clientSessions[0].PathGroupID
+		serverGroup := serverSessions[0].PathGroupID
+		lanes := make(map[uint16]struct{}, 4)
+		for _, session := range clientSessions {
+			if clientGroup == "" || session.PathGroupID != clientGroup || session.Lane == 0 {
+				return false
+			}
+			lanes[session.Lane] = struct{}{}
+		}
+		for _, session := range serverSessions {
+			if serverGroup == "" || session.PathGroupID != serverGroup || session.Lane != 0 {
+				return false
+			}
+		}
+		return len(lanes) == 4
+	}, "four observed lanes in one path group")
+	waitFor(t, 5*time.Second, func() bool {
+		flows := harness.client.statusRepository.Snapshot().Flows
+		return len(flows) == 1 && flows[0].PublishedAttachments == 1 && flows[0].PolicyAttachments == 1
+	}, "one logical attachment for four lanes")
+
+	first := bytes.Repeat([]byte("multi-lane|"), 256<<10)
+	if err := simulationRoundTrip(application, first); err != nil {
+		t.Fatal(err)
+	}
+	var failedGeneration uint64
+	waitFor(t, 5*time.Second, func() bool {
+		used := 0
+		for _, session := range harness.client.readySessions() {
+			if session.runtime.snapshot().WrittenData == 0 {
+				continue
+			}
+			used++
+			failedGeneration = session.generation
+		}
+		return used >= 2
+	}, "upload DATA on at least two physical lanes")
+	waitFor(t, 5*time.Second, func() bool {
+		used := 0
+		harness.server.sessionsMu.RLock()
+		for _, session := range harness.server.sessions {
+			if session.runtime.snapshot().WrittenData != 0 {
+				used++
+			}
+		}
+		harness.server.sessionsMu.RUnlock()
+		return used >= 2
+	}, "download DATA on at least two physical lanes")
+	failed := harness.client.physicalSession(failedGeneration)
+	if failed == nil {
+		t.Fatalf("used lane %d disappeared before failure injection", failedGeneration)
+	}
+	failed.close()
+
+	waitFor(t, 5*time.Second, func() bool {
+		if harness.client.physicalSession(failedGeneration) != nil {
+			return false
+		}
+		for _, session := range harness.client.readySessions() {
+			if session.generation != failedGeneration {
+				return true
+			}
+		}
+		return false
+	}, "one physical lane loss without path-group loss")
+	second := bytes.Repeat([]byte("after-lane-loss|"), 64<<10)
+	if err := simulationRoundTrip(application, second); err != nil {
+		t.Fatal(err)
+	}
+	flows := harness.client.statusRepository.Snapshot().Flows
+	if len(flows) != 1 || flows[0].PublishedAttachments != 1 || flows[0].PolicyAttachments != 1 {
+		t.Fatalf("logical attachments after lane loss = %#v", flows)
+	}
+	if harness.targetTotal.Load() != 1 {
+		t.Fatalf("target connections = %d, want 1", harness.targetTotal.Load())
 	}
 }
 

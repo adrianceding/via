@@ -106,7 +106,7 @@ type clientFlow struct {
 }
 
 func newClientFlow(host *clientDaemon, connection net.Conn, target protocol.Target) (*clientFlow, error) {
-	if host == nil || connection == nil || len(host.readySessions()) == 0 {
+	if host == nil || connection == nil || len(host.readyPathGroups()) == 0 {
 		return nil, ErrWireProtocol
 	}
 	coordinator, err := clientcore.NewOpenJoinCoordinator(clientcore.OpenJoinSpec{
@@ -143,10 +143,14 @@ func newClientFlow(host *clientDaemon, connection net.Conn, target protocol.Targ
 
 func (instance *clientFlow) run() {
 	defer instance.cleanup()
-	for _, session := range instance.host.readySessions() {
-		rtt, stall := session.probeQuality()
+	for _, group := range instance.host.readyPathGroups() {
+		_, quality, ok := instance.host.pathGroupQuality(group.generation)
+		if !ok {
+			continue
+		}
 		instance.handleOpenJoin(clientcore.OpenJoinEvent{
-			Kind: clientcore.OpenJoinSessionReady, SessionGeneration: session.generation, SessionRTT: rtt, SessionStall: stall,
+			Kind: clientcore.OpenJoinSessionReady, SessionGeneration: group.generation,
+			SessionRTT: quality.SRTT, SessionStall: quality.StallPenalty,
 		})
 	}
 	instance.handleOpenJoin(clientcore.OpenJoinEvent{Kind: clientcore.OpenJoinStart})
@@ -463,7 +467,7 @@ func (instance *clientFlow) executeOpenJoin(actions []clientcore.OpenJoinAction)
 			if relayErr != nil || session.reserve(instance.flowID, action.Attachment) != nil {
 				failedReservations[action.Generation] = struct{}{}
 				instance.handleRelay(clientcore.ApplicationRelayEvent{Kind: clientcore.ApplicationRelayReleaseAttachment, Attachment: action.Attachment})
-				session.release(instance.flowID, action.Attachment)
+				instance.host.releaseAttachment(action.SessionGeneration, instance.flowID, action.Attachment)
 				instance.emitOwned(clientcore.OpenJoinEvent{
 					Kind: clientcore.OpenJoinJoinReservationFailed, Generation: action.Generation, SessionGeneration: action.SessionGeneration,
 				})
@@ -480,9 +484,7 @@ func (instance *clientFlow) executeOpenJoin(actions []clientcore.OpenJoinAction)
 			if instance.relay != nil {
 				instance.handleRelay(clientcore.ApplicationRelayEvent{Kind: clientcore.ApplicationRelayReleaseAttachment, Attachment: action.Attachment})
 			}
-			if session := instance.host.session(action.SessionGeneration); session != nil {
-				session.release(instance.flowID, action.Attachment)
-			}
+			instance.host.releaseAttachment(action.SessionGeneration, instance.flowID, action.Attachment)
 		case clientcore.OpenJoinActionReplyApplicationSuccess:
 			instance.signalResult(protocol.OpenSuccess)
 		case clientcore.OpenJoinActionFailFlow:
@@ -538,10 +540,14 @@ func (instance *clientFlow) send(sessionGeneration uint64, message protocol.Mess
 }
 
 func (instance *clientFlow) sendNow(sessionGeneration uint64, message protocol.Message) {
-	session := instance.host.session(sessionGeneration)
+	session := instance.host.selectSession(sessionGeneration, 0)
 	if session == nil || session.send(message) != nil {
+		failedGeneration := sessionGeneration
+		if session != nil {
+			failedGeneration = session.generation
+		}
 		instance.host.emitPoolEvent(poolEvent{manager: clientcore.SessionManagerEvent{
-			Kind: clientcore.SessionConnectionLost, Generation: sessionGeneration,
+			Kind: clientcore.SessionConnectionLost, Generation: failedGeneration,
 		}})
 	}
 }
@@ -674,11 +680,11 @@ func (instance *clientFlow) refreshSessionQualities(kind clientcore.ApplicationR
 	attachments := instance.relay.Attachments()
 	qualities := make(map[flow.AttachmentKey]policy.QualitySnapshot, len(attachments))
 	for _, attachment := range attachments {
-		session := instance.host.session(attachment.SessionGeneration)
-		if session == nil {
+		_, quality, ok := instance.host.pathGroupQuality(attachment.SessionGeneration)
+		if !ok {
 			continue
 		}
-		qualities[attachment] = session.qualitySnapshot()
+		qualities[attachment] = quality
 	}
 	_, err := instance.relay.Handle(clientcore.ApplicationRelayEvent{
 		Kind: clientcore.ApplicationRelaySetSessionQualities, SessionQualities: qualities,
@@ -960,7 +966,8 @@ func (instance *clientFlow) executeRelay(actions []clientcore.ApplicationRelayAc
 				quality = pending.session.qualitySnapshot()
 			}
 			instance.handleRelay(clientcore.ApplicationRelayEvent{
-				Kind: clientcore.ApplicationRelaySendAdmitted, Generation: action.Generation, Quality: quality,
+				Kind: clientcore.ApplicationRelaySendAdmitted, Generation: action.Generation,
+				LaneGeneration: pending.session.generation, Quality: quality,
 			})
 			instance.host.wg.Add(1)
 			go func(action clientcore.ApplicationRelayAction, pending *pendingSessionWrite) {
@@ -976,9 +983,9 @@ func (instance *clientFlow) executeRelay(actions []clientcore.ApplicationRelayAc
 				})
 			}(action, pending)
 		case clientcore.ApplicationRelayActionDataCredit:
-			session := instance.host.session(action.Attachment.SessionGeneration)
+			session := instance.host.physicalSession(action.LaneGeneration)
 			if session != nil {
-				session.runtime.observeDataCredit(action.DataCreditBytes, action.WriteCompletedAt, action.AcknowledgedAt, action.CapacityEligible)
+				session.runtime.observeFlowDataCredit(instance.flowID, action.DataCreditBytes, action.WriteCompletedAt, action.AcknowledgedAt, action.CapacityEligible)
 			}
 		case clientcore.ApplicationRelayActionArmRetryDeadline:
 			instance.armRelayTimer(relayTimerRetry, action.Generation, action.After)
@@ -1010,9 +1017,10 @@ func (instance *clientFlow) executeRelay(actions []clientcore.ApplicationRelayAc
 					SessionGeneration: action.Attachment.SessionGeneration,
 				})
 			} else {
+				_, quality, _ := instance.host.pathGroupQuality(action.Attachment.SessionGeneration)
 				instance.handleRelay(clientcore.ApplicationRelayEvent{
 					Kind: clientcore.ApplicationRelaySetSessionQuality, Attachment: action.Attachment,
-					Quality: session.qualitySnapshot(),
+					Quality: quality,
 				})
 				instance.emitOwned(clientcore.OpenJoinEvent{
 					Kind: clientcore.OpenJoinAttachmentPublished, Generation: generation,
@@ -1021,15 +1029,13 @@ func (instance *clientFlow) executeRelay(actions []clientcore.ApplicationRelayAc
 			}
 			delete(instance.publications, action.Attachment)
 		case clientcore.ApplicationRelayActionAttachmentWithdrawn:
-			if session := instance.host.session(action.Attachment.SessionGeneration); session != nil {
-				session.release(instance.flowID, action.Attachment)
-			}
+			instance.host.releaseAttachment(action.Attachment.SessionGeneration, instance.flowID, action.Attachment)
 		}
 	}
 }
 
 func (instance *clientFlow) admitRelaySend(action clientcore.ApplicationRelayAction) (*pendingSessionWrite, bool) {
-	session := instance.host.session(action.Attachment.SessionGeneration)
+	session := instance.host.selectSession(action.Attachment.SessionGeneration, uint64(action.SendDataBytes))
 	if session == nil {
 		return nil, false
 	}

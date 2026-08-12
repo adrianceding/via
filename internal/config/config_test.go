@@ -121,7 +121,6 @@ func TestZeroLimitsMeanNoConfiguredCap(t *testing.T) {
   flows: 0
   opening_flows: 0
   recovering_flows: 0
-  sessions: 0
   auth_in_progress: 0
   socks_connections: 0
   socks_handshakes: 0
@@ -141,9 +140,9 @@ func TestZeroLimitsMeanNoConfiguredCap(t *testing.T) {
   per_principal_flows: 0
   opening_flows: 0
   recovering_flows: 0
-  sessions: 0
-  sessions_per_principal: 0
-  auth_in_progress: 0
+  transport_connections: 0
+  transport_connections_per_principal: 0
+  transport_auth_in_progress: 0
   target_dials: 0
   tombstones: 0
   tombstones_per_principal: 0
@@ -186,7 +185,6 @@ limits:
   flows: 128
   opening_flows: 64
   recovering_flows: 128
-  sessions: 2
   auth_in_progress: 2
   socks_connections: 512
   socks_handshakes: 128
@@ -522,7 +520,6 @@ func TestLimitsDeadlinesAndBudgetRelationships(t *testing.T) {
 	invalidClientLimits := []string{
 		"  flows: 2049\n",
 		"  flows: 10\n  opening_flows: 11\n",
-		"  sessions: 1\n  auth_in_progress: 2\n",
 		"  socks_connections: 10\n  socks_handshakes: 11\n",
 		"  memory_budget_bytes: 245314559\n",
 	}
@@ -535,7 +532,7 @@ func TestLimitsDeadlinesAndBudgetRelationships(t *testing.T) {
 	invalidServerLimits := []string{
 		"  flows: 10\n  per_principal_flows: 11\n",
 		"  opening_flows: 10\n  target_dials: 11\n",
-		"  sessions: 4\n  sessions_per_principal: 5\n",
+		"  transport_connections: 4\n  transport_connections_per_principal: 5\n",
 		"  tombstones: 10\n  tombstones_per_principal: 11\n",
 	}
 	for index, fields := range invalidServerLimits {
@@ -563,8 +560,7 @@ func TestZeroDependentLimitsFollowExplicitParentLimits(t *testing.T) {
   flows: 10
   opening_flows: 0
   recovering_flows: 0
-  sessions: 2
-  auth_in_progress: 0
+  auth_in_progress: 2
   socks_connections: 10
   socks_handshakes: 0
   socks_per_source: 0
@@ -575,7 +571,7 @@ func TestZeroDependentLimitsFollowExplicitParentLimits(t *testing.T) {
 	}
 	wantClient := ClientLimits{
 		Flows: 10, OpeningFlows: 10, RecoveringFlows: 10,
-		Sessions: 2, AuthInProgress: 2,
+		Sessions: 64, AuthInProgress: 2,
 		SOCKSConnections: 10, SOCKSHandshakes: 10, SOCKSPerSource: 10,
 		FlowSendWindowBytes: DefaultFlowWindowBytes, FlowReceiveWindowBytes: DefaultFlowWindowBytes,
 	}
@@ -588,9 +584,9 @@ func TestZeroDependentLimitsFollowExplicitParentLimits(t *testing.T) {
   per_principal_flows: 0
   opening_flows: 0
   recovering_flows: 0
-  sessions: 4
-  sessions_per_principal: 0
-  auth_in_progress: 0
+  transport_connections: 4
+  transport_connections_per_principal: 0
+  transport_auth_in_progress: 0
   target_dials: 0
   tombstones: 10
   tombstones_per_principal: 0
@@ -631,7 +627,7 @@ func TestPositiveLimitsKeepInternalSafetyBounds(t *testing.T) {
 
 	clientFields := []struct{ name, field string }{
 		{"flows", "flows: 2049"}, {"opening_flows", "opening_flows: 257"},
-		{"recovering_flows", "recovering_flows: 1025"}, {"sessions", "sessions: 65"},
+		{"recovering_flows", "recovering_flows: 1025"},
 		{"auth_in_progress", "auth_in_progress: 65"}, {"socks_connections", "socks_connections: 2049"},
 		{"socks_handshakes", "socks_handshakes: 513"}, {"socks_per_source", "socks_per_source: 2049"},
 	}
@@ -642,8 +638,9 @@ func TestPositiveLimitsKeepInternalSafetyBounds(t *testing.T) {
 	serverFields := []struct{ name, field string }{
 		{"flows", "flows: 8193"}, {"per_principal_flows", "per_principal_flows: 8193"},
 		{"opening_flows", "opening_flows: 513"}, {"recovering_flows", "recovering_flows: 2049"},
-		{"sessions", "sessions: 4097"}, {"sessions_per_principal", "sessions_per_principal: 4097"},
-		{"auth_in_progress", "auth_in_progress: 513"}, {"target_dials", "target_dials: 513"},
+		{"transport_connections", "transport_connections: 4097"},
+		{"transport_connections_per_principal", "transport_connections_per_principal: 4097"},
+		{"transport_auth_in_progress", "transport_auth_in_progress: 513"}, {"target_dials", "target_dials: 513"},
 		{"tombstones", "tombstones: 32769"}, {"tombstones_per_principal", "tombstones_per_principal: 32769"},
 		{"rate_limit_keys", "rate_limit_keys: 16385"},
 	}
@@ -682,6 +679,45 @@ func TestBudgetVectorsAndOverflow(t *testing.T) {
 	}
 	if _, err := sumBudget([]budgetTerm{{count: 1, size: ^uint64(0)}, {count: 1, size: 1}}); !errors.Is(err, ErrBudget) {
 		t.Fatalf("addition overflow = %v", err)
+	}
+}
+
+func TestTransportLaneConfigurationAndRemovedSessionFields(t *testing.T) {
+	for _, lanes := range []string{"1", "64"} {
+		input := strings.Replace(minimalClientYAML(), "  address: \"127.0.0.1:9443\"", "  address: \"127.0.0.1:9443\"\n  lanes_per_path: "+lanes, 1)
+		configuration, err := DecodeClient([]byte(input))
+		if err != nil {
+			t.Fatalf("lanes_per_path %s: %v", lanes, err)
+		}
+		if configuration.Limits.Sessions != 64*configuration.Transport.LanesPerPath {
+			t.Fatalf("lanes_per_path %s derived sessions = %d", lanes, configuration.Limits.Sessions)
+		}
+	}
+	invalidLane := strings.Replace(minimalClientYAML(), "  address: \"127.0.0.1:9443\"", "  address: \"127.0.0.1:9443\"\n  lanes_per_path: 65", 1)
+	if _, err := DecodeClient([]byte(invalidLane)); !errors.Is(err, ErrFieldValue) {
+		t.Fatalf("lanes_per_path 65 error = %v", err)
+	}
+	distributed := strings.Replace(minimalClientYAML(), "  address: \"127.0.0.1:9443\"", "  address: \"127.0.0.1:9443\"\n  lanes_per_path: 2", 1) + "delivery:\n  mode: adaptive\n  path_selection: distributed\n  constraints:\n    constraint_fallback: fastest\n"
+	if _, err := DecodeClient([]byte(distributed)); !errors.Is(err, ErrFieldValue) {
+		t.Fatalf("distributed multi-lane error = %v", err)
+	}
+	for name, input := range map[string]string{
+		"client sessions":               minimalClientYAML() + "limits:\n  sessions: 2\n",
+		"server sessions":               minimalServerYAML() + "limits:\n  sessions: 2\n",
+		"server sessions per principal": minimalServerYAML() + "limits:\n  sessions_per_principal: 2\n",
+		"server auth in progress":       minimalServerYAML() + "limits:\n  auth_in_progress: 2\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			var err error
+			if strings.HasPrefix(name, "client") {
+				_, err = DecodeClient([]byte(input))
+			} else {
+				_, err = DecodeServer([]byte(input))
+			}
+			if !errors.Is(err, ErrUnknownField) {
+				t.Fatalf("removed field error = %v", err)
+			}
+		})
 	}
 }
 

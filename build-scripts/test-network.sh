@@ -383,20 +383,16 @@ EOF
 
 write_client_config() {
 	local delivery="$1"
+	local lanes_per_path="${2:-1}"
+	local interface_pattern="${3:-vianet-*}"
 	cat >"$CLIENT_CONFIG" <<EOF
 socks_listen: "$SOCKS_ENDPOINT"
 socks_auth:
   username: network-test
   password: network-test-password
-transport:
-  type: tcp
-  address: "$RELAY_ENDPOINT"
+transport: {type: tcp, address: "$RELAY_ENDPOINT", lanes_per_path: $lanes_per_path}
 $delivery
-interfaces:
-  include:
-    - "vianet-*"
-  exclude:
-    - "vianet-z"
+interfaces: {include: ["$interface_pattern"], exclude: ["vianet-z"]}
 principal_id: network-test
 psk: "$NETWORK_TEST_PSK"
 status:
@@ -444,6 +440,19 @@ start_client() {
 	run_in_namespace_timeout 30s "$CLIENT_NS" "$HARNESS_BINARY" wait-status \
 		--url "$STATUS_ENDPOINT/api/v1/sessions" --ready-sessions 2 \
 		--ready-interface "$CLIENT_A" --ready-interface "$CLIENT_B" --timeout 25s
+}
+
+start_multilane_client() {
+	local name="$1"
+	local lanes="$2"
+	stop_client
+	write_client_config $'delivery:\n  mode: adaptive\n  path_selection: fastest' "$lanes" "$CLIENT_A"
+	CLIENT_LOG="$ARTIFACT_DIR/client-${name}.log"
+	run_in_namespace "$CLIENT_NS" "$VIA_BINARY" client --config "$CLIENT_CONFIG" >"$CLIENT_LOG" 2>&1 &
+	CLIENT_LAUNCH_PID=$!
+	run_in_namespace_timeout 15s "$CLIENT_NS" "$HARNESS_BINARY" wait-status \
+		--url "$STATUS_ENDPOINT/api/v1/sessions" --ready-sessions "$lanes" \
+		--ready-interface "$CLIENT_A" --timeout 10s
 }
 
 wait_client_ready() {
@@ -619,6 +628,27 @@ assert_distributed_aggregation() {
 	fi
 	if ((total < size || delta_a * 100 < total * 30 || delta_b * 100 < total * 30)); then
 		echo "test-network: 双路 DATA 分配未达到每路至少 30%" >&2
+		return 1
+	fi
+	clear_all_netem
+}
+
+assert_multilane_aggregation() {
+	local size=$((4 << 20))
+	clear_all_netem
+	sudo -n ip netns exec "$SERVER_NS" tc qdisc replace dev "$SERVER_A" root fq maxrate 5mbit
+
+	start_multilane_client adaptive-fastest-one-lane 1
+	run_timed_transfer multilane-single download "$size"
+	local single="$LAST_TRANSFER_NANOS"
+
+	start_multilane_client adaptive-fastest-four-lanes 4
+	run_timed_transfer multilane-four download "$size"
+	local four="$LAST_TRANSFER_NANOS"
+
+	echo "test-network: 单 interface 聚合耗时 one=${single}ns four=${four}ns"
+	if ((four * 100 > single * 60)); then
+		echo "test-network: 四 lane 耗时超过单 lane 的 60%" >&2
 		return 1
 	fi
 	clear_all_netem
@@ -868,6 +898,14 @@ set_netem "$CLIENT_NS" "$CLIENT_A" delay 1ms
 clear_netem_device "$CLIENT_NS" "$CLIENT_A"
 start_services
 
+if [[ "${VIA_NETWORK_SCENARIO:-full}" == "multilane" ]]; then
+	echo "test-network: 单 interface 多 TCP lane 聚合"
+	assert_multilane_aggregation
+	wait_target_exact
+	echo "test-network: PASS，单 interface 四 lane 聚合通过"
+	exit 0
+fi
+
 echo "test-network: 冗余发送与内核故障矩阵"
 start_client redundant $'delivery:\n  mode: redundant'
 reject_socks_access no-auth "" ""
@@ -944,6 +982,9 @@ echo "test-network: 5 Mbit/s 单路基线与双路聚合阈值"
 assert_distributed_aggregation
 echo "test-network: 单限速 session 的双 Flow 公平进度"
 assert_single_session_flow_fairness
+
+echo "test-network: 单 interface 多 TCP lane 聚合"
+assert_multilane_aggregation
 
 echo "test-network: 带时延约束的自适应分散发送、地址删除与恢复"
 start_client adaptive-distributed-constrained $'delivery:\n  mode: adaptive\n  path_selection: distributed\n  constraints:\n    max_delivery_delay: 80ms\n    max_delay_gap: 30ms\n    constraint_fallback: fastest'

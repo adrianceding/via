@@ -318,7 +318,7 @@ delivery: {mode: redundant}
 interfaces: {include: ["lo"]}
 principal_id: client-01
 psk: "MTIzNDU2Nzg5MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTI="
-limits: {sessions: 1, auth_in_progress: 1}
+limits: {auth_in_progress: 1}
 deadlines: {drain_cleanup: "1s"}
 `, socksAddress, daemonSOCKSUsername, daemonSOCKSPassword, relayAddress)))
 	if err != nil {
@@ -352,7 +352,7 @@ interfaces: {include: ["lo"]}
 principal_id: client-01
 psk: "MTIzNDU2Nzg5MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTI="
 status: {enabled: true, listen: %q}
-limits: {sessions: 1, auth_in_progress: 1}
+limits: {auth_in_progress: 1}
 deadlines: {drain_cleanup: "1s"}
 `, socksAddress, daemonSOCKSUsername, daemonSOCKSPassword, relayAddress, statusAddress)))
 	if err != nil {

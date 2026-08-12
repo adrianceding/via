@@ -32,17 +32,19 @@ var (
 type wireSession struct {
 	generation   uint64
 	principal    string
+	pathGroupID  protocol.PathGroupID
 	connectionID auth.CorrelationID
 	connection   transport.Connection
 	runtime      *sessionRuntime
 	ctx          context.Context
 	cancel       context.CancelFunc
 
-	attachmentsMu sync.RWMutex
-	attachments   map[protocol.FlowID]flow.AttachmentKey
-	reservations  map[protocol.FlowID]flow.AttachmentKey
-	closeOnce     sync.Once
-	status        *runtimeStatus
+	attachmentsMu        *sync.RWMutex
+	attachments          map[protocol.FlowID]flow.AttachmentKey
+	reservations         map[protocol.FlowID]flow.AttachmentKey
+	attachmentGeneration uint64
+	closeOnce            sync.Once
+	status               *runtimeStatus
 
 	probeMu       sync.Mutex
 	nextProbe     uint64
@@ -52,6 +54,13 @@ type wireSession struct {
 	probeSRTT     time.Duration
 	probeStall    bool
 	probeProgress bool
+}
+
+type wireAttachmentRegistry struct {
+	generation   uint64
+	mu           *sync.RWMutex
+	attachments  map[protocol.FlowID]flow.AttachmentKey
+	reservations map[protocol.FlowID]flow.AttachmentKey
 }
 
 type pendingSessionWrite struct {
@@ -72,12 +81,46 @@ func newWireSession(ctx context.Context, generation uint64, connection transport
 		cancel()
 		return nil, err
 	}
+	registry, err := newWireAttachmentRegistry(generation)
+	if err != nil {
+		cancel()
+		runtime.close(ErrWireProtocol)
+		return nil, err
+	}
 	return &wireSession{
 		generation: generation, connection: connection, ctx: sessionCtx, cancel: cancel,
-		runtime:      runtime,
+		runtime: runtime, attachmentsMu: registry.mu, attachments: registry.attachments,
+		reservations: registry.reservations, attachmentGeneration: registry.generation,
+	}, nil
+}
+
+func newWireAttachmentRegistry(generation uint64) (*wireAttachmentRegistry, error) {
+	if generation == 0 {
+		return nil, ErrWireProtocol
+	}
+	return &wireAttachmentRegistry{
+		generation: generation, mu: &sync.RWMutex{},
 		attachments:  make(map[protocol.FlowID]flow.AttachmentKey, transport.MaxSessionAttachments),
 		reservations: make(map[protocol.FlowID]flow.AttachmentKey, transport.MaxSessionAttachments),
 	}, nil
+}
+
+func (session *wireSession) bindAttachmentRegistry(registry *wireAttachmentRegistry) error {
+	if session == nil || registry == nil || registry.generation == 0 || registry.mu == nil ||
+		registry.attachments == nil || registry.reservations == nil {
+		return ErrWireProtocol
+	}
+	session.attachmentsMu.Lock()
+	if len(session.attachments) != 0 || len(session.reservations) != 0 {
+		session.attachmentsMu.Unlock()
+		return ErrWireProtocol
+	}
+	session.attachmentsMu.Unlock()
+	session.attachmentsMu = registry.mu
+	session.attachments = registry.attachments
+	session.reservations = registry.reservations
+	session.attachmentGeneration = registry.generation
+	return nil
 }
 
 func (session *wireSession) startProbe(now time.Time) (protocol.Probe, bool, bool, bool) {
@@ -310,7 +353,7 @@ func (session *wireSession) read(ctx context.Context) (protocol.Message, error) 
 }
 
 func (session *wireSession) reserve(flowID protocol.FlowID, attachment flow.AttachmentKey) error {
-	if session == nil || flowID == (protocol.FlowID{}) || attachment.SessionGeneration != session.generation || attachment.AttachmentGeneration == 0 {
+	if session == nil || flowID == (protocol.FlowID{}) || attachment.SessionGeneration != session.attachmentGeneration || attachment.AttachmentGeneration == 0 {
 		return ErrWireProtocol
 	}
 	session.attachmentsMu.Lock()
@@ -404,7 +447,7 @@ func (session *wireSession) close() {
 	})
 }
 
-func authenticateClient(ctx context.Context, session *wireSession, principal string, key auth.Key, random io.Reader) error {
+func authenticateClient(ctx context.Context, session *wireSession, principal string, pathGroupID protocol.PathGroupID, key auth.Key, random io.Reader) error {
 	if random == nil {
 		random = rand.Reader
 	}
@@ -419,8 +462,10 @@ func authenticateClient(ctx context.Context, session *wireSession, principal str
 	if _, err := io.ReadFull(random, nonce[:]); err != nil {
 		return ErrAuthentication
 	}
-	proof, err := auth.ComputeProof(key, principal, challenge.Challenge, nonce)
-	if err != nil || session.sendContext(authCtx, protocol.AuthProof{PrincipalID: principal, ClientNonce: nonce, Proof: proof}) != nil {
+	proof, err := auth.ComputeProof(key, principal, pathGroupID, challenge.Challenge, nonce)
+	if err != nil || session.sendContext(authCtx, protocol.AuthProof{
+		PrincipalID: principal, PathGroupID: pathGroupID, ClientNonce: nonce, Proof: proof,
+	}) != nil {
 		return ErrAuthentication
 	}
 	message, err = session.read(authCtx)
@@ -429,6 +474,7 @@ func authenticateClient(ctx context.Context, session *wireSession, principal str
 		return ErrAuthentication
 	}
 	session.principal = principal
+	session.pathGroupID = pathGroupID
 	session.connectionID = auth.DeriveConnectionID(proof)
 	return nil
 }
@@ -450,6 +496,7 @@ func authenticateServer(ctx context.Context, session *wireSession, challenges *a
 		return ErrAuthentication
 	}
 	session.principal = proof.PrincipalID
+	session.pathGroupID = proof.PathGroupID
 	session.connectionID = auth.DeriveConnectionID(proof.Proof)
 	return nil
 }

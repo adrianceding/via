@@ -808,6 +808,11 @@ func TestApplicationRelayCreditsUniqueAttemptToSendingAttachment(t *testing.T) {
 		t.Fatal(err)
 	}
 	send := requireMessageAction[protocol.Data](t, actions)
+	if _, err := relay.Handle(ApplicationRelayEvent{
+		Kind: ApplicationRelaySendAdmitted, Generation: send.Generation, LaneGeneration: 77,
+	}); err != nil {
+		t.Fatal(err)
+	}
 	writeCompletedAt := now.Add(10 * time.Millisecond)
 	if _, err := relay.Handle(ApplicationRelayEvent{
 		Kind: ApplicationRelaySendResult, Generation: send.Generation,
@@ -828,9 +833,137 @@ func TestApplicationRelayCreditsUniqueAttemptToSendingAttachment(t *testing.T) {
 		t.Fatal(err)
 	}
 	credit := requireRelayAction(t, actions, ApplicationRelayActionDataCredit)
-	if credit.Attachment != send.Attachment || credit.DataCreditBytes != 8 ||
+	if credit.Attachment != send.Attachment || credit.LaneGeneration != 77 || credit.DataCreditBytes != 8 ||
 		credit.WriteCompletedAt != writeCompletedAt || credit.AcknowledgedAt != now || !credit.CapacityEligible {
 		t.Fatalf("DATA credit = %#v, send attachment = %#v", credit, send.Attachment)
+	}
+}
+
+func TestApplicationRelayCreditsEveryRedundantCopyWithoutCapacitySample(t *testing.T) {
+	relay, machine := newRelayFixture(t, policy.Config{Mode: protocol.DeliveryRedundant, Selection: protocol.PathNone})
+	publishRelayAttachment(t, relay, machine, testRelayA)
+	publishRelayAttachment(t, relay, machine, testRelayB)
+	actions, err := relay.Handle(ApplicationRelayEvent{
+		Kind: ApplicationRelayReadResult, Generation: relay.Snapshot().ApplicationReadGeneration, Data: []byte("copies"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sends := dataMessageActions(t, actions)
+	if len(sends) != 2 {
+		t.Fatalf("redundant sends = %#v", sends)
+	}
+	for index, send := range sends {
+		if _, err := relay.Handle(ApplicationRelayEvent{
+			Kind: ApplicationRelaySendAdmitted, Generation: send.Generation, LaneGeneration: uint64(71 + index),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := relay.Handle(ApplicationRelayEvent{
+			Kind: ApplicationRelaySendResult, Generation: send.Generation, AttemptOutcome: flow.AttemptSucceeded,
+			WriteCompletedAt: time.Unix(1000, int64(index+1)), CapacityEligible: true,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	actions, err = relay.Handle(ApplicationRelayEvent{
+		Kind: ApplicationRelayRemoteMessage, Attachment: testRelayA,
+		Message: protocol.ACK{FlowID: testRelayFlowID, NextOffset: 6},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	credits := make(map[uint64]uint64, 2)
+	for _, action := range actions {
+		if action.Kind != ApplicationRelayActionDataCredit {
+			continue
+		}
+		if action.CapacityEligible {
+			t.Fatalf("redundant DATA credit was capacity eligible: %#v", action)
+		}
+		credits[action.LaneGeneration] += action.DataCreditBytes
+	}
+	if credits[71] != 6 || credits[72] != 6 || len(credits) != 2 {
+		t.Fatalf("redundant DATA credits = %#v", credits)
+	}
+}
+
+func TestApplicationRelayCreditsOldGenerationWhenACKPrecedesWriteCompletion(t *testing.T) {
+	relay, machine := newRelayFixture(t, policy.Config{Mode: protocol.DeliveryRedundant, Selection: protocol.PathNone})
+	publishRelayAttachment(t, relay, machine, testRelayA)
+	publishRelayAttachment(t, relay, machine, testRelayB)
+	actions, err := relay.Handle(ApplicationRelayEvent{
+		Kind: ApplicationRelayReadResult, Generation: relay.Snapshot().ApplicationReadGeneration, Data: []byte("retry"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := dataMessageActions(t, actions)
+	if len(first) != 2 {
+		t.Fatalf("initial sends = %#v", first)
+	}
+	for index, send := range first {
+		if _, err := relay.Handle(ApplicationRelayEvent{
+			Kind: ApplicationRelaySendAdmitted, Generation: send.Generation, LaneGeneration: uint64(81 + index),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := relay.Handle(ApplicationRelayEvent{
+		Kind: ApplicationRelaySendResult, Generation: first[0].Generation, AttemptOutcome: flow.AttemptSucceeded,
+		WriteCompletedAt: time.Unix(1100, 1), CapacityEligible: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	retryGeneration := relay.Snapshot().Flow.RetryGeneration
+	actions, err = relay.Handle(ApplicationRelayEvent{Kind: ApplicationRelayRetryDeadline, Generation: retryGeneration})
+	if err != nil {
+		t.Fatal(err)
+	}
+	retried := dataMessageActions(t, actions)
+	if len(retried) != 2 {
+		t.Fatalf("retried sends = %#v", retried)
+	}
+	for index, send := range retried {
+		if _, err := relay.Handle(ApplicationRelayEvent{
+			Kind: ApplicationRelaySendAdmitted, Generation: send.Generation, LaneGeneration: uint64(91 + index),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := relay.Handle(ApplicationRelayEvent{
+			Kind: ApplicationRelaySendResult, Generation: send.Generation, AttemptOutcome: flow.AttemptSucceeded,
+			WriteCompletedAt: time.Unix(1100, int64(index+2)), CapacityEligible: true,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	actions, err = relay.Handle(ApplicationRelayEvent{
+		Kind: ApplicationRelayRemoteMessage, Attachment: testRelayA,
+		Message: protocol.ACK{FlowID: testRelayFlowID, NextOffset: 5},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	credits := make(map[uint64]uint64, 4)
+	for _, action := range actions {
+		if action.Kind == ApplicationRelayActionDataCredit {
+			credits[action.LaneGeneration] += action.DataCreditBytes
+		}
+	}
+	lateActions, err := relay.Handle(ApplicationRelayEvent{
+		Kind: ApplicationRelaySendResult, Generation: first[1].Generation, AttemptOutcome: flow.AttemptSucceeded,
+		WriteCompletedAt: time.Unix(1100, 4), CapacityEligible: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, action := range lateActions {
+		if action.Kind == ApplicationRelayActionDataCredit {
+			credits[action.LaneGeneration] += action.DataCreditBytes
+		}
+	}
+	if credits[81] != 5 || credits[82] != 5 || credits[91] != 5 || credits[92] != 5 || len(credits) != 4 {
+		t.Fatalf("cross-generation DATA credits = %#v", credits)
 	}
 }
 
@@ -892,7 +1025,7 @@ func TestApplicationRelayResolvesDistributedAssignmentExactlyOnceAtAdmission(t *
 	}
 }
 
-func TestApplicationRelayRejectsDataCreditAfterOverlappingRetry(t *testing.T) {
+func TestApplicationRelayCreditsSuccessfulAttemptAfterOverlappingRetry(t *testing.T) {
 	now := time.Unix(950, 0)
 	relay, machine := newRelayFixtureWithClock(t, policy.Config{
 		Mode: protocol.DeliveryAdaptive, Selection: protocol.PathFastest,
@@ -927,8 +1060,9 @@ func TestApplicationRelayRejectsDataCreditAfterOverlappingRetry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if countRelayActions(actions, ApplicationRelayActionDataCredit) != 0 {
-		t.Fatalf("overlapping retry produced DATA credit = %#v", actions)
+	credit := requireRelayAction(t, actions, ApplicationRelayActionDataCredit)
+	if credit.Attachment != first.Attachment || credit.DataCreditBytes != 5 || credit.CapacityEligible {
+		t.Fatalf("overlapping retry DATA credit = %#v", credit)
 	}
 }
 
@@ -1369,6 +1503,14 @@ func TestApplicationRelayCoalescesPendingAcknowledgementsToLatestSnapshot(t *tes
 	}
 	if relay.Snapshot().PendingSends != 1 || len(relay.deferredControls) != 1 {
 		t.Fatalf("coalesced state pending=%d deferred=%d", relay.Snapshot().PendingSends, len(relay.deferredControls))
+	}
+	if _, err := relay.Handle(ApplicationRelayEvent{
+		Kind: ApplicationRelayObserveProbeQuality, Attachment: testRelayA, RTT: time.Millisecond,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if relay.Snapshot().PendingSends != 1 || len(relay.deferredControls) != 1 {
+		t.Fatalf("blocked replacement state pending=%d deferred=%d", relay.Snapshot().PendingSends, len(relay.deferredControls))
 	}
 	actions, err = relay.Handle(ApplicationRelayEvent{
 		Kind: ApplicationRelaySendResult, Generation: firstACK.Generation, AttemptOutcome: flow.AttemptSucceeded,

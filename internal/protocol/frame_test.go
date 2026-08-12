@@ -70,6 +70,7 @@ func TestMessageFixedVectors(t *testing.T) {
 	for index := range challenge.Challenge {
 		challenge.Challenge[index] = byte(index)
 	}
+	pathGroupID := PathGroupID{1}
 	open := Open{
 		DeliveryMode:  DeliveryAdaptive,
 		PathSelection: PathFastest,
@@ -93,32 +94,32 @@ func TestMessageFixedVectors(t *testing.T) {
 		{
 			name:    "auth challenge",
 			message: challenge,
-			hex:     "5649010100000020" + "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+			hex:     "5649020100000020" + "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
 		},
 		{
 			name:    "auth proof",
-			message: AuthProof{PrincipalID: "a"},
-			hex:     "5649010200000042" + "0161" + zeroHex(64),
+			message: AuthProof{PrincipalID: "a", PathGroupID: pathGroupID},
+			hex:     "5649020200000052" + "0161" + "01000000000000000000000000000000" + zeroHex(64),
 		},
 		{
 			name:    "auth result",
 			message: AuthResult{Result: AuthSuccess},
-			hex:     "564901030000000100",
+			hex:     "564902030000000100",
 		},
 		{
 			name:    "probe",
 			message: Probe{Token: 0x0102030405060708},
-			hex:     "56490104000000080102030405060708",
+			hex:     "56490204000000080102030405060708",
 		},
 		{
 			name:    "probe ack",
 			message: ProbeACK{Token: 0x8877665544332211},
-			hex:     "56490105000000088877665544332211",
+			hex:     "56490205000000088877665544332211",
 		},
 		{
 			name:    "open",
 			message: open,
-			hex:     "564901100000004a" + zeroHex(48) + "0201" + zeroHex(17) + "01c000020101bb",
+			hex:     "564902100000004a" + zeroHex(48) + "0201" + zeroHex(17) + "01c000020101bb",
 		},
 		{
 			name: "open distributed constraints",
@@ -128,7 +129,7 @@ func TestMessageFixedVectors(t *testing.T) {
 				Constraints:   distributedConstraints,
 				Target:        open.Target,
 			},
-			hex: "564901100000004a" + zeroHex(48) + "0202" + distributedConstraintHex + "01c000020101bb",
+			hex: "564902100000004a" + zeroHex(48) + "0202" + distributedConstraintHex + "01c000020101bb",
 		},
 		{
 			name: "open result",
@@ -137,7 +138,7 @@ func TestMessageFixedVectors(t *testing.T) {
 				DeliveryMode:  DeliveryAdaptive,
 				PathSelection: PathFastest,
 			},
-			hex: "5649011100000044" + zeroHex(16) + "00" + zeroHex(32) + "0201" + zeroHex(17),
+			hex: "5649021100000044" + zeroHex(16) + "00" + zeroHex(32) + "0201" + zeroHex(17),
 		},
 		{
 			name: "open result distributed constraints",
@@ -147,22 +148,22 @@ func TestMessageFixedVectors(t *testing.T) {
 				PathSelection: PathDistributed,
 				Constraints:   distributedConstraints,
 			},
-			hex: "5649011100000044" + zeroHex(16) + "00" + zeroHex(32) + "0202" + distributedConstraintHex,
+			hex: "5649021100000044" + zeroHex(16) + "00" + zeroHex(32) + "0202" + distributedConstraintHex,
 		},
 		{
 			name:    "join",
 			message: Join{},
-			hex:     "5649011200000030" + zeroHex(48),
+			hex:     "5649021200000030" + zeroHex(48),
 		},
 		{
 			name:    "join result",
 			message: JoinResult{Result: JoinSuccess},
-			hex:     "5649011300000011" + zeroHex(16) + "00",
+			hex:     "5649021300000011" + zeroHex(16) + "00",
 		},
 		{
 			name:    "data",
 			message: Data{Offset: 1, Bytes: []byte{0xaa}},
-			hex:     "5649012000000019" + zeroHex(16) + "0000000000000001aa",
+			hex:     "5649022000000019" + zeroHex(16) + "0000000000000001aa",
 		},
 		{
 			name: "ack",
@@ -170,22 +171,22 @@ func TestMessageFixedVectors(t *testing.T) {
 				NextOffset: 1,
 				Ranges:     []ACKRange{{Start: 3, End: 5}},
 			},
-			hex: "5649012100000029" + zeroHex(16) + "00000000000000010100000000000000030000000000000005",
+			hex: "5649022100000029" + zeroHex(16) + "00000000000000010100000000000000030000000000000005",
 		},
 		{
 			name:    "fin",
 			message: FIN{FinalOffset: 9},
-			hex:     "5649012200000018" + zeroHex(16) + "0000000000000009",
+			hex:     "5649022200000018" + zeroHex(16) + "0000000000000009",
 		},
 		{
 			name:    "fin ack",
 			message: FINACK{FinalOffset: 9},
-			hex:     "5649012300000018" + zeroHex(16) + "0000000000000009",
+			hex:     "5649022300000018" + zeroHex(16) + "0000000000000009",
 		},
 		{
 			name:    "reset",
 			message: Reset{Reason: ResetProtocolConflict},
-			hex:     "5649012400000012" + zeroHex(16) + "0002",
+			hex:     "5649022400000012" + zeroHex(16) + "0002",
 		},
 	}
 

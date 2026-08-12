@@ -10,7 +10,10 @@ import (
 const (
 	MaxConfigBytes                     = 1 << 20
 	MaxPrincipals                      = 4096
-	MaxClientSessions                  = 64
+	MinimumLanesPerPath                = 1
+	MaximumLanesPerPath                = 64
+	MaxClientSessions                  = 64 * MaximumLanesPerPath
+	MaxClientAuthInProgress            = 64
 	MaxMemoryBudget                    = uint64(1<<63 - 1)
 	DefaultFlowWindowBytes      uint64 = 320 << 10
 	MinimumFlowWindowBytes      uint64 = 65512
@@ -36,6 +39,7 @@ type Transport struct {
 	Type                 string
 	Address              string
 	Listen               string
+	LanesPerPath         uint64
 	WriteBufferBytes     uint64
 	OutputQueueFrames    uint64
 	OutputQueueBytes     uint64
@@ -153,7 +157,7 @@ func defaultDelivery() Delivery {
 func defaultClientLimits() ClientLimits {
 	return ClientLimits{
 		Flows: 2048, OpeningFlows: 256, RecoveringFlows: 1024,
-		Sessions: MaxClientSessions, AuthInProgress: MaxClientSessions,
+		Sessions: 64, AuthInProgress: MaxClientAuthInProgress,
 		SOCKSConnections: 2048, SOCKSHandshakes: 512, SOCKSPerSource: 2048,
 		FlowSendWindowBytes: DefaultFlowWindowBytes, FlowReceiveWindowBytes: DefaultFlowWindowBytes,
 	}

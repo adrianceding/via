@@ -17,6 +17,9 @@ psk: "MTIzNDU2Nzg5MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTI="
 transport:
   type: tcp
   address: "127.0.0.1:38473"
+  # 可选：每张合格网卡维持的长期 TCP lane 数，默认 1，范围 1 到 64。
+  # Optional: long-lived TCP lanes per eligible interface; default 1, range 1 to 64.
+  # lanes_per_path: 4
   # 可选：TCP socket 写缓冲，默认 128 KiB，范围为 65512 到 16 MiB。
   # Optional: TCP socket write buffer; default 128 KiB, range 65512 to 16 MiB.
   # write_buffer_bytes: 4194304
@@ -93,8 +96,7 @@ socks_listen: "127.0.0.1:1080"
 #   flows: 0                 # 同时存在的逻辑数据流总数 / Total concurrent logical flows
 #   opening_flows: 0         # 正在建立的数据流数，不得大于 flows / Flows being opened; cannot exceed flows
 #   recovering_flows: 0      # 所有线路中断后正在恢复的数据流数，不得大于 flows / Flows recovering after all paths fail; cannot exceed flows
-#   sessions: 0              # 传输会话数；默认按每张合格网卡建立一个 / Transport sessions; one per eligible interface by default
-#   auth_in_progress: 0      # 同时进行传输会话认证的数量，不得大于 sessions / Concurrent transport authentications; cannot exceed sessions
+#   auth_in_progress: 0      # 同时进行传输 lane 认证的数量，最大 64 / Concurrent transport lane authentications; maximum 64
 #   socks_connections: 0     # 应用到 SOCKS5 监听器的连接总数 / Total application connections to the SOCKS5 listener
 #   socks_handshakes: 0      # 同时进行 SOCKS5 握手的数量，不得大于 socks_connections / Concurrent SOCKS5 handshakes; cannot exceed socks_connections
 #   socks_per_source: 0      # 同一来源地址同时进行 SOCKS5 握手的数量 / Concurrent SOCKS5 handshakes from one source address

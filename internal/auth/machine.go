@@ -58,6 +58,7 @@ type Action struct {
 	Kind        ActionKind
 	Message     protocol.Message
 	PrincipalID string
+	PathGroupID protocol.PathGroupID
 	Reason      CloseReason
 }
 
@@ -113,7 +114,9 @@ type ServerMachine struct {
 	verifier           ProofVerifier
 	challenge          [ChallengeSize]byte
 	candidatePrincipal string
+	candidatePathGroup protocol.PathGroupID
 	principalID        string
+	pathGroupID        protocol.PathGroupID
 	pendingCloseReason CloseReason
 }
 
@@ -144,6 +147,13 @@ func (machine *ServerMachine) PrincipalID() (string, bool) {
 		return "", false
 	}
 	return machine.principalID, true
+}
+
+func (machine *ServerMachine) PathGroupID() (protocol.PathGroupID, bool) {
+	if machine == nil || machine.state != ServerAuthenticated || !protocol.ValidPathGroupID(machine.pathGroupID) {
+		return protocol.PathGroupID{}, false
+	}
+	return machine.pathGroupID, true
 }
 
 func (machine *ServerMachine) Handle(event Event) []Action {
@@ -217,13 +227,14 @@ func (machine *ServerMachine) handleAwaitingProof(event Event) []Action {
 		if !ok {
 			return machine.fail(CloseProtocolViolation)
 		}
-		if !protocol.ValidPrincipalID(proof.PrincipalID) {
+		if !protocol.ValidPrincipalID(proof.PrincipalID) || !protocol.ValidPathGroupID(proof.PathGroupID) {
 			return machine.fail(CloseProtocolViolation)
 		}
 		valid := machine.verifier.Verify(proof, machine.challenge)
 		machine.challenge = [ChallengeSize]byte{}
 		if valid {
 			machine.candidatePrincipal = proof.PrincipalID
+			machine.candidatePathGroup = proof.PathGroupID
 			machine.state = ServerSendingResult
 			return []Action{{
 				Kind:    ActionSend,
@@ -243,10 +254,12 @@ func (machine *ServerMachine) handleSendingResult(event Event) []Action {
 	switch event.Kind {
 	case EventSendCompleted:
 		machine.principalID = machine.candidatePrincipal
+		machine.pathGroupID = machine.candidatePathGroup
 		machine.candidatePrincipal = ""
+		machine.candidatePathGroup = protocol.PathGroupID{}
 		machine.state = ServerAuthenticated
 		return []Action{
-			{Kind: ActionAuthenticationComplete, PrincipalID: machine.principalID},
+			{Kind: ActionAuthenticationComplete, PrincipalID: machine.principalID, PathGroupID: machine.pathGroupID},
 			{Kind: ActionAllowRead},
 		}
 	case EventSendFailed:
@@ -277,6 +290,7 @@ func (machine *ServerMachine) handleSendingFailure(event Event) []Action {
 
 func (machine *ServerMachine) sendFailure(reason CloseReason) []Action {
 	machine.candidatePrincipal = ""
+	machine.candidatePathGroup = protocol.PathGroupID{}
 	machine.pendingCloseReason = reason
 	machine.state = ServerSendingFailure
 	return []Action{{
@@ -296,7 +310,9 @@ func (machine *ServerMachine) close() {
 	machine.verifier = nil
 	machine.challenge = [ChallengeSize]byte{}
 	machine.candidatePrincipal = ""
+	machine.candidatePathGroup = protocol.PathGroupID{}
 	machine.principalID = ""
+	machine.pathGroupID = protocol.PathGroupID{}
 	machine.pendingCloseReason = 0
 }
 
@@ -336,12 +352,13 @@ func (state ClientState) String() string {
 type ClientMachine struct {
 	state       ClientState
 	principalID string
+	pathGroupID protocol.PathGroupID
 	key         Key
 	random      io.Reader
 }
 
-func NewClientMachine(principalID string, key Key, random io.Reader) (*ClientMachine, error) {
-	if !protocol.ValidPrincipalID(principalID) {
+func NewClientMachine(principalID string, pathGroupID protocol.PathGroupID, key Key, random io.Reader) (*ClientMachine, error) {
+	if !protocol.ValidPrincipalID(principalID) || !protocol.ValidPathGroupID(pathGroupID) {
 		return nil, ErrInvalidPrincipal
 	}
 	if random == nil {
@@ -350,6 +367,7 @@ func NewClientMachine(principalID string, key Key, random io.Reader) (*ClientMac
 	return &ClientMachine{
 		state:       ClientCreated,
 		principalID: principalID,
+		pathGroupID: pathGroupID,
 		key:         key,
 		random:      random,
 	}, nil
@@ -367,6 +385,13 @@ func (machine *ClientMachine) PrincipalID() (string, bool) {
 		return "", false
 	}
 	return machine.principalID, true
+}
+
+func (machine *ClientMachine) PathGroupID() (protocol.PathGroupID, bool) {
+	if machine == nil || machine.state != ClientAuthenticated || !protocol.ValidPathGroupID(machine.pathGroupID) {
+		return protocol.PathGroupID{}, false
+	}
+	return machine.pathGroupID, true
 }
 
 func (machine *ClientMachine) Handle(event Event) []Action {
@@ -416,7 +441,7 @@ func (machine *ClientMachine) handleConnected(event Event) []Action {
 		if _, err := io.ReadFull(machine.random, nonce[:]); err != nil {
 			return machine.fail(CloseLocalFailure)
 		}
-		proof, err := ComputeProof(machine.key, machine.principalID, challenge.Challenge, nonce)
+		proof, err := ComputeProof(machine.key, machine.principalID, machine.pathGroupID, challenge.Challenge, nonce)
 		if err != nil {
 			return machine.fail(CloseLocalFailure)
 		}
@@ -427,6 +452,7 @@ func (machine *ClientMachine) handleConnected(event Event) []Action {
 			Kind: ActionSend,
 			Message: protocol.AuthProof{
 				PrincipalID: machine.principalID,
+				PathGroupID: machine.pathGroupID,
 				ClientNonce: nonce,
 				Proof:       proof,
 			},
@@ -463,7 +489,7 @@ func (machine *ClientMachine) handleAwaitingResult(event Event) []Action {
 		case protocol.AuthSuccess:
 			machine.state = ClientAuthenticated
 			return []Action{
-				{Kind: ActionAuthenticationComplete, PrincipalID: machine.principalID},
+				{Kind: ActionAuthenticationComplete, PrincipalID: machine.principalID, PathGroupID: machine.pathGroupID},
 				{Kind: ActionAllowRead},
 			}
 		case protocol.AuthFailure:
@@ -485,6 +511,8 @@ func (machine *ClientMachine) fail(reason CloseReason) []Action {
 
 func (machine *ClientMachine) close() {
 	machine.state = ClientClosed
+	machine.principalID = ""
+	machine.pathGroupID = protocol.PathGroupID{}
 	machine.key = Key{}
 	machine.random = nil
 }

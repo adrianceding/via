@@ -282,8 +282,12 @@ func TestSessionRuntimeTracksDataPayloadSeparatelyFromEncodedBytes(t *testing.T)
 		t.Fatal(err)
 	}
 	snapshot := runtime.snapshot()
-	if snapshot.ScheduledData != 7 || snapshot.WrittenData != 7 || snapshot.QueuedDataPayload != 0 || snapshot.InFlightData != 0 {
+	if snapshot.ScheduledData != 7 || snapshot.WrittenData != 7 || snapshot.QueuedDataPayload != 0 || snapshot.InFlightData != 7 {
 		t.Fatalf("data payload accounting = %#v", snapshot)
+	}
+	runtime.observeFlowDataCredit(protocol.FlowID{1}, 7, time.Now(), time.Now(), false)
+	if snapshot := runtime.snapshot(); snapshot.InFlightData != 0 {
+		t.Fatalf("acknowledged data payload accounting = %#v", snapshot)
 	}
 }
 
@@ -314,8 +318,14 @@ func TestSessionRuntimePublishesSharedDataLoadInQualitySnapshot(t *testing.T) {
 	if err := runtime.wait(context.Background(), second); err != nil {
 		t.Fatal(err)
 	}
+	completedAt := runtime.snapshot().Quality
+	if completedAt.QueuedBytes != 0 || completedAt.InFlightBytes != 12 {
+		t.Fatalf("unacknowledged shared data load = %#v", completedAt)
+	}
+	runtime.observeFlowDataCredit(protocol.FlowID{1}, 5, time.Now(), time.Now(), false)
+	runtime.observeFlowDataCredit(protocol.FlowID{2}, 7, time.Now(), time.Now(), false)
 	if snapshot := runtime.snapshot(); snapshot.Quality.QueuedBytes != 0 || snapshot.Quality.InFlightBytes != 0 {
-		t.Fatalf("cleared shared data load = %#v", snapshot.Quality)
+		t.Fatalf("acknowledged shared data load = %#v", snapshot.Quality)
 	}
 }
 

@@ -31,6 +31,12 @@ func validateClient(configuration *Client) error {
 	if configuration.Transport.Type != "tcp" {
 		return &FieldError{Path: "transport.type", Kind: ErrFieldValue}
 	}
+	if configuration.Transport.LanesPerPath == 0 {
+		configuration.Transport.LanesPerPath = MinimumLanesPerPath
+	}
+	if configuration.Transport.LanesPerPath < MinimumLanesPerPath || configuration.Transport.LanesPerPath > MaximumLanesPerPath {
+		return &FieldError{Path: "transport.lanes_per_path", Kind: ErrFieldValue}
+	}
 	if configuration.Transport.WriteBufferBytes == 0 {
 		configuration.Transport.WriteBufferBytes = DefaultTCPWriteBufferBytes
 	}
@@ -46,13 +52,17 @@ func validateClient(configuration *Client) error {
 	if err := validateDelivery(configuration.Delivery); err != nil {
 		return err
 	}
+	if configuration.Transport.LanesPerPath > 1 &&
+		(configuration.Delivery.Mode != protocol.DeliveryAdaptive || configuration.Delivery.Selection != protocol.PathFastest) {
+		return &FieldError{Path: "transport.lanes_per_path", Kind: ErrFieldValue}
+	}
 	if err := validateInterfacePatterns(configuration.Interfaces); err != nil {
 		return err
 	}
 	if err := validateStatus(&configuration.Status); err != nil {
 		return err
 	}
-	normalizeClientLimits(&configuration.Limits)
+	normalizeClientLimits(&configuration.Limits, configuration.Transport.LanesPerPath)
 	if err := validateClientLimits(configuration.Limits); err != nil {
 		return err
 	}
@@ -260,8 +270,8 @@ func validateBasicAuth(authentication BasicAuth) error {
 func validateClientLimits(limits ClientLimits) error {
 	checks := []limitCheck{
 		{"flows", limits.Flows, 1, 2048}, {"opening_flows", limits.OpeningFlows, 1, 256},
-		{"recovering_flows", limits.RecoveringFlows, 1, 1024}, {"sessions", limits.Sessions, 1, MaxClientSessions},
-		{"auth_in_progress", limits.AuthInProgress, 1, MaxClientSessions}, {"socks_connections", limits.SOCKSConnections, 1, 2048},
+		{"recovering_flows", limits.RecoveringFlows, 1, 1024},
+		{"auth_in_progress", limits.AuthInProgress, 1, MaxClientAuthInProgress}, {"socks_connections", limits.SOCKSConnections, 1, 2048},
 		{"socks_handshakes", limits.SOCKSHandshakes, 1, 512}, {"socks_per_source", limits.SOCKSPerSource, 1, 2048},
 		{"memory_budget_bytes", limits.MemoryBudgetBytes, 1, MaxMemoryBudget},
 		{"flow_send_window_bytes", limits.FlowSendWindowBytes, MinimumFlowWindowBytes, MaximumFlowWindowBytes},
@@ -281,8 +291,9 @@ func validateServerLimits(limits ServerLimits) error {
 	checks := []limitCheck{
 		{"flows", limits.Flows, 1, 8192}, {"per_principal_flows", limits.PerPrincipalFlows, 1, 8192},
 		{"opening_flows", limits.OpeningFlows, 1, 512}, {"recovering_flows", limits.RecoveringFlows, 1, 2048},
-		{"sessions", limits.Sessions, 1, 4096}, {"sessions_per_principal", limits.SessionsPerPrincipal, 1, 4096},
-		{"auth_in_progress", limits.AuthInProgress, 1, 512}, {"target_dials", limits.TargetDials, 1, 512},
+		{"transport_connections", limits.Sessions, 1, 4096},
+		{"transport_connections_per_principal", limits.SessionsPerPrincipal, 1, 4096},
+		{"transport_auth_in_progress", limits.AuthInProgress, 1, 512}, {"target_dials", limits.TargetDials, 1, 512},
 		{"tombstones", limits.Tombstones, 1, 32768}, {"tombstones_per_principal", limits.TombstonesPerPrincipal, 1, 32768},
 		{"rate_limit_keys", limits.RateLimitKeys, 1, 16384}, {"memory_budget_bytes", limits.MemoryBudgetBytes, 1, MaxMemoryBudget},
 		{"flow_send_window_bytes", limits.FlowSendWindowBytes, MinimumFlowWindowBytes, MaximumFlowWindowBytes},
@@ -299,7 +310,7 @@ func validateServerLimits(limits ServerLimits) error {
 	return nil
 }
 
-func normalizeClientLimits(limits *ClientLimits) {
+func normalizeClientLimits(limits *ClientLimits, lanesPerPath uint64) {
 	if limits.FlowSendWindowBytes == 0 {
 		limits.FlowSendWindowBytes = DefaultFlowWindowBytes
 	}
@@ -315,11 +326,9 @@ func normalizeClientLimits(limits *ClientLimits) {
 	if limits.RecoveringFlows == 0 {
 		limits.RecoveringFlows = min(limits.Flows, 1024)
 	}
-	if limits.Sessions == 0 {
-		limits.Sessions = MaxClientSessions
-	}
+	limits.Sessions = 64 * lanesPerPath
 	if limits.AuthInProgress == 0 {
-		limits.AuthInProgress = limits.Sessions
+		limits.AuthInProgress = min(limits.Sessions, MaxClientAuthInProgress)
 	}
 	if limits.SOCKSConnections == 0 {
 		limits.SOCKSConnections = 2048

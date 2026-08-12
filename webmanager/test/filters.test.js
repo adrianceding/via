@@ -15,11 +15,13 @@ test('session filter searches correlation and endpoint fields', () => {
   const session = {
     state: 3,
     connection_id: 'connection-a',
+    path_group_id: 'path-group-a',
     interface: 'eth0',
     remote_endpoint: '192.0.2.1:38473',
     quality: { stall_penalty_micros: 0 },
   };
   assert.equal(sessionMatchesFilter(session, 'connection-a', false), true);
+  assert.equal(sessionMatchesFilter(session, 'path-group-a', false), true);
   assert.equal(sessionMatchesFilter(session, '192.0.2.1', false), true);
   assert.equal(sessionMatchesFilter(session, '', true), false);
   assert.equal(sessionMatchesFilter({ ...session, state: 4 }, '', true), true);

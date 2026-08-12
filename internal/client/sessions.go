@@ -2,6 +2,9 @@ package client
 
 import (
 	"bytes"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"math"
 	"net"
@@ -10,17 +13,23 @@ import (
 	"time"
 
 	networkpath "github.com/adrianceding/via/internal/path"
+	"github.com/adrianceding/via/internal/protocol"
 	"github.com/adrianceding/via/internal/transport"
 )
 
 const (
 	DefaultSessions          = networkpath.MaxInterfaces
 	MaxSessions              = networkpath.MaxInterfaces
+	DefaultLanesPerPath      = 1
+	MaxLanesPerPath          = 64
+	MaxTransportSessions     = MaxSessions * MaxLanesPerPath
 	DefaultAuthInProgress    = networkpath.MaxInterfaces
 	SessionInitialBackoff    = time.Second
 	SessionMaximumBackoff    = 2 * time.Second
 	MaxSessionPathCandidates = networkpath.MaxInterfaces * networkpath.MaxAddressesPerInterface
 )
+
+type PathGroupNamespace [32]byte
 
 var (
 	ErrInvalidSessionManager = errors.New("client: invalid session manager configuration")
@@ -40,9 +49,11 @@ const (
 
 type SessionManagerConfig struct {
 	DesiredSessions int
+	LanesPerPath    int
 	AuthInProgress  int
 	RemoteEndpoint  string
 	QueueLimits     transport.QueueLimits
+	PathNamespace   PathGroupNamespace
 }
 
 type SessionManagerEventKind uint8
@@ -79,17 +90,21 @@ const (
 )
 
 type SessionManagerAction struct {
-	Kind       SessionManagerActionKind
-	Generation uint64
-	Candidate  networkpath.Candidate
-	Options    transport.DialOptions
-	Connection transport.Connection
-	After      time.Duration
+	Kind        SessionManagerActionKind
+	Generation  uint64
+	Candidate   networkpath.Candidate
+	Lane        uint16
+	PathGroupID protocol.PathGroupID
+	Options     transport.DialOptions
+	Connection  transport.Connection
+	After       time.Duration
 }
 
 type ManagedSessionSnapshot struct {
 	Generation         uint64
 	Candidate          networkpath.Candidate
+	Lane               uint16
+	PathGroupID        protocol.PathGroupID
 	ActualLocalAddress netip.Addr
 	LocalEndpoint      string
 	RemoteEndpoint     string
@@ -105,6 +120,8 @@ type SessionManagerSnapshot struct {
 
 type managedSession struct {
 	candidate   networkpath.Candidate
+	lane        uint16
+	pathGroupID protocol.PathGroupID
 	state       ManagedSessionState
 	generation  uint64
 	failures    uint8
@@ -118,20 +135,26 @@ type managedSession struct {
 // dialing, authentication, and connection closure and feed the results back.
 type SessionManager struct {
 	config         SessionManagerConfig
-	slots          map[networkpath.Candidate]*managedSession
+	slots          map[sessionSlotKey]*managedSession
 	nextGeneration uint64
 	shuttingDown   bool
 }
 
 func NewSessionManager(config SessionManagerConfig) (*SessionManager, error) {
+	if config.LanesPerPath == 0 {
+		config.LanesPerPath = DefaultLanesPerPath
+	}
 	if config.DesiredSessions < 1 || config.DesiredSessions > MaxSessions ||
-		config.AuthInProgress < 1 || config.AuthInProgress > config.DesiredSessions ||
-		config.RemoteEndpoint == "" || transport.ValidateV1QueueLimits(config.QueueLimits) != nil {
+		config.LanesPerPath < 1 || config.LanesPerPath > MaxLanesPerPath ||
+		config.DesiredSessions > MaxTransportSessions/config.LanesPerPath ||
+		config.AuthInProgress < 1 || config.AuthInProgress > config.DesiredSessions*config.LanesPerPath ||
+		config.RemoteEndpoint == "" || config.PathNamespace == (PathGroupNamespace{}) ||
+		transport.ValidateV1QueueLimits(config.QueueLimits) != nil {
 		return nil, ErrInvalidSessionManager
 	}
 	return &SessionManager{
 		config: config,
-		slots:  make(map[networkpath.Candidate]*managedSession, config.DesiredSessions),
+		slots:  make(map[sessionSlotKey]*managedSession, config.DesiredSessions*config.LanesPerPath),
 	}, nil
 }
 
@@ -144,6 +167,8 @@ func (manager *SessionManager) Snapshot() SessionManagerSnapshot {
 		entry := ManagedSessionSnapshot{
 			Generation:         slot.generation,
 			Candidate:          slot.candidate,
+			Lane:               slot.lane,
+			PathGroupID:        slot.pathGroupID,
 			ActualLocalAddress: slot.actualLocal,
 			State:              slot.state,
 			Failures:           slot.failures,
@@ -203,8 +228,14 @@ func (manager *SessionManager) changePaths(candidates []networkpath.Candidate) (
 		actions = append(actions, manager.removeSlot(slot)...)
 	}
 	for _, candidate := range selected {
-		if manager.slots[candidate] == nil {
-			manager.slots[candidate] = &managedSession{candidate: candidate, state: ManagedSessionWaiting}
+		pathGroupID := derivePathGroupID(manager.config.PathNamespace, candidate)
+		for lane := 0; lane < manager.config.LanesPerPath; lane++ {
+			key := sessionSlotKey{candidate: candidate, lane: uint16(lane)}
+			if manager.slots[key] == nil {
+				manager.slots[key] = &managedSession{
+					candidate: candidate, lane: uint16(lane), pathGroupID: pathGroupID, state: ManagedSessionWaiting,
+				}
+			}
 		}
 	}
 	pumped, pumpErr := manager.pump()
@@ -224,7 +255,8 @@ func (manager *SessionManager) completeDial(event SessionManagerEvent) ([]Sessio
 		actions := manager.enterBackoff(slot)
 		if event.Connection != nil {
 			actions = append([]SessionManagerAction{{
-				Kind: SessionActionCloseConnection, Generation: slot.generation, Candidate: slot.candidate, Connection: event.Connection,
+				Kind: SessionActionCloseConnection, Generation: slot.generation, Candidate: slot.candidate,
+				Lane: slot.lane, Connection: event.Connection,
 			}}, actions...)
 		}
 		pumped, pumpErr := manager.pump()
@@ -235,7 +267,7 @@ func (manager *SessionManager) completeDial(event SessionManagerEvent) ([]Sessio
 	slot.state = ManagedSessionAuthenticating
 	return []SessionManagerAction{{
 		Kind: SessionActionStartAuthentication, Generation: slot.generation,
-		Candidate: slot.candidate, Connection: slot.connection,
+		Candidate: slot.candidate, Lane: slot.lane, PathGroupID: slot.pathGroupID, Connection: slot.connection,
 	}}, nil
 }
 
@@ -250,7 +282,7 @@ func (manager *SessionManager) completeAuthentication(event SessionManagerEvent)
 		slot.actualLocal = netip.Addr{}
 		actions := []SessionManagerAction{{
 			Kind: SessionActionCloseConnection, Generation: slot.generation,
-			Candidate: slot.candidate, Connection: connection,
+			Candidate: slot.candidate, Lane: slot.lane, Connection: connection,
 		}}
 		actions = append(actions, manager.enterBackoff(slot)...)
 		pumped, pumpErr := manager.pump()
@@ -260,7 +292,7 @@ func (manager *SessionManager) completeAuthentication(event SessionManagerEvent)
 	slot.failures = 0
 	actions := []SessionManagerAction{{
 		Kind: SessionActionReady, Generation: slot.generation,
-		Candidate: slot.candidate, Connection: slot.connection,
+		Candidate: slot.candidate, Lane: slot.lane, PathGroupID: slot.pathGroupID, Connection: slot.connection,
 	}}
 	pumped, pumpErr := manager.pump()
 	return append(actions, pumped...), pumpErr
@@ -281,13 +313,14 @@ func (manager *SessionManager) connectionLost(generation uint64) ([]SessionManag
 			slot.reconnects++
 		}
 		actions = append(actions, SessionManagerAction{
-			Kind: SessionActionLost, Generation: slot.generation, Candidate: slot.candidate,
+			Kind: SessionActionLost, Generation: slot.generation,
+			Candidate: slot.candidate, Lane: slot.lane, PathGroupID: slot.pathGroupID,
 		})
 	}
 	if connection != nil {
 		actions = append(actions, SessionManagerAction{
 			Kind: SessionActionCloseConnection, Generation: slot.generation,
-			Candidate: slot.candidate, Connection: connection,
+			Candidate: slot.candidate, Lane: slot.lane, Connection: connection,
 		})
 	}
 	actions = append(actions, manager.enterBackoff(slot)...)
@@ -326,7 +359,7 @@ func (manager *SessionManager) enterBackoff(slot *managedSession) []SessionManag
 	slot.state = ManagedSessionBackoff
 	return []SessionManagerAction{{
 		Kind: SessionActionArmBackoff, Generation: slot.generation,
-		Candidate: slot.candidate, After: sessionBackoff(slot.failures),
+		Candidate: slot.candidate, Lane: slot.lane, After: sessionBackoff(slot.failures),
 	}}
 }
 
@@ -363,9 +396,11 @@ func (manager *SessionManager) pump() ([]SessionManagerAction, error) {
 		slot.state = ManagedSessionDialing
 		active++
 		actions = append(actions, SessionManagerAction{
-			Kind:       SessionActionDial,
-			Generation: generation,
-			Candidate:  slot.candidate,
+			Kind:        SessionActionDial,
+			Generation:  generation,
+			Candidate:   slot.candidate,
+			Lane:        slot.lane,
+			PathGroupID: slot.pathGroupID,
 			Options: transport.DialOptions{
 				RemoteEndpoint: manager.config.RemoteEndpoint,
 				LocalEndpoint:  net.JoinHostPort(slot.candidate.LocalAddress.String(), "0"),
@@ -378,27 +413,27 @@ func (manager *SessionManager) pump() ([]SessionManagerAction, error) {
 }
 
 func (manager *SessionManager) removeSlot(slot *managedSession) []SessionManagerAction {
-	delete(manager.slots, slot.candidate)
+	delete(manager.slots, sessionSlotKey{candidate: slot.candidate, lane: slot.lane})
 	var actions []SessionManagerAction
 	if slot.state == ManagedSessionBackoff {
 		actions = append(actions, SessionManagerAction{
-			Kind: SessionActionCancelBackoff, Generation: slot.generation, Candidate: slot.candidate,
+			Kind: SessionActionCancelBackoff, Generation: slot.generation, Candidate: slot.candidate, Lane: slot.lane,
 		})
 	}
 	if slot.state == ManagedSessionDialing {
 		actions = append(actions, SessionManagerAction{
-			Kind: SessionActionCancelDial, Generation: slot.generation, Candidate: slot.candidate,
+			Kind: SessionActionCancelDial, Generation: slot.generation, Candidate: slot.candidate, Lane: slot.lane,
 		})
 	}
 	if slot.state == ManagedSessionReady {
 		actions = append(actions, SessionManagerAction{
-			Kind: SessionActionLost, Generation: slot.generation, Candidate: slot.candidate,
+			Kind: SessionActionLost, Generation: slot.generation, Candidate: slot.candidate, Lane: slot.lane,
 		})
 	}
 	if slot.connection != nil {
 		actions = append(actions, SessionManagerAction{
 			Kind: SessionActionCloseConnection, Generation: slot.generation,
-			Candidate: slot.candidate, Connection: slot.connection,
+			Candidate: slot.candidate, Lane: slot.lane, Connection: slot.connection,
 		})
 	}
 	return actions
@@ -421,7 +456,12 @@ func (manager *SessionManager) sortedSlots() []*managedSession {
 	for _, slot := range manager.slots {
 		slots = append(slots, slot)
 	}
-	sort.Slice(slots, func(i, j int) bool { return candidateLess(slots[i].candidate, slots[j].candidate) })
+	sort.Slice(slots, func(i, j int) bool {
+		if slots[i].candidate != slots[j].candidate {
+			return candidateLess(slots[i].candidate, slots[j].candidate)
+		}
+		return slots[i].lane < slots[j].lane
+	})
 	return slots
 }
 
@@ -496,6 +536,11 @@ type sessionInterfaceKey struct {
 	name  string
 }
 
+type sessionSlotKey struct {
+	candidate networkpath.Candidate
+	lane      uint16
+}
+
 func candidateLess(left, right networkpath.Candidate) bool {
 	if left.InterfaceName != right.InterfaceName {
 		return left.InterfaceName < right.InterfaceName
@@ -511,4 +556,19 @@ func sessionBackoff(failures uint8) time.Duration {
 		return SessionInitialBackoff
 	}
 	return SessionMaximumBackoff
+}
+
+func derivePathGroupID(namespace PathGroupNamespace, candidate networkpath.Candidate) protocol.PathGroupID {
+	mac := hmac.New(sha256.New, namespace[:])
+	_, _ = mac.Write([]byte("via path group v2\x00"))
+	var index [8]byte
+	binary.BigEndian.PutUint64(index[:], uint64(candidate.InterfaceIndex))
+	_, _ = mac.Write(index[:])
+	_, _ = mac.Write([]byte(candidate.InterfaceName))
+	var identifier protocol.PathGroupID
+	copy(identifier[:], mac.Sum(nil))
+	if !protocol.ValidPathGroupID(identifier) {
+		identifier[len(identifier)-1] = 1
+	}
+	return identifier
 }

@@ -16,6 +16,7 @@ Via is a multipath TCP relay for Linux. Applications connect through a local SOC
 ## Features
 
 - Discovers and uses multiple network interfaces, with optional name filters and dynamic interface changes.
+- Can maintain 1 to 64 long-lived TCP lanes per eligible interface, aggregating them without increasing Flow attachments or target TCP connections.
 - Supports adaptive and redundant delivery and can recover existing flows after path failures. Adaptive `fastest` selection uses measured delay, DATA capacity, shared load, and switch hysteresis; `distributed` selection aggregates eligible paths according to measured capacity and load.
 - Optional SOCKS5 username/password authentication; clients authenticate to the server with a PSK.
 - Embedded read-only Web Manager for paths, sessions, flows, traffic, and connection status.

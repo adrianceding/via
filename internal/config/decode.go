@@ -335,7 +335,7 @@ func decodeTransport(node *yaml.Node, client bool) (Transport, error) {
 	path := "transport"
 	allowed := []string{"type", "listen"}
 	if client {
-		allowed = []string{"type", "address"}
+		allowed = []string{"type", "address", "lanes_per_path"}
 	}
 	allowed = append(allowed, "write_buffer_bytes", "output_queue_frames", "output_queue_bytes", "control_reserve_frames", "control_reserve_bytes")
 	fields, err := fieldsOf(node, path, allowed...)
@@ -363,6 +363,12 @@ func decodeTransport(node *yaml.Node, client bool) (Transport, error) {
 	}
 	if err != nil {
 		return Transport{}, err
+	}
+	if fields["lanes_per_path"] != nil {
+		result.LanesPerPath, err = uintValue(fields["lanes_per_path"], path+".lanes_per_path")
+		if err != nil {
+			return Transport{}, err
+		}
 	}
 	for _, field := range []struct {
 		name   string
@@ -599,7 +605,7 @@ func decodePrincipals(node *yaml.Node) ([]Principal, error) {
 }
 
 func decodeClientLimits(node *yaml.Node, limits *ClientLimits) error {
-	fields, err := fieldsOf(node, "limits", "flows", "opening_flows", "recovering_flows", "sessions", "auth_in_progress", "socks_connections", "socks_handshakes", "socks_per_source", "flow_send_window_bytes", "flow_receive_window_bytes", "memory_budget_bytes")
+	fields, err := fieldsOf(node, "limits", "flows", "opening_flows", "recovering_flows", "auth_in_progress", "socks_connections", "socks_handshakes", "socks_per_source", "flow_send_window_bytes", "flow_receive_window_bytes", "memory_budget_bytes")
 	if err != nil {
 		return err
 	}
@@ -608,7 +614,7 @@ func decodeClientLimits(node *yaml.Node, limits *ClientLimits) error {
 		dst  *uint64
 	}{
 		{"flows", &limits.Flows}, {"opening_flows", &limits.OpeningFlows}, {"recovering_flows", &limits.RecoveringFlows},
-		{"sessions", &limits.Sessions}, {"auth_in_progress", &limits.AuthInProgress}, {"socks_connections", &limits.SOCKSConnections},
+		{"auth_in_progress", &limits.AuthInProgress}, {"socks_connections", &limits.SOCKSConnections},
 		{"socks_handshakes", &limits.SOCKSHandshakes}, {"socks_per_source", &limits.SOCKSPerSource},
 		{"flow_send_window_bytes", &limits.FlowSendWindowBytes}, {"flow_receive_window_bytes", &limits.FlowReceiveWindowBytes},
 		{"memory_budget_bytes", &limits.MemoryBudgetBytes},
@@ -617,7 +623,7 @@ func decodeClientLimits(node *yaml.Node, limits *ClientLimits) error {
 }
 
 func decodeServerLimits(node *yaml.Node, limits *ServerLimits) error {
-	fields, err := fieldsOf(node, "limits", "flows", "per_principal_flows", "opening_flows", "recovering_flows", "sessions", "sessions_per_principal", "auth_in_progress", "target_dials", "tombstones", "tombstones_per_principal", "rate_limit_keys", "flow_send_window_bytes", "flow_receive_window_bytes", "memory_budget_bytes")
+	fields, err := fieldsOf(node, "limits", "flows", "per_principal_flows", "opening_flows", "recovering_flows", "transport_connections", "transport_connections_per_principal", "transport_auth_in_progress", "target_dials", "tombstones", "tombstones_per_principal", "rate_limit_keys", "flow_send_window_bytes", "flow_receive_window_bytes", "memory_budget_bytes")
 	if err != nil {
 		return err
 	}
@@ -626,8 +632,9 @@ func decodeServerLimits(node *yaml.Node, limits *ServerLimits) error {
 		dst  *uint64
 	}{
 		{"flows", &limits.Flows}, {"per_principal_flows", &limits.PerPrincipalFlows}, {"opening_flows", &limits.OpeningFlows},
-		{"recovering_flows", &limits.RecoveringFlows}, {"sessions", &limits.Sessions}, {"sessions_per_principal", &limits.SessionsPerPrincipal},
-		{"auth_in_progress", &limits.AuthInProgress}, {"target_dials", &limits.TargetDials}, {"tombstones", &limits.Tombstones},
+		{"recovering_flows", &limits.RecoveringFlows}, {"transport_connections", &limits.Sessions},
+		{"transport_connections_per_principal", &limits.SessionsPerPrincipal},
+		{"transport_auth_in_progress", &limits.AuthInProgress}, {"target_dials", &limits.TargetDials}, {"tombstones", &limits.Tombstones},
 		{"tombstones_per_principal", &limits.TombstonesPerPrincipal}, {"rate_limit_keys", &limits.RateLimitKeys},
 		{"flow_send_window_bytes", &limits.FlowSendWindowBytes}, {"flow_receive_window_bytes", &limits.FlowReceiveWindowBytes},
 		{"memory_budget_bytes", &limits.MemoryBudgetBytes},

@@ -8,7 +8,7 @@ import (
 )
 
 const (
-	Version        = 1
+	Version        = 2
 	HeaderSize     = 8
 	MaxPayloadSize = 65_536
 	MaxFrameSize   = HeaderSize + MaxPayloadSize
@@ -188,7 +188,7 @@ func validatePayloadLength(frameType Type, length int) error {
 	case TypeAuthChallenge:
 		valid = length == 32
 	case TypeAuthProof:
-		valid = length >= 66 && length <= 129
+		valid = length >= 82 && length <= 145
 	case TypeAuthResult:
 		valid = length == 1
 	case TypeProbe, TypeProbeACK:

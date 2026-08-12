@@ -487,6 +487,57 @@ func TestServerFlowSemanticFailureDoesNotCloseSharedSession(t *testing.T) {
 	}
 }
 
+func TestServerDaemonKeepsPathGroupAttachmentUntilLastLaneCloses(t *testing.T) {
+	harness := newServerRuntimeHarness(t)
+	defer harness.close()
+	if err := harness.daemon.handleJoin(harness.session, protocol.Join{
+		FlowID: harness.flowID, Capability: harness.capability,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	attachment, ok := harness.session.attachment(harness.flowID)
+	if !ok || attachment.SessionGeneration != harness.session.generation {
+		t.Fatalf("first lane attachment = %#v, %t", attachment, ok)
+	}
+	secondConnection := newRecordingTransportConnection(t)
+	second, err := newWireSession(harness.daemon.runtimeCtx, 2, secondConnection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.close()
+	second.principal = harness.session.principal
+	second.pathGroupID = harness.session.pathGroupID
+	second.status = harness.daemon.statusObserver
+	if !harness.daemon.addSession(second) {
+		t.Fatal("could not add second path group lane")
+	}
+	if got, published := second.attachment(harness.flowID); !published || got != attachment {
+		t.Fatalf("second lane attachment = %#v, %t", got, published)
+	}
+	published := func() bool {
+		harness.instance.mu.Lock()
+		defer harness.instance.mu.Unlock()
+		for _, current := range harness.instance.relay.Snapshot().Flow.Lifecycle.Published {
+			if current == attachment {
+				return true
+			}
+		}
+		return false
+	}
+
+	harness.daemon.removeSession(harness.session)
+	if !published() {
+		t.Fatal("partial lane loss withdrew path group attachment")
+	}
+	if harness.daemon.session(attachment.SessionGeneration) != second {
+		t.Fatal("remaining server lane did not become path group representative")
+	}
+	harness.daemon.removeSession(second)
+	if published() {
+		t.Fatal("last lane loss kept path group attachment published")
+	}
+}
+
 func TestServerFlowKeepsOneTimerPerKind(t *testing.T) {
 	harness := newServerRuntimeHarness(t)
 	defer harness.close()
@@ -823,8 +874,10 @@ func newServerRuntimeHarness(t *testing.T) *serverRuntimeHarness {
 		runtimeCtx: runtimeCtx, cancelRuntime: cancelRuntime,
 		dialCtx: dialCtx, cancelDials: cancelDials,
 		registry: registry, limiter: limiter, principalKeys: map[string]auth.Key{"client-01": {1}},
-		sessions: make(map[uint64]*wireSession), principalSessions: make(map[string]int),
-		flows: make(map[servercore.FlowKey]*serverFlow), waiters: make(map[servercore.FlowKey]*flowWaiter),
+		sessions: make(map[uint64]*wireSession), pathGroups: make(map[serverPathGroupKey]*wirePathGroup),
+		pathGroupGenerations: make(map[uint64]*wirePathGroup), laneGroups: make(map[uint64]*wirePathGroup),
+		principalSessions: make(map[string]int),
+		flows:             make(map[servercore.FlowKey]*serverFlow), waiters: make(map[servercore.FlowKey]*flowWaiter),
 		flowChanged:      make(chan struct{}, 1),
 		workerLimit:      (servercore.MaxRelayPendingSends + 8) * 8,
 		openWorkerLimit:  8,
@@ -874,6 +927,7 @@ func newServerRuntimeHarness(t *testing.T) *serverRuntimeHarness {
 		t.Fatal(err)
 	}
 	session.principal = "client-01"
+	session.pathGroupID = protocol.PathGroupID{1}
 	session.status = statusObserver
 	if !daemon.addSession(session) {
 		t.Fatal("could not install server session")

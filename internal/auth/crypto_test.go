@@ -104,16 +104,20 @@ func TestComputeProofFixedVector(t *testing.T) {
 		challenge[index] = byte(index)
 		nonce[index] = byte(0x20 + index)
 	}
-	proof, err := ComputeProof(key, "edge-1", challenge, nonce)
+	pathGroupID := protocol.PathGroupID{1}
+	proof, err := ComputeProof(key, "edge-1", pathGroupID, challenge, nonce)
 	if err != nil {
 		t.Fatalf("ComputeProof() error = %v", err)
 	}
-	want, _ := hex.DecodeString("598a309c54b5a62e3cc2e85cc34a5d306fad565fc089a29af90ed51d74473778")
+	want, _ := hex.DecodeString("f8819e1d97c5ac0e12d85ad1428d8842fbb6d4b5d70265bbd1a9d611de00faa0")
 	if !bytes.Equal(proof[:], want) {
 		t.Fatalf("proof = %x, want %x", proof, want)
 	}
-	if _, err := ComputeProof(key, "bad principal", challenge, nonce); !errors.Is(err, ErrInvalidPrincipal) {
+	if _, err := ComputeProof(key, "bad principal", pathGroupID, challenge, nonce); !errors.Is(err, ErrInvalidPrincipal) {
 		t.Fatalf("invalid principal error = %v", err)
+	}
+	if _, err := ComputeProof(key, "edge-1", protocol.PathGroupID{}, challenge, nonce); !errors.Is(err, ErrInvalidPrincipal) {
+		t.Fatalf("invalid path group error = %v", err)
 	}
 }
 
@@ -197,22 +201,28 @@ func TestVerifierKnownUnknownAndWrongProof(t *testing.T) {
 
 	challenge := [ChallengeSize]byte{3}
 	nonce := [NonceSize]byte{4}
-	validProof, err := ComputeProof(knownKey, "edge-1", challenge, nonce)
+	pathGroupID := protocol.PathGroupID{5}
+	validProof, err := ComputeProof(knownKey, "edge-1", pathGroupID, challenge, nonce)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !verifier.Verify(protocol.AuthProof{PrincipalID: "edge-1", ClientNonce: nonce, Proof: validProof}, challenge) {
+	if !verifier.Verify(protocol.AuthProof{PrincipalID: "edge-1", PathGroupID: pathGroupID, ClientNonce: nonce, Proof: validProof}, challenge) {
 		t.Fatal("known valid proof rejected")
 	}
+	changedPathGroupID := pathGroupID
+	changedPathGroupID[0]++
+	if verifier.Verify(protocol.AuthProof{PrincipalID: "edge-1", PathGroupID: changedPathGroupID, ClientNonce: nonce, Proof: validProof}, challenge) {
+		t.Fatal("proof accepted for a different path group")
+	}
 	validProof[0] ^= 1
-	if verifier.Verify(protocol.AuthProof{PrincipalID: "edge-1", ClientNonce: nonce, Proof: validProof}, challenge) {
+	if verifier.Verify(protocol.AuthProof{PrincipalID: "edge-1", PathGroupID: pathGroupID, ClientNonce: nonce, Proof: validProof}, challenge) {
 		t.Fatal("wrong proof accepted")
 	}
-	unknownProof, err := ComputeProof(dummyKey, "edge-2", challenge, nonce)
+	unknownProof, err := ComputeProof(dummyKey, "edge-2", pathGroupID, challenge, nonce)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if verifier.Verify(protocol.AuthProof{PrincipalID: "edge-2", ClientNonce: nonce, Proof: unknownProof}, challenge) {
+	if verifier.Verify(protocol.AuthProof{PrincipalID: "edge-2", PathGroupID: pathGroupID, ClientNonce: nonce, Proof: unknownProof}, challenge) {
 		t.Fatal("unknown principal accepted with dummy proof")
 	}
 	if (*Verifier)(nil).Verify(protocol.AuthProof{PrincipalID: "edge-1"}, challenge) {

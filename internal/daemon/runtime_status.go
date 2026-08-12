@@ -90,6 +90,8 @@ type runtimeSessionObservation struct {
 	remoteEndpoint string
 	connectionID   string
 	principalID    string
+	pathGroupID    protocol.PathGroupID
+	lane           uint16
 	state          statusapi.SessionState
 	reason         statusapi.TransitionReason
 	reconnects     uint64
@@ -258,7 +260,7 @@ func (observer *runtimeStatus) upsertSessionObservation(observation runtimeSessi
 		stateSince = observer.now()
 	}
 	entry := statusapi.Session{
-		IDHash: id, ConnectionID: previous.ConnectionID,
+		IDHash: id, ConnectionID: previous.ConnectionID, PathGroupID: previous.PathGroupID, Lane: previous.Lane,
 		Transport: observation.transportName, Interface: observation.interfaceName,
 		LocalAddress: observation.localAddress.Unmap().String(), LocalEndpoint: previous.LocalEndpoint,
 		RemoteEndpoint: previous.RemoteEndpoint, PrincipalHash: previous.PrincipalHash,
@@ -276,6 +278,12 @@ func (observer *runtimeStatus) upsertSessionObservation(observation runtimeSessi
 	}
 	if observation.principalID != "" {
 		entry.PrincipalHash = observer.hasher.Principal(observation.principalID)
+	}
+	if protocol.ValidPathGroupID(observation.pathGroupID) {
+		entry.PathGroupID = observer.hasher.PathGroupID(observation.pathGroupID)
+	}
+	if observation.lane != 0 {
+		entry.Lane = observation.lane
 	}
 	if observation.localEndpoint != "" {
 		entry.LocalEndpoint = observation.localEndpoint
@@ -503,6 +511,7 @@ func (observer *runtimeStatus) syncClientSessions(transportName, principalID str
 		observation := runtimeSessionObservation{
 			generation: session.Generation, transportName: transportName, interfaceName: session.Candidate.InterfaceName,
 			localAddress: local, localEndpoint: session.LocalEndpoint, remoteEndpoint: session.RemoteEndpoint,
+			pathGroupID: session.PathGroupID, lane: session.Lane + 1,
 			state: state, reason: reason, reconnects: session.Reconnects,
 		}
 		if wire := authenticated[session.Generation]; wire != nil && wire.connectionID != (auth.CorrelationID{}) {

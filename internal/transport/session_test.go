@@ -20,6 +20,9 @@ func TestSessionsCompleteAuthenticationWithStrictReadBarriers(t *testing.T) {
 	if clientSnapshot.PrincipalID != "client-01" || serverSnapshot.PrincipalID != "client-01" {
 		t.Fatalf("principals = %q / %q", clientSnapshot.PrincipalID, serverSnapshot.PrincipalID)
 	}
+	if clientSnapshot.PathGroupID != testSessionPathGroupID() || serverSnapshot.PathGroupID != testSessionPathGroupID() {
+		t.Fatalf("path groups = %x / %x", clientSnapshot.PathGroupID, serverSnapshot.PathGroupID)
+	}
 	if !clientSnapshot.ReadAllowed || !serverSnapshot.ReadAllowed {
 		t.Fatalf("ready read barriers = %t / %t", clientSnapshot.ReadAllowed, serverSnapshot.ReadAllowed)
 	}
@@ -34,7 +37,7 @@ func TestSessionRejectsFrameBeforeAuthenticationSendCompletes(t *testing.T) {
 	if requireSessionAction(t, actions, SessionActionSendFrame).Generation == 0 {
 		t.Fatal("challenge send has no generation")
 	}
-	encoded, err := protocol.EncodeMessage(protocol.AuthProof{PrincipalID: "client-01"})
+	encoded, err := protocol.EncodeMessage(protocol.AuthProof{PrincipalID: "client-01", PathGroupID: testSessionPathGroupID()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -388,7 +391,7 @@ func authenticateSessions(t *testing.T) (*Session, *Session) {
 
 func newClientSessionForTest(t *testing.T) *Session {
 	t.Helper()
-	machine, err := auth.NewClientMachine("client-01", auth.Key{1}, bytes.NewReader(make([]byte, auth.NonceSize)))
+	machine, err := auth.NewClientMachine("client-01", testSessionPathGroupID(), auth.Key{1}, bytes.NewReader(make([]byte, auth.NonceSize)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -397,6 +400,10 @@ func newClientSessionForTest(t *testing.T) *Session {
 		t.Fatal(err)
 	}
 	return session
+}
+
+func testSessionPathGroupID() protocol.PathGroupID {
+	return protocol.PathGroupID{1, 2, 3, 4}
 }
 
 func newServerSessionForTest(t *testing.T) *Session {

@@ -118,14 +118,15 @@ func (generator *ChallengeGenerator) Next() ([ChallengeSize]byte, error) {
 	return challenge, nil
 }
 
-func ComputeProof(key Key, principalID string, challenge [ChallengeSize]byte, nonce [NonceSize]byte) ([32]byte, error) {
-	if !protocol.ValidPrincipalID(principalID) {
+func ComputeProof(key Key, principalID string, pathGroupID protocol.PathGroupID, challenge [ChallengeSize]byte, nonce [NonceSize]byte) ([32]byte, error) {
+	if !protocol.ValidPrincipalID(principalID) || !protocol.ValidPathGroupID(pathGroupID) {
 		return [32]byte{}, ErrInvalidPrincipal
 	}
 	mac := hmac.New(sha256.New, key[:])
-	_, _ = mac.Write([]byte("via relay auth v1\x00"))
+	_, _ = mac.Write([]byte("via relay auth v2\x00"))
 	_, _ = mac.Write([]byte{protocol.Version, byte(len(principalID))})
 	_, _ = mac.Write([]byte(principalID))
+	_, _ = mac.Write(pathGroupID[:])
 	_, _ = mac.Write(challenge[:])
 	_, _ = mac.Write(nonce[:])
 	var proof [32]byte
@@ -154,7 +155,7 @@ func (verifier *Verifier) Verify(message protocol.AuthProof, challenge [Challeng
 	if !known {
 		key = verifier.dummy
 	}
-	expected, err := ComputeProof(key, message.PrincipalID, challenge, message.ClientNonce)
+	expected, err := ComputeProof(key, message.PrincipalID, message.PathGroupID, challenge, message.ClientNonce)
 	if err != nil {
 		return false
 	}

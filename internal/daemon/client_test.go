@@ -10,6 +10,7 @@ import (
 	"time"
 
 	clientcore "github.com/adrianceding/via/internal/client"
+	"github.com/adrianceding/via/internal/config"
 	"github.com/adrianceding/via/internal/flow"
 	pathcore "github.com/adrianceding/via/internal/path"
 	"github.com/adrianceding/via/internal/policy"
@@ -203,6 +204,7 @@ func TestClientDaemonClosesStaleAuthenticationResult(t *testing.T) {
 		AuthInProgress:  1,
 		RemoteEndpoint:  "127.0.0.1:9443",
 		QueueLimits:     transport.V1QueueLimits(),
+		PathNamespace:   clientcore.PathGroupNamespace{1},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -282,6 +284,53 @@ func TestClientDaemonNotifiesFlowBeforeIdentityIsGenerated(t *testing.T) {
 	lost, ok := (<-instance.events).(clientFlowSessionLost)
 	if !ok || lost.generation != 11 {
 		t.Fatalf("lost notification = %#v", lost)
+	}
+}
+
+func TestClientDaemonAggregatesPathGroupLaneLifecycle(t *testing.T) {
+	pathGroupID := protocol.PathGroupID{1}
+	daemon := &clientDaemon{
+		configuration: config.Client{PrincipalID: "client-01"},
+		sessions:      make(map[uint64]*wireSession), pathGroups: make(map[protocol.PathGroupID]*wirePathGroup),
+		pathGroupGenerations: make(map[uint64]*wirePathGroup), laneGroups: make(map[uint64]*wirePathGroup),
+	}
+	newLane := func(generation uint64) *wireSession {
+		session, err := newWireSession(context.Background(), generation, &clientTestTransportConnection{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		session.principal = "client-01"
+		session.pathGroupID = pathGroupID
+		return session
+	}
+	first := newLane(11)
+	second := newLane(12)
+	pathGeneration, ready, err := daemon.addReadySession(first)
+	if err != nil || !ready || pathGeneration != 11 {
+		t.Fatalf("first lane = generation %d, ready %t, %v", pathGeneration, ready, err)
+	}
+	if secondGeneration, secondReady, err := daemon.addReadySession(second); err != nil || secondReady || secondGeneration != pathGeneration {
+		t.Fatalf("second lane = generation %d, ready %t, %v", secondGeneration, secondReady, err)
+	}
+	flowID := protocol.FlowID{2}
+	attachment := flow.AttachmentKey{SessionGeneration: pathGeneration, AttachmentGeneration: 3}
+	if err := first.reserve(flowID, attachment); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.publish(flowID, attachment); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := second.attachment(flowID); !ok || got != attachment {
+		t.Fatalf("second lane attachment = %#v, %t", got, ok)
+	}
+	if removed, generation, lost := daemon.removeReadySession(first.generation); removed != first || generation != pathGeneration || lost {
+		t.Fatalf("first removal = %#v, generation %d, lost %t", removed, generation, lost)
+	}
+	if daemon.session(pathGeneration) != second {
+		t.Fatal("remaining lane did not become path group representative")
+	}
+	if removed, generation, lost := daemon.removeReadySession(second.generation); removed != second || generation != pathGeneration || !lost {
+		t.Fatalf("last removal = %#v, generation %d, lost %t", removed, generation, lost)
 	}
 }
 
@@ -374,12 +423,16 @@ func TestClientProbeTimeoutPenaltyAndRecoveryReachPublishedFlow(t *testing.T) {
 		t.Fatal(err)
 	}
 	session.attachments[flowID] = attachment
-	daemon := &clientDaemon{flows: map[protocol.FlowID]*clientFlow{flowID: instance}}
+	daemon := &clientDaemon{
+		flows:                map[protocol.FlowID]*clientFlow{flowID: instance},
+		sessions:             map[uint64]*wireSession{session.generation: session},
+		pathGroupGenerations: make(map[uint64]*wirePathGroup), laneGroups: make(map[uint64]*wirePathGroup),
+	}
 
 	session.runtime.setStallPenalty(probeTimeout)
 	daemon.notifyProbeStallPenalty(session, probeTimeout)
-	stalledQuality := (<-instance.events).(clientFlowSessionQuality)
-	penalty := (<-instance.events).(clientcore.ApplicationRelayEvent)
+	stalledQuality := receiveClientFlowEvent[clientFlowSessionQuality](t, instance.events)
+	penalty := receiveClientFlowEvent[clientcore.ApplicationRelayEvent](t, instance.events)
 	if stalledQuality.generation != session.generation || stalledQuality.stall != probeTimeout {
 		t.Fatalf("stalled session quality = %#v", stalledQuality)
 	}
@@ -389,14 +442,30 @@ func TestClientProbeTimeoutPenaltyAndRecoveryReachPublishedFlow(t *testing.T) {
 	session.runtime.observeProbe(25 * time.Millisecond)
 	session.runtime.setStallPenalty(0)
 	daemon.notifyProbeQuality(session, 25*time.Millisecond)
-	recoveredQuality := (<-instance.events).(clientFlowSessionQuality)
-	clear := (<-instance.events).(clientcore.ApplicationRelayEvent)
+	recoveredQuality := receiveClientFlowEvent[clientFlowSessionQuality](t, instance.events)
+	clear := receiveClientFlowEvent[clientcore.ApplicationRelayEvent](t, instance.events)
 	if recoveredQuality.generation != session.generation || recoveredQuality.stall != 0 {
 		t.Fatalf("recovered session quality = %#v", recoveredQuality)
 	}
 	if clear.Kind != clientcore.ApplicationRelaySetSessionQuality || clear.Attachment != attachment ||
 		clear.Quality.SRTT != 25*time.Millisecond || clear.Quality.StallPenalty != 0 {
 		t.Fatalf("probe quality event = %#v", clear)
+	}
+}
+
+func receiveClientFlowEvent[T any](t *testing.T, events <-chan any) T {
+	t.Helper()
+	select {
+	case raw := <-events:
+		event, ok := raw.(T)
+		if !ok {
+			t.Fatalf("client flow event type = %T", raw)
+		}
+		return event
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for client flow event")
+		var zero T
+		return zero
 	}
 }
 

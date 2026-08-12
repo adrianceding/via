@@ -31,6 +31,7 @@ export function sessionMatchesFilter(session, query, onlyAnomalies) {
   if (!query) return true;
   return includesQuery([
     session.connection_id,
+    session.path_group_id,
     session.id,
     session.interface,
     session.principal,

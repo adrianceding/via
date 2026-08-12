@@ -96,6 +96,8 @@ export default {
     clientSource: '网卡 / 连接 ID',
     serverSource: '主体 / 连接 ID',
     session: '会话',
+    pathGroup: '路径组',
+    lane: 'Lane {lane}',
     endpoints: '本地 / 对端',
     state: '状态',
     smoothedRtt: '平滑时延',

@@ -387,7 +387,7 @@ func gate8PublishClientJoin(
 
 func gate8ReadyClientSession(t *testing.T, generation uint64) *transport.Session {
 	t.Helper()
-	machine, err := auth.NewClientMachine("client-01", auth.Key{1}, bytes.NewReader(make([]byte, auth.NonceSize)))
+	machine, err := auth.NewClientMachine("client-01", protocol.PathGroupID{1}, auth.Key{1}, bytes.NewReader(make([]byte, auth.NonceSize)))
 	if err != nil {
 		t.Fatal(err)
 	}

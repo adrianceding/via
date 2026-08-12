@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	networkpath "github.com/adrianceding/via/internal/path"
+	"github.com/adrianceding/via/internal/protocol"
 	"github.com/adrianceding/via/internal/transport"
 )
 
@@ -35,6 +36,27 @@ func TestSessionManagerSelectsDistinctInterfacesAndBindsAddresses(t *testing.T) 
 	if dials[0].Options.RemoteEndpoint != "127.0.0.1:9443" || dials[0].Options.QueueLimits != transport.V1QueueLimits() {
 		t.Fatalf("dial options = %#v", dials[0].Options)
 	}
+	if dials[0].PathGroupID == (protocol.PathGroupID{}) || dials[0].PathGroupID == dials[1].PathGroupID {
+		t.Fatalf("path group IDs = %x / %x", dials[0].PathGroupID, dials[1].PathGroupID)
+	}
+}
+
+func TestPathGroupIdentityIsStablePerInterfaceAndScopedPerProcess(t *testing.T) {
+	firstAddress := clientCandidate(7, "eth0", "192.0.2.10")
+	secondAddress := clientCandidate(7, "eth0", "192.0.2.11")
+	otherInterface := clientCandidate(8, "wlan0", "192.0.2.10")
+	first := derivePathGroupID(testPathNamespace(), firstAddress)
+	if first == (protocol.PathGroupID{}) || first != derivePathGroupID(testPathNamespace(), secondAddress) {
+		t.Fatalf("same interface path groups differ: %x / %x", first, derivePathGroupID(testPathNamespace(), secondAddress))
+	}
+	if first == derivePathGroupID(testPathNamespace(), otherInterface) {
+		t.Fatal("different interfaces share a path group")
+	}
+	otherNamespace := testPathNamespace()
+	otherNamespace[0]++
+	if first == derivePathGroupID(otherNamespace, firstAddress) {
+		t.Fatal("different process namespaces share a path group")
+	}
 }
 
 func TestSessionManagerUsesEveryEligibleInterfaceByDefault(t *testing.T) {
@@ -57,6 +79,80 @@ func TestSessionManagerUsesEveryEligibleInterfaceByDefault(t *testing.T) {
 			dial.Candidate.LocalAddress != netip.MustParseAddr(fmt.Sprintf("192.0.2.%d", index+1)) {
 			t.Fatalf("dial %d = %#v", index, dial.Candidate)
 		}
+	}
+}
+
+func TestSessionManagerCreatesConfiguredLanesPerPath(t *testing.T) {
+	manager, err := NewSessionManager(SessionManagerConfig{
+		DesiredSessions: 4, LanesPerPath: 4, AuthInProgress: 4,
+		RemoteEndpoint: "127.0.0.1:9443", QueueLimits: transport.V1QueueLimits(), PathNamespace: testPathNamespace(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate := clientCandidate(1, "eth0", "192.0.2.10")
+	dials := sessionActions(mustChangeClientPaths(t, manager, candidate), SessionActionDial)
+	if len(dials) != 4 {
+		t.Fatalf("dial count = %d, want 4: %#v", len(dials), dials)
+	}
+	seen := make(map[uint16]struct{}, 4)
+	for _, dial := range dials {
+		if dial.Candidate != candidate || dial.PathGroupID != dials[0].PathGroupID {
+			t.Fatalf("lane changed path identity: %#v", dial)
+		}
+		seen[dial.Lane] = struct{}{}
+	}
+	if len(seen) != 4 {
+		t.Fatalf("lane indices = %#v", seen)
+	}
+}
+
+func TestSessionManagerAllowsMaximumLanesPerPath(t *testing.T) {
+	manager, err := NewSessionManager(SessionManagerConfig{
+		DesiredSessions: 1, LanesPerPath: MaxLanesPerPath, AuthInProgress: MaxLanesPerPath,
+		RemoteEndpoint: "127.0.0.1:9443", QueueLimits: transport.V1QueueLimits(), PathNamespace: testPathNamespace(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dials := sessionActions(mustChangeClientPaths(t, manager, clientCandidate(1, "eth0", "192.0.2.10")), SessionActionDial); len(dials) != MaxLanesPerPath {
+		t.Fatalf("dial count = %d, want %d", len(dials), MaxLanesPerPath)
+	}
+}
+
+func TestSessionManagerRecoversOneLaneWithoutChangingOtherLanes(t *testing.T) {
+	manager, err := NewSessionManager(SessionManagerConfig{
+		DesiredSessions: 1, LanesPerPath: 4, AuthInProgress: 4,
+		RemoteEndpoint: "127.0.0.1:9443", QueueLimits: transport.V1QueueLimits(), PathNamespace: testPathNamespace(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dials := sessionActions(mustChangeClientPaths(t, manager, clientCandidate(1, "eth0", "192.0.2.10")), SessionActionDial)
+	for _, dial := range dials {
+		connection := newFakeClientConnection()
+		if _, err := manager.Handle(SessionManagerEvent{Kind: SessionDialCompleted, Generation: dial.Generation, Connection: connection}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := manager.Handle(SessionManagerEvent{Kind: SessionAuthenticationCompleted, Generation: dial.Generation, Succeeded: true}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	actions, err := manager.Handle(SessionManagerEvent{Kind: SessionConnectionLost, Generation: dials[1].Generation})
+	if err != nil || len(sessionActions(actions, SessionActionLost)) != 1 || len(sessionActions(actions, SessionActionArmBackoff)) != 1 {
+		t.Fatalf("lane loss actions = %#v, %v", actions, err)
+	}
+	ready, backoff := 0, 0
+	for _, session := range manager.Snapshot().Sessions {
+		switch session.State {
+		case ManagedSessionReady:
+			ready++
+		case ManagedSessionBackoff:
+			backoff++
+		}
+	}
+	if ready != 3 || backoff != 1 {
+		t.Fatalf("lane states: ready=%d backoff=%d", ready, backoff)
 	}
 }
 
@@ -233,10 +329,12 @@ func TestSessionManagerShutdownIsIdempotentAndClosesLateResults(t *testing.T) {
 func TestSessionManagerValidatesLimitsCandidatesAndExhaustion(t *testing.T) {
 	valid := SessionManagerConfig{
 		DesiredSessions: 2, AuthInProgress: 2, RemoteEndpoint: "127.0.0.1:9443", QueueLimits: transport.V1QueueLimits(),
+		PathNamespace: testPathNamespace(),
 	}
 	invalid := []SessionManagerConfig{
 		{},
 		withSessionConfig(valid, func(config *SessionManagerConfig) { config.DesiredSessions = MaxSessions + 1 }),
+		withSessionConfig(valid, func(config *SessionManagerConfig) { config.LanesPerPath = MaxLanesPerPath + 1 }),
 		withSessionConfig(valid, func(config *SessionManagerConfig) { config.AuthInProgress = 3 }),
 		withSessionConfig(valid, func(config *SessionManagerConfig) { config.RemoteEndpoint = "" }),
 		withSessionConfig(valid, func(config *SessionManagerConfig) { config.QueueLimits.MaxFrames = 0 }),
@@ -291,12 +389,16 @@ func newSessionManagerForTest(t *testing.T, desired, authenticating int) *Sessio
 	t.Helper()
 	manager, err := NewSessionManager(SessionManagerConfig{
 		DesiredSessions: desired, AuthInProgress: authenticating,
-		RemoteEndpoint: "127.0.0.1:9443", QueueLimits: transport.V1QueueLimits(),
+		RemoteEndpoint: "127.0.0.1:9443", QueueLimits: transport.V1QueueLimits(), PathNamespace: testPathNamespace(),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	return manager
+}
+
+func testPathNamespace() PathGroupNamespace {
+	return PathGroupNamespace{1, 2, 3, 4}
 }
 
 func clientCandidate(index int, name, address string) networkpath.Candidate {

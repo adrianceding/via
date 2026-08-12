@@ -17,6 +17,7 @@ import (
 	"github.com/adrianceding/via/internal/config"
 	"github.com/adrianceding/via/internal/flow"
 	pathcore "github.com/adrianceding/via/internal/path"
+	"github.com/adrianceding/via/internal/policy"
 	"github.com/adrianceding/via/internal/protocol"
 	"github.com/adrianceding/via/internal/socks5"
 	statusapi "github.com/adrianceding/via/internal/status"
@@ -39,11 +40,14 @@ type clientDaemon struct {
 	sessionManager *clientcore.SessionManager
 	poolEvents     chan poolEvent
 
-	sessionsMu sync.RWMutex
-	sessions   map[uint64]*wireSession
-	pending    map[uint64]*wireSession
-	dialCancel map[uint64]context.CancelFunc
-	backoffs   map[uint64]*time.Timer
+	sessionsMu           sync.RWMutex
+	sessions             map[uint64]*wireSession
+	pathGroups           map[protocol.PathGroupID]*wirePathGroup
+	pathGroupGenerations map[uint64]*wirePathGroup
+	laneGroups           map[uint64]*wirePathGroup
+	pending              map[uint64]*wireSession
+	dialCancel           map[uint64]context.CancelFunc
+	backoffs             map[uint64]*time.Timer
 
 	flowsMu sync.RWMutex
 	flows   map[protocol.FlowID]*clientFlow
@@ -105,9 +109,14 @@ func newClientDaemon(configuration config.Client) (*clientDaemon, error) {
 		MaxFrames: uint32(configuration.Transport.OutputQueueFrames), MaxBytes: configuration.Transport.OutputQueueBytes,
 		ReservedControlFrames: uint32(configuration.Transport.ControlReserveFrames), ReservedControlBytes: configuration.Transport.ControlReserveBytes,
 	}
+	var pathNamespace clientcore.PathGroupNamespace
+	if _, err := rand.Read(pathNamespace[:]); err != nil {
+		return nil, err
+	}
 	sessionManager, err := clientcore.NewSessionManager(clientcore.SessionManagerConfig{
-		DesiredSessions: int(configuration.Limits.Sessions), AuthInProgress: int(configuration.Limits.AuthInProgress),
-		RemoteEndpoint: configuration.Transport.Address, QueueLimits: queueLimits,
+		DesiredSessions: clientcore.MaxSessions, LanesPerPath: int(configuration.Transport.LanesPerPath),
+		AuthInProgress: int(configuration.Limits.AuthInProgress),
+		RemoteEndpoint: configuration.Transport.Address, QueueLimits: queueLimits, PathNamespace: pathNamespace,
 	})
 	if err != nil {
 		return nil, err
@@ -140,7 +149,10 @@ func newClientDaemon(configuration config.Client) (*clientDaemon, error) {
 		configuration: configuration, runtimeCtx: runtimeCtx, cancelRuntime: cancelRuntime,
 		factory: factory, socksListener: socksListener, pathManager: pathManager, sessionManager: sessionManager,
 		poolEvents: make(chan poolEvent, pathcore.MaxEventsPerRefresh), sessions: make(map[uint64]*wireSession),
-		pending: make(map[uint64]*wireSession), dialCancel: make(map[uint64]context.CancelFunc), backoffs: make(map[uint64]*time.Timer),
+		pathGroups:           make(map[protocol.PathGroupID]*wirePathGroup, clientcore.MaxSessions),
+		pathGroupGenerations: make(map[uint64]*wirePathGroup, clientcore.MaxSessions),
+		laneGroups:           make(map[uint64]*wirePathGroup, int(configuration.Limits.Sessions)),
+		pending:              make(map[uint64]*wireSession), dialCancel: make(map[uint64]context.CancelFunc), backoffs: make(map[uint64]*time.Timer),
 		flows:            make(map[protocol.FlowID]*clientFlow),
 		actors:           make(map[*clientFlow]struct{}, int(configuration.Limits.Flows)),
 		socksSlots:       make(chan struct{}, int(configuration.Limits.SOCKSConnections)),
@@ -181,6 +193,59 @@ func newClientDaemon(configuration config.Client) (*clientDaemon, error) {
 	}
 	cleanup = false
 	return daemon, nil
+}
+
+func (daemon *clientDaemon) addReadySession(session *wireSession) (uint64, bool, error) {
+	if daemon == nil || session == nil || session.generation == 0 || session.principal != daemon.configuration.PrincipalID ||
+		!protocol.ValidPathGroupID(session.pathGroupID) {
+		return 0, false, ErrWireProtocol
+	}
+	daemon.sessionsMu.Lock()
+	defer daemon.sessionsMu.Unlock()
+	if daemon.sessions[session.generation] != nil || daemon.laneGroups[session.generation] != nil {
+		return 0, false, ErrWireProtocol
+	}
+	group := daemon.pathGroups[session.pathGroupID]
+	if group == nil {
+		if len(daemon.pathGroups) >= clientcore.MaxSessions {
+			return 0, false, ErrWireCapacity
+		}
+		var err error
+		group, err = newWirePathGroup(session.generation, session.principal, session.pathGroupID)
+		if err != nil {
+			return 0, false, err
+		}
+		daemon.pathGroups[session.pathGroupID] = group
+		daemon.pathGroupGenerations[group.generation] = group
+	}
+	ready, err := group.add(session)
+	if err != nil {
+		return 0, false, err
+	}
+	daemon.sessions[session.generation] = session
+	daemon.laneGroups[session.generation] = group
+	return group.generation, ready, nil
+}
+
+func (daemon *clientDaemon) removeReadySession(generation uint64) (*wireSession, uint64, bool) {
+	if daemon == nil || generation == 0 {
+		return nil, 0, false
+	}
+	daemon.sessionsMu.Lock()
+	defer daemon.sessionsMu.Unlock()
+	session := daemon.sessions[generation]
+	group := daemon.laneGroups[generation]
+	if session == nil || group == nil {
+		return nil, 0, false
+	}
+	delete(daemon.sessions, generation)
+	delete(daemon.laneGroups, generation)
+	lost := group.remove(generation)
+	if lost {
+		delete(daemon.pathGroups, group.id)
+		delete(daemon.pathGroupGenerations, group.generation)
+	}
+	return session, group.generation, lost
 }
 
 func (daemon *clientDaemon) run(ctx context.Context) error {
@@ -377,7 +442,10 @@ func (daemon *clientDaemon) executeSessionActions(actions []clientcore.SessionMa
 			go func(action clientcore.SessionManagerAction) {
 				defer daemon.wg.Done()
 				defer daemon.sessionWorkers.Done()
-				err := authenticateClient(daemon.runtimeCtx, session, daemon.configuration.PrincipalID, auth.Key(daemon.configuration.PSK), rand.Reader)
+				err := authenticateClient(
+					daemon.runtimeCtx, session, daemon.configuration.PrincipalID, action.PathGroupID,
+					auth.Key(daemon.configuration.PSK), rand.Reader,
+				)
 				daemon.emitPoolEvent(poolEvent{wire: session, manager: clientcore.SessionManagerEvent{
 					Kind: clientcore.SessionAuthenticationCompleted, Generation: action.Generation, Succeeded: err == nil, Err: err,
 				}})
@@ -389,10 +457,15 @@ func (daemon *clientDaemon) executeSessionActions(actions []clientcore.SessionMa
 				daemon.emitPoolEvent(poolEvent{manager: clientcore.SessionManagerEvent{Kind: clientcore.SessionConnectionLost, Generation: action.Generation}})
 				continue
 			}
-			daemon.sessionsMu.Lock()
-			daemon.sessions[action.Generation] = session
-			daemon.sessionsMu.Unlock()
-			daemon.notifySessionReady(action.Generation)
+			pathGeneration, becameReady, err := daemon.addReadySession(session)
+			if err != nil {
+				session.close()
+				daemon.emitPoolEvent(poolEvent{manager: clientcore.SessionManagerEvent{Kind: clientcore.SessionConnectionLost, Generation: action.Generation}})
+				continue
+			}
+			if becameReady {
+				daemon.notifySessionReady(pathGeneration)
+			}
 			daemon.wg.Add(1)
 			go func() {
 				defer daemon.wg.Done()
@@ -404,12 +477,11 @@ func (daemon *clientDaemon) executeSessionActions(actions []clientcore.SessionMa
 				daemon.probeClientSession(session)
 			}()
 		case clientcore.SessionActionLost:
-			daemon.sessionsMu.Lock()
-			session := daemon.sessions[action.Generation]
-			delete(daemon.sessions, action.Generation)
-			daemon.sessionsMu.Unlock()
+			session, pathGeneration, becameLost := daemon.removeReadySession(action.Generation)
 			if session != nil {
-				daemon.notifySessionLost(action.Generation)
+				if becameLost {
+					daemon.notifySessionLost(pathGeneration)
+				}
 			}
 		case clientcore.SessionActionCloseConnection:
 			if action.Connection != nil {
@@ -529,20 +601,48 @@ func (daemon *clientDaemon) probeClientSession(session *wireSession) {
 	}
 }
 
+func (daemon *clientDaemon) pathGroupQuality(generation uint64) (uint64, policy.QualitySnapshot, bool) {
+	if daemon == nil || generation == 0 {
+		return 0, policy.QualitySnapshot{}, false
+	}
+	daemon.sessionsMu.RLock()
+	group := daemon.pathGroupGenerations[generation]
+	if group == nil {
+		group = daemon.laneGroups[generation]
+	}
+	if group != nil {
+		logicalGeneration := group.generation
+		quality := group.qualitySnapshot()
+		daemon.sessionsMu.RUnlock()
+		return logicalGeneration, quality, true
+	}
+	session := daemon.sessions[generation]
+	if session == nil {
+		daemon.sessionsMu.RUnlock()
+		return 0, policy.QualitySnapshot{}, false
+	}
+	quality := session.qualitySnapshot()
+	daemon.sessionsMu.RUnlock()
+	return generation, quality, true
+}
+
 func (daemon *clientDaemon) notifyProbeQuality(session *wireSession, rtt time.Duration) {
-	smoothed, stall := session.probeQuality()
-	if smoothed == 0 {
-		smoothed = rtt
+	logicalGeneration, quality, ok := daemon.pathGroupQuality(session.generation)
+	if !ok {
+		return
+	}
+	if quality.SRTT == 0 {
+		quality.SRTT = rtt
 	}
 	for flowID, attachment := range session.allAttachments() {
 		daemon.flowsMu.RLock()
 		instance := daemon.flows[flowID]
 		daemon.flowsMu.RUnlock()
 		if instance != nil {
-			instance.tryEmitSessionQuality(session.generation, smoothed, stall)
+			instance.tryEmitSessionQuality(logicalGeneration, quality.SRTT, quality.StallPenalty)
 			instance.tryEmitQuality(clientcore.ApplicationRelayEvent{
 				Kind: clientcore.ApplicationRelaySetSessionQuality, Attachment: attachment,
-				Quality: session.qualitySnapshot(),
+				Quality: quality,
 			})
 		}
 	}
@@ -552,16 +652,19 @@ func (daemon *clientDaemon) notifyProbeStallPenalty(session *wireSession, penalt
 	if daemon == nil || session == nil || penalty <= 0 {
 		return
 	}
+	logicalGeneration, quality, ok := daemon.pathGroupQuality(session.generation)
+	if !ok {
+		return
+	}
 	for flowID, attachment := range session.allAttachments() {
 		daemon.flowsMu.RLock()
 		instance := daemon.flows[flowID]
 		daemon.flowsMu.RUnlock()
 		if instance != nil {
-			rtt, _ := session.probeQuality()
-			instance.tryEmitSessionQuality(session.generation, rtt, penalty)
+			instance.tryEmitSessionQuality(logicalGeneration, quality.SRTT, quality.StallPenalty)
 			instance.tryEmitQuality(clientcore.ApplicationRelayEvent{
 				Kind: clientcore.ApplicationRelaySetSessionQuality, Attachment: attachment,
-				Quality: session.qualitySnapshot(),
+				Quality: quality,
 			})
 		}
 	}
@@ -588,17 +691,74 @@ func (daemon *clientDaemon) readySessions() []*wireSession {
 	return result
 }
 
+func (daemon *clientDaemon) readyPathGroups() []*wirePathGroup {
+	daemon.sessionsMu.RLock()
+	result := make([]*wirePathGroup, 0, len(daemon.pathGroupGenerations))
+	for _, group := range daemon.pathGroupGenerations {
+		if group.session() != nil {
+			result = append(result, group)
+		}
+	}
+	daemon.sessionsMu.RUnlock()
+	sort.Slice(result, func(i, j int) bool { return result[i].generation < result[j].generation })
+	return result
+}
+
 func (daemon *clientDaemon) session(generation uint64) *wireSession {
+	daemon.sessionsMu.RLock()
+	var session *wireSession
+	if group := daemon.pathGroupGenerations[generation]; group != nil {
+		session = group.session()
+	} else {
+		session = daemon.sessions[generation]
+	}
+	daemon.sessionsMu.RUnlock()
+	return session
+}
+
+func (daemon *clientDaemon) selectSession(generation uint64, payloadBytes uint64) *wireSession {
+	if daemon == nil || generation == 0 {
+		return nil
+	}
+	daemon.sessionsMu.RLock()
+	var session *wireSession
+	if group := daemon.pathGroupGenerations[generation]; group != nil {
+		session = group.selectSession(payloadBytes)
+	} else {
+		session = daemon.sessions[generation]
+	}
+	daemon.sessionsMu.RUnlock()
+	return session
+}
+
+func (daemon *clientDaemon) physicalSession(generation uint64) *wireSession {
+	if daemon == nil || generation == 0 {
+		return nil
+	}
 	daemon.sessionsMu.RLock()
 	session := daemon.sessions[generation]
 	daemon.sessionsMu.RUnlock()
 	return session
 }
 
+func (daemon *clientDaemon) releaseAttachment(generation uint64, flowID protocol.FlowID, attachment flow.AttachmentKey) {
+	if daemon == nil || generation == 0 {
+		return
+	}
+	daemon.sessionsMu.RLock()
+	if group := daemon.pathGroupGenerations[generation]; group != nil {
+		group.release(flowID, attachment)
+	} else if session := daemon.sessions[generation]; session != nil {
+		session.release(flowID, attachment)
+		session.runtime.releaseFlow(flowID)
+	}
+	daemon.sessionsMu.RUnlock()
+}
+
 func (daemon *clientDaemon) notifySessionReady(generation uint64) {
 	var rtt, stall time.Duration
-	if session := daemon.session(generation); session != nil {
-		rtt, stall = session.probeQuality()
+	if _, quality, ok := daemon.pathGroupQuality(generation); ok {
+		rtt, stall = quality.SRTT, quality.StallPenalty
 	}
 	daemon.flowsMu.RLock()
 	flows := make([]*clientFlow, 0, len(daemon.actors))
@@ -628,7 +788,7 @@ func (daemon *clientDaemon) routeClientMessage(session *wireSession, flowID prot
 	instance := daemon.flows[flowID]
 	daemon.flowsMu.RUnlock()
 	if instance != nil {
-		instance.emitRemote(clientFlowRemote{message: message, sessionGeneration: session.generation, attachment: attachment})
+		instance.emitRemote(clientFlowRemote{message: message, sessionGeneration: session.attachmentGeneration, attachment: attachment})
 	}
 }
 

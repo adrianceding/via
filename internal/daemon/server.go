@@ -14,6 +14,7 @@ import (
 	"github.com/adrianceding/via/internal/auth"
 	"github.com/adrianceding/via/internal/config"
 	"github.com/adrianceding/via/internal/flow"
+	"github.com/adrianceding/via/internal/policy"
 	"github.com/adrianceding/via/internal/protocol"
 	servercore "github.com/adrianceding/via/internal/server"
 	statusapi "github.com/adrianceding/via/internal/status"
@@ -43,30 +44,33 @@ type serverDaemon struct {
 	authSlots       chan struct{}
 	recoveringSlots chan struct{}
 
-	sessionsMu        sync.RWMutex
-	sessions          map[uint64]*wireSession
-	principalSessions map[string]int
-	flowsMu           sync.RWMutex
-	flows             map[servercore.FlowKey]*serverFlow
-	waiters           map[servercore.FlowKey]*flowWaiter
-	flowChanged       chan struct{}
-	wg                sync.WaitGroup
-	timerCallbacks    sync.WaitGroup
-	workersMu         sync.Mutex
-	workersCond       *sync.Cond
-	workers           int
-	workerLimit       int
-	workersClosed     bool
-	openWorkersMu     sync.Mutex
-	openWorkersCond   *sync.Cond
-	openWorkers       int
-	openWorkerLimit   int
-	openWorkersClosed bool
-	openWaitersMu     sync.Mutex
-	openWaitersCond   *sync.Cond
-	openWaiters       map[openWaiterKey]struct{}
-	openWaiterLimit   int
-	openWaitersClosed bool
+	sessionsMu           sync.RWMutex
+	sessions             map[uint64]*wireSession
+	pathGroups           map[serverPathGroupKey]*wirePathGroup
+	pathGroupGenerations map[uint64]*wirePathGroup
+	laneGroups           map[uint64]*wirePathGroup
+	principalSessions    map[string]int
+	flowsMu              sync.RWMutex
+	flows                map[servercore.FlowKey]*serverFlow
+	waiters              map[servercore.FlowKey]*flowWaiter
+	flowChanged          chan struct{}
+	wg                   sync.WaitGroup
+	timerCallbacks       sync.WaitGroup
+	workersMu            sync.Mutex
+	workersCond          *sync.Cond
+	workers              int
+	workerLimit          int
+	workersClosed        bool
+	openWorkersMu        sync.Mutex
+	openWorkersCond      *sync.Cond
+	openWorkers          int
+	openWorkerLimit      int
+	openWorkersClosed    bool
+	openWaitersMu        sync.Mutex
+	openWaitersCond      *sync.Cond
+	openWaiters          map[openWaiterKey]struct{}
+	openWaiterLimit      int
+	openWaitersClosed    bool
 
 	statusRepository *statusapi.Repository
 	statusObserver   *runtimeStatus
@@ -82,6 +86,11 @@ type flowWaiter struct {
 type openWaiterKey struct {
 	sessionGeneration uint64
 	flowID            protocol.FlowID
+}
+
+type serverPathGroupKey struct {
+	principal string
+	id        protocol.PathGroupID
 }
 
 func RunServer(ctx context.Context, configuration config.Server) error {
@@ -174,8 +183,10 @@ func newServerDaemon(configuration config.Server) (*serverDaemon, error) {
 		sessionSlots:    make(chan struct{}, int(configuration.Limits.Sessions)),
 		authSlots:       make(chan struct{}, int(configuration.Limits.AuthInProgress)),
 		recoveringSlots: make(chan struct{}, int(configuration.Limits.RecoveringFlows)),
-		sessions:        make(map[uint64]*wireSession), principalSessions: make(map[string]int),
-		flows: make(map[servercore.FlowKey]*serverFlow), waiters: make(map[servercore.FlowKey]*flowWaiter),
+		sessions:        make(map[uint64]*wireSession), pathGroups: make(map[serverPathGroupKey]*wirePathGroup),
+		pathGroupGenerations: make(map[uint64]*wirePathGroup), laneGroups: make(map[uint64]*wirePathGroup),
+		principalSessions: make(map[string]int),
+		flows:             make(map[servercore.FlowKey]*serverFlow), waiters: make(map[servercore.FlowKey]*flowWaiter),
 		flowChanged:      make(chan struct{}, 1),
 		workerLimit:      int(configuration.Limits.Flows) * (servercore.MaxRelayPendingSends + 8),
 		openWorkerLimit:  int(configuration.Limits.OpeningFlows),
@@ -448,12 +459,19 @@ func (daemon *serverDaemon) probeServerSession(session *wireSession) {
 }
 
 func (daemon *serverDaemon) notifyServerProbeQuality(session *wireSession, rtt time.Duration) {
+	_, quality, ok := daemon.pathGroupQuality(session.generation)
+	if !ok {
+		return
+	}
+	if quality.SRTT == 0 {
+		quality.SRTT = rtt
+	}
 	for flowID, attachment := range session.allAttachments() {
 		instance := daemon.flow(servercore.FlowKey{PrincipalID: session.principal, FlowID: flowID})
 		if instance != nil && !instance.qualityStopped.Load() {
 			_ = instance.handle(servercore.RelayEvent{
 				Kind: servercore.RelaySetSessionQuality, Attachment: attachment,
-				Quality: session.qualitySnapshot(),
+				Quality: quality,
 			})
 		}
 	}
@@ -463,12 +481,16 @@ func (daemon *serverDaemon) notifyServerProbeStallPenalty(session *wireSession, 
 	if daemon == nil || session == nil || penalty <= 0 {
 		return
 	}
+	_, quality, ok := daemon.pathGroupQuality(session.generation)
+	if !ok {
+		return
+	}
 	for flowID, attachment := range session.allAttachments() {
 		instance := daemon.flow(servercore.FlowKey{PrincipalID: session.principal, FlowID: flowID})
 		if instance != nil && !instance.qualityStopped.Load() {
 			_ = instance.handle(servercore.RelayEvent{
 				Kind: servercore.RelaySetSessionQuality, Attachment: attachment,
-				Quality: session.qualitySnapshot(),
+				Quality: quality,
 			})
 		}
 	}
@@ -604,7 +626,7 @@ func (daemon *serverDaemon) completeOpenSession(session *wireSession, request pr
 	if !ok {
 		return session.send(protocol.OpenResult{FlowID: request.FlowID, Result: protocol.OpenResourceLimit})
 	}
-	attachment = flow.AttachmentKey{SessionGeneration: session.generation, AttachmentGeneration: attachmentGeneration}
+	attachment = flow.AttachmentKey{SessionGeneration: session.attachmentGeneration, AttachmentGeneration: attachmentGeneration}
 	if err := session.reserve(request.FlowID, attachment); err != nil {
 		return session.send(protocol.OpenResult{FlowID: request.FlowID, Result: protocol.OpenResourceLimit})
 	}
@@ -711,7 +733,7 @@ func (daemon *serverDaemon) handleJoin(session *wireSession, request protocol.Jo
 		if !ok {
 			return session.send(protocol.JoinResult{FlowID: request.FlowID, Result: protocol.JoinFailure})
 		}
-		attachment = flow.AttachmentKey{SessionGeneration: session.generation, AttachmentGeneration: attachmentGeneration}
+		attachment = flow.AttachmentKey{SessionGeneration: session.attachmentGeneration, AttachmentGeneration: attachmentGeneration}
 		if err := session.reserve(request.FlowID, attachment); err != nil {
 			return session.send(protocol.JoinResult{FlowID: request.FlowID, Result: protocol.JoinFailure})
 		}
@@ -756,17 +778,33 @@ func allocateDaemonGeneration(counter *atomic.Uint64) (uint64, bool) {
 func (daemon *serverDaemon) addSession(session *wireSession) bool {
 	daemon.sessionsMu.Lock()
 	defer daemon.sessionsMu.Unlock()
-	if daemon.sessions[session.generation] != nil ||
+	if session == nil || session.generation == 0 || session.principal == "" || !protocol.ValidPathGroupID(session.pathGroupID) ||
+		daemon.sessions[session.generation] != nil || daemon.laneGroups[session.generation] != nil ||
 		daemon.principalSessions[session.principal] >= int(daemon.configuration.Limits.SessionsPerPrincipal) {
 		return false
 	}
+	key := serverPathGroupKey{principal: session.principal, id: session.pathGroupID}
+	group := daemon.pathGroups[key]
+	if group == nil {
+		var err error
+		group, err = newWirePathGroup(session.generation, session.principal, session.pathGroupID)
+		if err != nil {
+			return false
+		}
+		daemon.pathGroups[key] = group
+		daemon.pathGroupGenerations[group.generation] = group
+	}
+	if _, err := group.add(session); err != nil {
+		return false
+	}
 	daemon.sessions[session.generation] = session
+	daemon.laneGroups[session.generation] = group
 	daemon.principalSessions[session.principal]++
 	if local, ok := endpointIP(session.connection.LocalEndpoint()); ok {
 		daemon.statusObserver.upsertSessionObservation(runtimeSessionObservation{
 			generation: session.generation, transportName: daemon.configuration.Transport.Type, interfaceName: "listener",
 			localAddress: local, localEndpoint: session.connection.LocalEndpoint(), remoteEndpoint: session.connection.RemoteEndpoint(),
-			connectionID: session.connectionID.String(), principalID: session.principal,
+			connectionID: session.connectionID.String(), principalID: session.principal, pathGroupID: session.pathGroupID,
 			state: statusapi.SessionReady, reason: statusapi.ReasonPathAdded,
 		})
 	}
@@ -775,8 +813,19 @@ func (daemon *serverDaemon) addSession(session *wireSession) bool {
 
 func (daemon *serverDaemon) removeSession(session *wireSession) {
 	daemon.sessionsMu.Lock()
+	var group *wirePathGroup
+	lost := false
 	if daemon.sessions[session.generation] == session {
 		delete(daemon.sessions, session.generation)
+		group = daemon.laneGroups[session.generation]
+		delete(daemon.laneGroups, session.generation)
+		if group != nil {
+			lost = group.remove(session.generation)
+			if lost {
+				delete(daemon.pathGroups, serverPathGroupKey{principal: group.principal, id: group.id})
+				delete(daemon.pathGroupGenerations, group.generation)
+			}
+		}
 		daemon.principalSessions[session.principal]--
 		if daemon.principalSessions[session.principal] == 0 {
 			delete(daemon.principalSessions, session.principal)
@@ -784,14 +833,86 @@ func (daemon *serverDaemon) removeSession(session *wireSession) {
 	}
 	daemon.sessionsMu.Unlock()
 	daemon.statusObserver.removeSession(session.generation)
+	if !lost || group == nil {
+		return
+	}
 	for flowID := range session.allAttachments() {
 		if instance := daemon.flow(servercore.FlowKey{PrincipalID: session.principal, FlowID: flowID}); instance != nil {
-			instance.sessionClosed(session.generation)
+			instance.sessionClosed(group.generation)
 		}
 	}
 }
 
 func (daemon *serverDaemon) session(generation uint64) *wireSession {
+	daemon.sessionsMu.RLock()
+	var session *wireSession
+	if group := daemon.pathGroupGenerations[generation]; group != nil {
+		session = group.session()
+	} else {
+		session = daemon.sessions[generation]
+	}
+	daemon.sessionsMu.RUnlock()
+	return session
+}
+
+func (daemon *serverDaemon) selectSession(generation uint64, payloadBytes uint64) *wireSession {
+	if daemon == nil || generation == 0 {
+		return nil
+	}
+	daemon.sessionsMu.RLock()
+	var session *wireSession
+	if group := daemon.pathGroupGenerations[generation]; group != nil {
+		session = group.selectSession(payloadBytes)
+	} else {
+		session = daemon.sessions[generation]
+	}
+	daemon.sessionsMu.RUnlock()
+	return session
+}
+
+func (daemon *serverDaemon) releaseAttachment(generation uint64, flowID protocol.FlowID, attachment flow.AttachmentKey) {
+	if daemon == nil || generation == 0 {
+		return
+	}
+	daemon.sessionsMu.RLock()
+	if group := daemon.pathGroupGenerations[generation]; group != nil {
+		group.release(flowID, attachment)
+	} else if session := daemon.sessions[generation]; session != nil {
+		session.release(flowID, attachment)
+		session.runtime.releaseFlow(flowID)
+	}
+	daemon.sessionsMu.RUnlock()
+}
+
+func (daemon *serverDaemon) pathGroupQuality(generation uint64) (uint64, policy.QualitySnapshot, bool) {
+	if daemon == nil || generation == 0 {
+		return 0, policy.QualitySnapshot{}, false
+	}
+	daemon.sessionsMu.RLock()
+	group := daemon.pathGroupGenerations[generation]
+	if group == nil {
+		group = daemon.laneGroups[generation]
+	}
+	if group != nil {
+		logicalGeneration := group.generation
+		quality := group.qualitySnapshot()
+		daemon.sessionsMu.RUnlock()
+		return logicalGeneration, quality, true
+	}
+	session := daemon.sessions[generation]
+	if session == nil {
+		daemon.sessionsMu.RUnlock()
+		return 0, policy.QualitySnapshot{}, false
+	}
+	quality := session.qualitySnapshot()
+	daemon.sessionsMu.RUnlock()
+	return generation, quality, true
+}
+
+func (daemon *serverDaemon) physicalSession(generation uint64) *wireSession {
+	if daemon == nil || generation == 0 {
+		return nil
+	}
 	daemon.sessionsMu.RLock()
 	session := daemon.sessions[generation]
 	daemon.sessionsMu.RUnlock()

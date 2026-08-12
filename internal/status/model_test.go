@@ -38,12 +38,17 @@ func TestHasherIsDeterministicDomainSeparatedAndOpaque(t *testing.T) {
 		t.Fatal(err)
 	}
 	flowID := protocol.FlowID{1, 2, 3}
+	pathGroupID := protocol.PathGroupID{1, 2, 3}
 	target := protocol.Target{DNSName: "secret.example", Port: 443}
 	flowHash := hasher.FlowID(flowID)
 	if flowHash == "" || flowHash != hasher.FlowID(flowID) || len(flowHash) != 2*HashBytes {
 		t.Fatalf("flow hash = %q", flowHash)
 	}
-	if flowHash == hasher.SessionID(0x010203) || flowHash == hasher.Target(target) {
+	pathGroupHash := hasher.PathGroupID(pathGroupID)
+	if pathGroupHash == "" || pathGroupHash != hasher.PathGroupID(pathGroupID) || len(pathGroupHash) != 2*HashBytes {
+		t.Fatalf("path group hash = %q", pathGroupHash)
+	}
+	if flowHash == hasher.SessionID(0x010203) || flowHash == pathGroupHash || flowHash == hasher.Target(target) {
 		t.Fatal("hash domains collided")
 	}
 	if strings.Contains(hasher.Target(target), target.DNSName) {
@@ -89,7 +94,7 @@ func TestModelValidationCanonicalizesAddressesAndRejectsUnsafeValues(t *testing.
 	}
 	validSessionValue := Session{
 		IDHash: testHash(1), Transport: "tcp", Interface: "eth0", LocalAddress: "192.0.2.1",
-		State: SessionReady, Reason: ReasonStarted,
+		PathGroupID: testHash(2), Lane: 1, State: SessionReady, Reason: ReasonStarted,
 	}
 	if !validSession(validSessionValue) {
 		t.Fatal("valid session rejected")
@@ -109,6 +114,16 @@ func TestModelValidationCanonicalizesAddressesAndRejectsUnsafeValues(t *testing.
 		if validSession(validSessionValue) {
 			t.Fatalf("invalid transport name %q accepted", name)
 		}
+	}
+	validSessionValue.Transport = "tcp"
+	validSessionValue.PathGroupID = ""
+	if validSession(validSessionValue) {
+		t.Fatal("lane without path group accepted")
+	}
+	validSessionValue.PathGroupID = testHash(2)
+	validSessionValue.Lane = 65
+	if validSession(validSessionValue) {
+		t.Fatal("lane above 64 accepted")
 	}
 	if validTerminal(Terminal{IDHash: testHash(2), State: FlowRelaying, FinishedAt: time.Unix(1, 0)}) {
 		t.Fatal("non-terminal flow accepted as terminal summary")

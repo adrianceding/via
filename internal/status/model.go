@@ -171,6 +171,8 @@ type Quality struct {
 type Session struct {
 	IDHash         string           `json:"id"`
 	ConnectionID   string           `json:"connection_id,omitempty"`
+	PathGroupID    string           `json:"path_group_id,omitempty"`
+	Lane           uint16           `json:"lane,omitempty"`
 	Transport      string           `json:"transport"`
 	Interface      string           `json:"interface"`
 	LocalAddress   string           `json:"local_address"`
@@ -272,6 +274,13 @@ func (hasher *Hasher) SessionID(generation uint64) string {
 	return hasher.sum("via status session v1\x00", encoded[:])
 }
 
+func (hasher *Hasher) PathGroupID(pathGroupID protocol.PathGroupID) string {
+	if hasher == nil || !protocol.ValidPathGroupID(pathGroupID) {
+		return ""
+	}
+	return hasher.sum("via status path group v1\x00", pathGroupID[:])
+}
+
 func (hasher *Hasher) Principal(principalID string) string {
 	if hasher == nil || !protocol.ValidPrincipalID(principalID) {
 		return ""
@@ -343,6 +352,9 @@ func normalizeInterface(value Interface) (Interface, error) {
 
 func validSession(value Session) bool {
 	if !validHash(value.IDHash) || !transport.ValidName(value.Transport) || !safeLabel(value.Interface) || value.State < SessionDialing || value.State > SessionClosed || !validReason(value.Reason) {
+		return false
+	}
+	if !validOptionalHash(value.PathGroupID) || value.Lane > 64 || value.Lane != 0 && value.PathGroupID == "" {
 		return false
 	}
 	address, err := netip.ParseAddr(value.LocalAddress)

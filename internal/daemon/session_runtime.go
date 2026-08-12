@@ -67,34 +67,35 @@ type sessionRuntime struct {
 	onFailure   func(error)
 	now         func() time.Time
 
-	mu                sync.Mutex
-	nextID            uint64
-	closed            bool
-	closeErr          error
-	controlQueue      []*sessionRuntimeRequest
-	dataScheduler     *policy.Scheduler
-	requests          map[uint64]*sessionRuntimeRequest
-	selected          *sessionRuntimeRequest
-	queuedFrames      uint32
-	queuedBytes       uint64
-	inFlightFrames    uint32
-	inFlightBytes     uint64
-	queuedData        uint64
-	inFlightData      uint64
-	scheduledData     uint64
-	writtenData       uint64
-	quality           *policy.Quality
-	dataWindowStart   time.Time
-	dataWindowLastACK time.Time
-	dataWindowBytes   uint64
-	eligibleAckedData uint64
-	lastNotify        time.Time
-	wake              chan struct{}
-	space             chan struct{}
-	done              chan struct{}
-	workerDone        chan struct{}
-	onSnapshot        func(sessionRuntimeSnapshot)
-	closeOnce         sync.Once
+	mu                 sync.Mutex
+	nextID             uint64
+	closed             bool
+	closeErr           error
+	controlQueue       []*sessionRuntimeRequest
+	dataScheduler      *policy.Scheduler
+	requests           map[uint64]*sessionRuntimeRequest
+	selected           *sessionRuntimeRequest
+	queuedFrames       uint32
+	queuedBytes        uint64
+	inFlightFrames     uint32
+	inFlightBytes      uint64
+	queuedData         uint64
+	inFlightData       uint64
+	unacknowledgedData map[protocol.FlowID]uint64
+	scheduledData      uint64
+	writtenData        uint64
+	quality            *policy.Quality
+	dataWindowStart    time.Time
+	dataWindowLastACK  time.Time
+	dataWindowBytes    uint64
+	eligibleAckedData  uint64
+	lastNotify         time.Time
+	wake               chan struct{}
+	space              chan struct{}
+	done               chan struct{}
+	workerDone         chan struct{}
+	onSnapshot         func(sessionRuntimeSnapshot)
+	closeOnce          sync.Once
 }
 
 func newSessionRuntime(ctx context.Context, connection transport.Connection, onFailure func(error)) (*sessionRuntime, error) {
@@ -133,7 +134,8 @@ func newSessionRuntimeWithClock(ctx context.Context, connection transport.Connec
 		ctx: runtimeCtx, cancel: cancel, connection: connection, queueLimits: limits, onFailure: onFailure, now: now,
 		quality:       policy.NewQualityWithClock(now),
 		dataScheduler: scheduler, requests: make(map[uint64]*sessionRuntimeRequest, int(limits.MaxFrames)),
-		wake: make(chan struct{}, 1), space: make(chan struct{}, 1), done: make(chan struct{}), workerDone: make(chan struct{}),
+		unacknowledgedData: make(map[protocol.FlowID]uint64, transport.MaxSessionAttachments),
+		wake:               make(chan struct{}, 1), space: make(chan struct{}, 1), done: make(chan struct{}), workerDone: make(chan struct{}),
 	}
 	go runtime.run()
 	return runtime, nil
@@ -429,6 +431,7 @@ func (runtime *sessionRuntime) selectNext() *sessionRuntimeRequest {
 		}
 		runtime.queuedData -= minUint64(runtime.queuedData, request.dataPayload)
 		runtime.inFlightData += request.dataPayload
+		runtime.unacknowledgedData[request.flowID] = saturatingUint64(runtime.unacknowledgedData[request.flowID], request.dataPayload)
 		runtime.scheduledData = saturatingUint64(runtime.scheduledData, request.dataPayload)
 	}
 	runtime.queuedFrames--
@@ -457,9 +460,10 @@ func (runtime *sessionRuntime) completeWrite(request *sessionRuntimeRequest, err
 	runtime.inFlightBytes -= minUint64(runtime.inFlightBytes, uint64(len(request.encoded)))
 	if request.class == transport.FrameData {
 		request.capacityEligible = runtime.queuedData != 0
-		runtime.inFlightData -= minUint64(runtime.inFlightData, request.dataPayload)
 		if err == nil {
 			runtime.writtenData = saturatingUint64(runtime.writtenData, request.dataPayload)
+		} else {
+			runtime.releaseDataLocked(request.flowID, request.dataPayload)
 		}
 	}
 	if err == nil {
@@ -508,10 +512,16 @@ func (runtime *sessionRuntime) setStallPenalty(penalty time.Duration) {
 }
 
 func (runtime *sessionRuntime) observeDataCredit(acknowledgedBytes uint64, writeCompletedAt, acknowledgedAt time.Time, capacityEligible bool) {
+	runtime.observeFlowDataCredit(protocol.FlowID{}, acknowledgedBytes, writeCompletedAt, acknowledgedAt, capacityEligible)
+}
+
+func (runtime *sessionRuntime) observeFlowDataCredit(flowID protocol.FlowID, acknowledgedBytes uint64, writeCompletedAt, acknowledgedAt time.Time, capacityEligible bool) {
 	if runtime == nil || acknowledgedBytes == 0 || writeCompletedAt.IsZero() || acknowledgedAt.IsZero() || acknowledgedAt.Before(writeCompletedAt) {
 		return
 	}
 	runtime.mu.Lock()
+	runtime.releaseDataLocked(flowID, acknowledgedBytes)
+	runtime.updateQualityLoadLocked()
 	runtime.eligibleAckedData = saturatingUint64(runtime.eligibleAckedData, acknowledgedBytes)
 	if !capacityEligible {
 		runtime.dataWindowStart = time.Time{}
@@ -601,6 +611,7 @@ func (runtime *sessionRuntime) close(err error) {
 		runtime.inFlightBytes = 0
 		runtime.queuedData = 0
 		runtime.inFlightData = 0
+		runtime.unacknowledgedData = make(map[protocol.FlowID]uint64, transport.MaxSessionAttachments)
 		runtime.updateQualityLoadLocked()
 		runtime.signalSpaceLocked()
 		close(runtime.done)
@@ -658,6 +669,30 @@ func (runtime *sessionRuntime) signalSpaceLocked() {
 
 func (runtime *sessionRuntime) updateQualityLoadLocked() {
 	runtime.quality.SetLoad(runtime.queuedData, runtime.inFlightData)
+}
+
+func (runtime *sessionRuntime) releaseFlow(flowID protocol.FlowID) {
+	if runtime == nil || flowID == (protocol.FlowID{}) {
+		return
+	}
+	runtime.mu.Lock()
+	runtime.releaseDataLocked(flowID, math.MaxUint64)
+	runtime.updateQualityLoadLocked()
+	runtime.mu.Unlock()
+}
+
+func (runtime *sessionRuntime) releaseDataLocked(flowID protocol.FlowID, bytes uint64) {
+	if flowID == (protocol.FlowID{}) || bytes == 0 {
+		return
+	}
+	acknowledged := minUint64(runtime.unacknowledgedData[flowID], bytes)
+	runtime.inFlightData -= minUint64(runtime.inFlightData, acknowledged)
+	remaining := runtime.unacknowledgedData[flowID] - acknowledged
+	if remaining == 0 {
+		delete(runtime.unacknowledgedData, flowID)
+	} else {
+		runtime.unacknowledgedData[flowID] = remaining
+	}
 }
 
 func (runtime *sessionRuntime) snapshot() sessionRuntimeSnapshot {

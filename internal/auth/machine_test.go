@@ -22,8 +22,13 @@ func (function proofVerifierFunc) Verify(proof protocol.AuthProof, challenge [Ch
 	return function(proof, challenge)
 }
 
+func testPathGroupID() protocol.PathGroupID {
+	return protocol.PathGroupID{1, 2, 3, 4}
+}
+
 func TestMachinesCompleteHandshakeWithStrictReadBarriers(t *testing.T) {
 	principalID := "client.example"
+	pathGroupID := testPathGroupID()
 	key := testKey(0x31)
 	challenge := testChallenge(0x51)
 	nonce := testNonce(0x71)
@@ -35,7 +40,7 @@ func TestMachinesCompleteHandshakeWithStrictReadBarriers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewServerMachine() error = %v", err)
 	}
-	client, err := NewClientMachine(principalID, key, bytes.NewReader(nonce[:]))
+	client, err := NewClientMachine(principalID, pathGroupID, key, bytes.NewReader(nonce[:]))
 	if err != nil {
 		t.Fatalf("NewClientMachine() error = %v", err)
 	}
@@ -61,11 +66,11 @@ func TestMachinesCompleteHandshakeWithStrictReadBarriers(t *testing.T) {
 	if !ok {
 		t.Fatalf("client send message = %T, want protocol.AuthProof", clientActions[0].Message)
 	}
-	wantProof, err := ComputeProof(key, principalID, challenge, nonce)
+	wantProof, err := ComputeProof(key, principalID, pathGroupID, challenge, nonce)
 	if err != nil {
 		t.Fatalf("ComputeProof() error = %v", err)
 	}
-	if proof.PrincipalID != principalID || proof.ClientNonce != nonce || proof.Proof != wantProof {
+	if proof.PrincipalID != principalID || proof.PathGroupID != pathGroupID || proof.ClientNonce != nonce || proof.Proof != wantProof {
 		t.Fatalf("proof = %#v, want injected nonce and computed proof", proof)
 	}
 	assertNoAllowRead(t, clientActions)
@@ -82,20 +87,26 @@ func TestMachinesCompleteHandshakeWithStrictReadBarriers(t *testing.T) {
 	assertNoAllowRead(t, serverActions)
 
 	assertServerStep(t, server, Event{Kind: EventSendCompleted}, ServerAuthenticated,
-		Action{Kind: ActionAuthenticationComplete, PrincipalID: principalID},
+		Action{Kind: ActionAuthenticationComplete, PrincipalID: principalID, PathGroupID: pathGroupID},
 		Action{Kind: ActionAllowRead})
 	if principal, published := server.PrincipalID(); !published || principal != principalID {
 		t.Fatalf("published principal = %q, %v, want %q, true", principal, published, principalID)
+	}
+	if group, published := server.PathGroupID(); !published || group != pathGroupID {
+		t.Fatalf("published path group = %x, %v, want %x, true", group, published, pathGroupID)
 	}
 
 	assertClientStep(t, client, Event{
 		Kind:    EventFrameReceived,
 		Message: protocol.AuthResult{Result: protocol.AuthSuccess},
 	}, ClientAuthenticated,
-		Action{Kind: ActionAuthenticationComplete, PrincipalID: principalID},
+		Action{Kind: ActionAuthenticationComplete, PrincipalID: principalID, PathGroupID: pathGroupID},
 		Action{Kind: ActionAllowRead})
 	if principal, authenticated := client.PrincipalID(); !authenticated || principal != principalID {
 		t.Fatalf("client principal = %q, %v, want %q, true", principal, authenticated, principalID)
+	}
+	if group, authenticated := client.PathGroupID(); !authenticated || group != pathGroupID {
+		t.Fatalf("client path group = %x, %v, want %x, true", group, authenticated, pathGroupID)
 	}
 }
 
@@ -111,6 +122,7 @@ func TestServerFailureResponsesAreUniform(t *testing.T) {
 				Kind: EventFrameReceived,
 				Message: protocol.AuthProof{
 					PrincipalID: "unknown",
+					PathGroupID: testPathGroupID(),
 				},
 			},
 			closeReason: CloseAuthenticationFailed,
@@ -169,7 +181,7 @@ func TestEntropyFailuresCloseWithoutSending(t *testing.T) {
 	})
 
 	t.Run("client nonce", func(t *testing.T) {
-		client, err := NewClientMachine("client", testKey(0x22), errorReader{})
+		client, err := NewClientMachine("client", testPathGroupID(), testKey(0x22), errorReader{})
 		if err != nil {
 			t.Fatalf("NewClientMachine() error = %v", err)
 		}
@@ -390,11 +402,14 @@ func TestMachineConstructorsRejectInvalidDependencies(t *testing.T) {
 	if _, err := NewServerMachine(validChallengeSource, nil); !errors.Is(err, ErrInvalidMachineConfiguration) {
 		t.Fatalf("NewServerMachine(nil verifier) error = %v", err)
 	}
-	if _, err := NewClientMachine("bad principal!", testKey(0x12), bytes.NewReader(make([]byte, NonceSize))); !errors.Is(err, ErrInvalidPrincipal) {
+	if _, err := NewClientMachine("bad principal!", testPathGroupID(), testKey(0x12), bytes.NewReader(make([]byte, NonceSize))); !errors.Is(err, ErrInvalidPrincipal) {
 		t.Fatalf("NewClientMachine(invalid principal) error = %v", err)
 	}
-	if _, err := NewClientMachine("client", testKey(0x12), nil); !errors.Is(err, ErrInvalidMachineConfiguration) {
+	if _, err := NewClientMachine("client", testPathGroupID(), testKey(0x12), nil); !errors.Is(err, ErrInvalidMachineConfiguration) {
 		t.Fatalf("NewClientMachine(nil random) error = %v", err)
+	}
+	if _, err := NewClientMachine("client", protocol.PathGroupID{}, testKey(0x12), bytes.NewReader(make([]byte, NonceSize))); !errors.Is(err, ErrInvalidPrincipal) {
+		t.Fatalf("NewClientMachine(zero path group) error = %v", err)
 	}
 }
 
@@ -423,6 +438,7 @@ func newServerAt(t *testing.T, want ServerState) *ServerMachine {
 		Kind: EventFrameReceived,
 		Message: protocol.AuthProof{
 			PrincipalID: "client",
+			PathGroupID: testPathGroupID(),
 		},
 	})
 	if want == ServerSendingResult {
@@ -461,13 +477,13 @@ func newServerAwaitingProof(t *testing.T, accept bool) *ServerMachine {
 func newServerWithInvalidProof(t *testing.T) *ServerMachine {
 	t.Helper()
 	server := newServerAwaitingProof(t, false)
-	server.Handle(Event{Kind: EventFrameReceived, Message: protocol.AuthProof{PrincipalID: "client"}})
+	server.Handle(Event{Kind: EventFrameReceived, Message: protocol.AuthProof{PrincipalID: "client", PathGroupID: testPathGroupID()}})
 	return server
 }
 
 func newClientAt(t *testing.T, want ClientState) *ClientMachine {
 	t.Helper()
-	client, err := NewClientMachine("client", testKey(0x21), bytes.NewReader(make([]byte, NonceSize)))
+	client, err := NewClientMachine("client", testPathGroupID(), testKey(0x21), bytes.NewReader(make([]byte, NonceSize)))
 	if err != nil {
 		t.Fatalf("NewClientMachine() error = %v", err)
 	}

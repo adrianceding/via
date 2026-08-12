@@ -51,9 +51,9 @@ principals:
 #   per_principal_flows: 0         # 单个客户端身份的数据流数，不得大于 flows / Flows for one client identity; cannot exceed flows
 #   opening_flows: 0               # 正在建立的数据流数，不得大于 flows / Flows being opened; cannot exceed flows
 #   recovering_flows: 0            # 所有线路中断后正在恢复的数据流数，不得大于 flows / Flows recovering after all paths fail; cannot exceed flows
-#   sessions: 0                    # 所有客户端合计的传输会话数 / Transport sessions across all clients
-#   sessions_per_principal: 0      # 单个客户端身份的传输会话数，不得大于 sessions / Sessions for one client identity; cannot exceed sessions
-#   auth_in_progress: 0            # 同时进行传输会话认证的数量，不得大于 sessions / Concurrent transport authentications; cannot exceed sessions
+#   transport_connections: 0                 # 所有客户端合计的传输连接数 / Transport connections across all clients
+#   transport_connections_per_principal: 0   # 单个客户端身份的传输连接数，不得大于 transport_connections / Transport connections for one identity; cannot exceed transport_connections
+#   transport_auth_in_progress: 0            # 同时进行传输连接认证的数量，不得大于 transport_connections / Concurrent transport authentications; cannot exceed transport_connections
 #   target_dials: 0                # 同时连接目标网站的数量，不得大于 opening_flows / Concurrent target connections; cannot exceed opening_flows
 #   tombstones: 0                  # 已结束数据流的短期记录总数，用于处理迟到或重复消息 / Short-lived records for closed flows, used for late or duplicate messages
 #   tombstones_per_principal: 0    # 单个客户端身份的结束记录数，不得大于 tombstones / Closed-flow records for one identity; cannot exceed tombstones

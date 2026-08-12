@@ -96,6 +96,8 @@ export default {
     clientSource: 'Interface / connection ID',
     serverSource: 'Principal / connection ID',
     session: 'Session',
+    pathGroup: 'Path group',
+    lane: 'Lane {lane}',
     endpoints: 'Local / remote',
     state: 'State',
     smoothedRtt: 'Smoothed latency',

@@ -97,6 +97,7 @@ function dataSampleClass(quality) {
             <td :data-label="t('sessions.session')">
               <div class="primary-cell">{{ client ? session.interface : session.principal }}<span v-if="session.fastest" class="fastest-badge">{{ t('sessions.fastest') }}</span></div>
               <small class="mono">{{ t('common.local') }} {{ String(session.id || '').slice(0, 12) }}</small>
+              <div v-if="session.path_group_id" class="identifier-cell session-identifier"><button class="identifier-link mono" type="button" @click="$emit('filter', session.path_group_id)">{{ t('sessions.pathGroup') }} {{ String(session.path_group_id).slice(0, 12) }}</button><span v-if="session.lane" class="mono">{{ t('sessions.lane', { lane: session.lane }) }}</span></div>
               <div class="identifier-cell session-identifier"><button class="identifier-link mono" type="button" @click="$emit('filter', session.connection_id)">{{ session.connection_id || '--' }}</button><CopyIdentifierButton :label="t('common.connectionId')" :value="session.connection_id" /></div>
             </td>
             <td :data-label="t('sessions.endpoints')"><div class="primary-cell mono">{{ session.local_endpoint || session.local_address || '--' }}</div><small class="mono">{{ session.remote_endpoint || '--' }}</small></td>

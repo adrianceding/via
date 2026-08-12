@@ -9,6 +9,7 @@ import (
 
 const (
 	MaxPrincipalIDLength      = 64
+	PathGroupIDSize           = 16
 	MaxDataLength             = MaxPayloadSize - 16 - 8
 	DataFramePrefixSize       = HeaderSize + 16 + 8
 	MaxACKRanges              = 16
@@ -18,9 +19,10 @@ const (
 )
 
 type (
-	FlowID     [16]byte
-	OpenToken  [32]byte
-	Capability [32]byte
+	FlowID      [16]byte
+	OpenToken   [32]byte
+	Capability  [32]byte
+	PathGroupID [PathGroupIDSize]byte
 )
 
 type DeliveryMode uint8
@@ -122,6 +124,7 @@ type AuthChallenge struct {
 
 type AuthProof struct {
 	PrincipalID string
+	PathGroupID PathGroupID
 	ClientNonce [32]byte
 	Proof       [32]byte
 }
@@ -283,7 +286,7 @@ func DecodeMessage(frame Frame) (Message, error) {
 		return message, nil
 	case TypeAuthProof:
 		principalLength := int(payload[0])
-		if principalLength < 1 || principalLength > MaxPrincipalIDLength || len(payload) != 65+principalLength {
+		if principalLength < 1 || principalLength > MaxPrincipalIDLength || len(payload) != 81+principalLength {
 			return nil, invalidPayload(frame.Type, "principal length")
 		}
 		principal := payload[1 : 1+principalLength]
@@ -291,8 +294,12 @@ func DecodeMessage(frame Frame) (Message, error) {
 			return nil, invalidPayload(frame.Type, "principal id")
 		}
 		message := AuthProof{PrincipalID: string(principal)}
-		copy(message.ClientNonce[:], payload[1+principalLength:33+principalLength])
-		copy(message.Proof[:], payload[33+principalLength:])
+		copy(message.PathGroupID[:], payload[1+principalLength:17+principalLength])
+		if !ValidPathGroupID(message.PathGroupID) {
+			return nil, invalidPayload(frame.Type, "path group id")
+		}
+		copy(message.ClientNonce[:], payload[17+principalLength:49+principalLength])
+		copy(message.Proof[:], payload[49+principalLength:])
 		return message, nil
 	case TypeAuthResult:
 		result := AuthResultCode(payload[0])
@@ -419,12 +426,20 @@ func (message AuthProof) marshalPayload() ([]byte, error) {
 	if !validPrincipalID(principal) {
 		return nil, invalidPayload(TypeAuthProof, "principal id")
 	}
-	payload := make([]byte, 1+len(principal)+64)
+	if !ValidPathGroupID(message.PathGroupID) {
+		return nil, invalidPayload(TypeAuthProof, "path group id")
+	}
+	payload := make([]byte, 1+len(principal)+PathGroupIDSize+64)
 	payload[0] = byte(len(principal))
 	copy(payload[1:], principal)
-	copy(payload[1+len(principal):], message.ClientNonce[:])
-	copy(payload[33+len(principal):], message.Proof[:])
+	copy(payload[1+len(principal):], message.PathGroupID[:])
+	copy(payload[17+len(principal):], message.ClientNonce[:])
+	copy(payload[49+len(principal):], message.Proof[:])
 	return payload, nil
+}
+
+func ValidPathGroupID(identifier PathGroupID) bool {
+	return identifier != (PathGroupID{})
 }
 
 func (message AuthResult) marshalPayload() ([]byte, error) {

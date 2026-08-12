@@ -135,11 +135,11 @@ func (instance *serverFlow) refreshSessionQualitiesLocked(kind servercore.RelayE
 	attachments := instance.relay.Attachments()
 	qualities := make(map[flow.AttachmentKey]policy.QualitySnapshot, len(attachments))
 	for _, attachment := range attachments {
-		session := instance.host.session(attachment.SessionGeneration)
-		if session == nil {
+		_, quality, ok := instance.host.pathGroupQuality(attachment.SessionGeneration)
+		if !ok {
 			continue
 		}
-		qualities[attachment] = session.qualitySnapshot()
+		qualities[attachment] = quality
 	}
 	_, err := instance.relay.Handle(servercore.RelayEvent{
 		Kind: servercore.RelaySetSessionQualities, SessionQualities: qualities,
@@ -326,7 +326,8 @@ func (instance *serverFlow) executeLocked(actions []servercore.RelayAction) ([]s
 				quality = pending.session.qualitySnapshot()
 			}
 			admissionActions, err := instance.relay.Handle(servercore.RelayEvent{
-				Kind: servercore.RelaySendAdmitted, Generation: action.Generation, Quality: quality,
+				Kind: servercore.RelaySendAdmitted, Generation: action.Generation,
+				LaneGeneration: pending.session.generation, Quality: quality,
 			})
 			if err != nil {
 				instance.host.releaseWorker()
@@ -338,9 +339,9 @@ func (instance *serverFlow) executeLocked(actions []servercore.RelayAction) ([]s
 			actions = append(actions, admissionActions...)
 			instance.host.runReservedWorker(func() { instance.completeSend(action, pending) })
 		case servercore.RelayActionDataCredit:
-			session := instance.host.session(action.Attachment.SessionGeneration)
+			session := instance.host.physicalSession(action.LaneGeneration)
 			if session != nil {
-				session.runtime.observeDataCredit(action.DataCreditBytes, action.WriteCompletedAt, action.AcknowledgedAt, action.CapacityEligible)
+				session.runtime.observeFlowDataCredit(instance.key.FlowID, action.DataCreditBytes, action.WriteCompletedAt, action.AcknowledgedAt, action.CapacityEligible)
 			}
 		case servercore.RelayActionArmRetryDeadline:
 			instance.armTimer(relayTimerRetry, action.Generation, action.After)
@@ -367,15 +368,14 @@ func (instance *serverFlow) executeLocked(actions []servercore.RelayAction) ([]s
 			if session == nil || session.publish(instance.key.FlowID, action.Attachment) != nil {
 				lost = append(lost, action.Attachment)
 			} else {
+				_, quality, _ := instance.host.pathGroupQuality(action.Attachment.SessionGeneration)
 				followups = append(followups, servercore.RelayEvent{
 					Kind: servercore.RelaySetSessionQuality, Attachment: action.Attachment,
-					Quality: session.qualitySnapshot(),
+					Quality: quality,
 				})
 			}
 		case servercore.RelayActionAttachmentWithdrawn:
-			if session := instance.host.session(action.Attachment.SessionGeneration); session != nil {
-				session.release(instance.key.FlowID, action.Attachment)
-			}
+			instance.host.releaseAttachment(action.Attachment.SessionGeneration, instance.key.FlowID, action.Attachment)
 		}
 	}
 	return followups, lost, closes
@@ -416,7 +416,7 @@ func (instance *serverFlow) executeSend(action servercore.RelayAction) {
 }
 
 func (instance *serverFlow) admitSend(action servercore.RelayAction) (*pendingSessionWrite, bool) {
-	session := instance.host.session(action.Attachment.SessionGeneration)
+	session := instance.host.selectSession(action.Attachment.SessionGeneration, uint64(action.SendDataBytes))
 	if session == nil {
 		return nil, false
 	}

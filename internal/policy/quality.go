@@ -151,6 +151,14 @@ func (quality *Quality) DeliveryEstimate(payloadBytes uint64) time.Duration {
 	return deliveryEstimate(quality.Snapshot(), payloadBytes)
 }
 
+func (snapshot QualitySnapshot) DeliveryEstimate(payloadBytes uint64) time.Duration {
+	return deliveryEstimate(snapshot, payloadBytes)
+}
+
+func (snapshot QualitySnapshot) CapacityEstimate() float64 {
+	return effectiveCapacity(snapshot)
+}
+
 func deliveryEstimate(snapshot QualitySnapshot, payloadBytes uint64) time.Duration {
 	base := snapshot.SRTT
 	if base == 0 {

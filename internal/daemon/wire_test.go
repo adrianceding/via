@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/adrianceding/via/internal/auth"
+	"github.com/adrianceding/via/internal/flow"
 	"github.com/adrianceding/via/internal/protocol"
 	statusapi "github.com/adrianceding/via/internal/status"
 	"github.com/adrianceding/via/internal/transport"
@@ -24,10 +25,11 @@ func TestAuthenticatePublishesSameConnectionIDOnBothSides(t *testing.T) {
 		t.Fatal(err)
 	}
 	verifier := auth.NewVerifier(map[string]auth.Key{"edge-1": key}, auth.Key{9})
+	pathGroupID := protocol.PathGroupID{1, 2, 3, 4}
 
 	serverResult := make(chan error, 1)
 	go func() { serverResult <- authenticateServer(context.Background(), server, challenges, verifier) }()
-	if err := authenticateClient(context.Background(), client, "edge-1", key, bytes.NewReader(make([]byte, auth.NonceSize))); err != nil {
+	if err := authenticateClient(context.Background(), client, "edge-1", pathGroupID, key, bytes.NewReader(make([]byte, auth.NonceSize))); err != nil {
 		t.Fatalf("authenticateClient() error = %v", err)
 	}
 	if err := <-serverResult; err != nil {
@@ -35,6 +37,9 @@ func TestAuthenticatePublishesSameConnectionIDOnBothSides(t *testing.T) {
 	}
 	if client.connectionID == (auth.CorrelationID{}) || client.connectionID != server.connectionID {
 		t.Fatalf("connection IDs = %q / %q", client.connectionID, server.connectionID)
+	}
+	if client.pathGroupID != pathGroupID || server.pathGroupID != pathGroupID {
+		t.Fatalf("path group IDs = %x / %x", client.pathGroupID, server.pathGroupID)
 	}
 }
 
@@ -45,10 +50,11 @@ func TestAuthenticateFailureDoesNotPublishConnectionID(t *testing.T) {
 		t.Fatal(err)
 	}
 	verifier := auth.NewVerifier(map[string]auth.Key{"edge-1": {1}}, auth.Key{9})
+	pathGroupID := protocol.PathGroupID{1, 2, 3, 4}
 
 	serverResult := make(chan error, 1)
 	go func() { serverResult <- authenticateServer(context.Background(), server, challenges, verifier) }()
-	if err := authenticateClient(context.Background(), client, "edge-1", auth.Key{2}, bytes.NewReader(make([]byte, auth.NonceSize))); !errors.Is(err, ErrAuthentication) {
+	if err := authenticateClient(context.Background(), client, "edge-1", pathGroupID, auth.Key{2}, bytes.NewReader(make([]byte, auth.NonceSize))); !errors.Is(err, ErrAuthentication) {
 		t.Fatalf("authenticateClient() error = %v", err)
 	}
 	if err := <-serverResult; !errors.Is(err, ErrAuthentication) {
@@ -56,6 +62,9 @@ func TestAuthenticateFailureDoesNotPublishConnectionID(t *testing.T) {
 	}
 	if client.connectionID != (auth.CorrelationID{}) || server.connectionID != (auth.CorrelationID{}) {
 		t.Fatalf("failed connection IDs = %q / %q", client.connectionID, server.connectionID)
+	}
+	if client.pathGroupID != (protocol.PathGroupID{}) || server.pathGroupID != (protocol.PathGroupID{}) {
+		t.Fatalf("failed path group IDs = %x / %x", client.pathGroupID, server.pathGroupID)
 	}
 }
 
@@ -71,6 +80,42 @@ func newAuthenticationSessionPair(t *testing.T) (*wireSession, *wireSession) {
 		t.Fatal(err)
 	}
 	return client, server
+}
+
+func TestWireSessionsSharePathGroupAttachments(t *testing.T) {
+	first, err := newWireSession(context.Background(), 11, &clientTestTransportConnection{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := newWireSession(context.Background(), 12, &clientTestTransportConnection{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry, err := newWireAttachmentRegistry(101)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := first.bindAttachmentRegistry(registry); err != nil {
+		t.Fatal(err)
+	}
+	if err := second.bindAttachmentRegistry(registry); err != nil {
+		t.Fatal(err)
+	}
+	flowID := protocol.FlowID{1}
+	attachment := flow.AttachmentKey{SessionGeneration: 101, AttachmentGeneration: 7}
+	if err := first.reserve(flowID, attachment); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.publish(flowID, attachment); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := second.attachment(flowID); !ok || got != attachment {
+		t.Fatalf("second lane attachment = %#v, %t", got, ok)
+	}
+	second.release(flowID, attachment)
+	if _, ok := first.attachment(flowID); ok {
+		t.Fatal("attachment remained after release through second lane")
+	}
 }
 
 func TestWireSendContextHonorsParentDeadline(t *testing.T) {
