@@ -312,7 +312,7 @@ func (daemon *clientDaemon) run(ctx context.Context) error {
 
 func (daemon *clientDaemon) runSessionPool() {
 	refresh := func() {
-		_, snapshot, err := daemon.pathManager.Refresh()
+		events, snapshot, err := daemon.pathManager.Refresh()
 		// A large incremental diff still publishes an authoritative snapshot.
 		if err != nil && !errors.Is(err, pathcore.ErrSnapshotLimit) {
 			return
@@ -322,6 +322,9 @@ func (daemon *clientDaemon) runSessionPool() {
 		})
 		if err == nil {
 			daemon.statusObserver.syncInterfaces(snapshot)
+			if !clientRefreshNeedsSessionSync(events, actions) {
+				return
+			}
 			daemon.executeSessionActions(actions)
 		}
 	}
@@ -351,6 +354,10 @@ func (daemon *clientDaemon) runSessionPool() {
 			daemon.handlePoolEvent(event)
 		}
 	}
+}
+
+func clientRefreshNeedsSessionSync(events []pathcore.Event, actions []clientcore.SessionManagerAction) bool {
+	return len(events) != 0 || len(actions) != 0
 }
 
 func (daemon *clientDaemon) handlePoolEvent(event poolEvent) {

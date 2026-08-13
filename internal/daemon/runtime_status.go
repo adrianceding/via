@@ -49,6 +49,7 @@ type runtimeStatus struct {
 	flows       map[protocol.FlowID]runtimeFlowStatus
 	flowTraffic map[protocol.FlowID]runtimeFlowTraffic
 	sessions    map[string]statusapi.Session
+	fastestID   string
 	runtime     map[uint64]sessionRuntimeSnapshot
 	connections map[uint64]string
 	interfaces  map[int]struct{}
@@ -245,11 +246,24 @@ func (observer *runtimeStatus) upsertSessionObservation(observation runtimeSessi
 	if observer == nil || observation.generation == 0 || !observation.localAddress.IsValid() {
 		return
 	}
-	id := observer.hasher.SessionID(observation.generation)
-	if id == "" {
+	observer.mu.Lock()
+	id, entry, ok := observer.mergeSessionObservationLocked(observation)
+	if !ok {
+		observer.mu.Unlock()
 		return
 	}
-	observer.mu.Lock()
+	updates := observer.recomputeFastestLocked()
+	entry = observer.sessions[id]
+	observer.mu.Unlock()
+	observer.publishSessionUpdates(updates, id)
+	observer.repository.TryRecord(statusapi.Event{Kind: statusapi.EventUpsertSession, Session: entry})
+}
+
+func (observer *runtimeStatus) mergeSessionObservationLocked(observation runtimeSessionObservation) (string, statusapi.Session, bool) {
+	id := observer.hasher.SessionID(observation.generation)
+	if id == "" {
+		return "", statusapi.Session{}, false
+	}
 	previous, exists := observer.sessions[id]
 	if !exists {
 		observer.resources.Sessions++
@@ -295,11 +309,7 @@ func (observer *runtimeStatus) upsertSessionObservation(observation runtimeSessi
 		entry.Reconnects = observation.reconnects
 	}
 	observer.sessions[id] = entry
-	updates := observer.recomputeFastestLocked()
-	entry = observer.sessions[id]
-	observer.mu.Unlock()
-	observer.publishSessionUpdates(updates, id)
-	observer.repository.TryRecord(statusapi.Event{Kind: statusapi.EventUpsertSession, Session: entry})
+	return id, entry, true
 }
 
 // observeSessionDataReceived accumulates received DATA payload bytes per wire
@@ -344,20 +354,15 @@ func (observer *runtimeStatus) observeSessionRuntime(generation uint64, snapshot
 		return
 	}
 	previousProbeSamples := entry.Quality.ProbeSamples
-	previousStall := entry.Quality.StallPenaltyMicros
-	previousRTT := entry.Quality.SmoothedRTTMicros
-	previousState := entry.State
+	previous := entry
 	entry.Quality = statusQualityFromRuntime(snapshot, entry.Quality)
 	if snapshot.Quality.ProbeSamples > previousProbeSamples {
 		entry.LastProbeAt = observer.now()
 	}
 	observer.sessions[id] = entry
-	// The fastest marker depends only on stall, smoothed RTT and session state.
-	// Quality-only updates (capacity, queue depth, counters) cannot move it, so
-	// skip the full recomputation unless one of those inputs changed.
 	var updates []statusapi.Session
-	if entry.State != previousState || entry.Quality.StallPenaltyMicros != previousStall || entry.Quality.SmoothedRTTMicros != previousRTT {
-		updates = observer.recomputeFastestLocked()
+	if sessionRankChanged(previous, entry) {
+		updates = observer.updateFastestForSessionLocked(id, previous)
 		entry = observer.sessions[id]
 	}
 	observer.mu.Unlock()
@@ -498,7 +503,7 @@ func (observer *runtimeStatus) syncClientSessions(transportName, principalID str
 	if observer == nil {
 		return
 	}
-	next := make(map[string]struct{}, len(snapshot.Sessions))
+	observations := make([]runtimeSessionObservation, 0, len(snapshot.Sessions))
 	for _, session := range snapshot.Sessions {
 		if session.Generation == 0 {
 			continue
@@ -518,11 +523,19 @@ func (observer *runtimeStatus) syncClientSessions(transportName, principalID str
 			observation.connectionID = wire.connectionID.String()
 			observation.principalID = principalID
 		}
-		observer.upsertSessionObservation(observation)
-		next[observer.hasher.SessionID(session.Generation)] = struct{}{}
+		observations = append(observations, observation)
 	}
+
+	next := make(map[string]struct{}, len(snapshot.Sessions))
 	var removed []string
+	entries := make([]statusapi.Session, 0, len(observations))
 	observer.mu.Lock()
+	for _, observation := range observations {
+		id, _, ok := observer.mergeSessionObservationLocked(observation)
+		if ok {
+			next[id] = struct{}{}
+		}
+	}
 	for id := range observer.sessions {
 		if _, exists := next[id]; !exists {
 			delete(observer.sessions, id)
@@ -536,11 +549,17 @@ func (observer *runtimeStatus) syncClientSessions(transportName, principalID str
 		observer.publishResourcesLocked()
 	}
 	updates := observer.recomputeFastestLocked()
+	for id := range next {
+		entries = append(entries, observer.sessions[id])
+	}
 	observer.mu.Unlock()
 	for _, id := range removed {
 		observer.repository.TryRecord(statusapi.Event{Kind: statusapi.EventRemoveSession, SessionID: id})
 	}
 	observer.publishSessionUpdates(updates, "")
+	for _, entry := range entries {
+		observer.repository.TryRecord(statusapi.Event{Kind: statusapi.EventUpsertSession, Session: entry})
+	}
 }
 
 func (observer *runtimeStatus) recomputeFastestLocked() []statusapi.Session {
@@ -570,7 +589,60 @@ func (observer *runtimeStatus) recomputeFastestLocked() []statusapi.Session {
 		observer.sessions[id] = session
 		updates = append(updates, session)
 	}
+	observer.fastestID = fastestID
 	return updates
+}
+
+func (observer *runtimeStatus) updateFastestForSessionLocked(id string, previous statusapi.Session) []statusapi.Session {
+	entry, exists := observer.sessions[id]
+	if !exists || observer.fastestID == "" {
+		return observer.recomputeFastestLocked()
+	}
+	if id == observer.fastestID {
+		if sessionRankEligible(entry) && !sessionRankLess(previous, entry) {
+			return nil
+		}
+		return observer.recomputeFastestLocked()
+	}
+	fastest, exists := observer.sessions[observer.fastestID]
+	if !exists || !sessionRankEligible(fastest) {
+		return observer.recomputeFastestLocked()
+	}
+	if !sessionRankLess(entry, fastest) {
+		return nil
+	}
+	fastest.Fastest = false
+	entry.Fastest = true
+	observer.sessions[observer.fastestID] = fastest
+	observer.sessions[id] = entry
+	observer.fastestID = id
+	return []statusapi.Session{fastest, entry}
+}
+
+func sessionRankChanged(previous, current statusapi.Session) bool {
+	return previous.State != current.State ||
+		previous.Quality.StallPenaltyMicros != current.Quality.StallPenaltyMicros ||
+		previous.Quality.SmoothedRTTMicros != current.Quality.SmoothedRTTMicros
+}
+
+func sessionRankEligible(session statusapi.Session) bool {
+	return session.State == statusapi.SessionReady && session.Quality.SmoothedRTTMicros != 0
+}
+
+func sessionRankLess(candidate, current statusapi.Session) bool {
+	if !sessionRankEligible(candidate) {
+		return false
+	}
+	if !sessionRankEligible(current) {
+		return true
+	}
+	if candidate.Quality.StallPenaltyMicros != current.Quality.StallPenaltyMicros {
+		return candidate.Quality.StallPenaltyMicros < current.Quality.StallPenaltyMicros
+	}
+	if candidate.Quality.SmoothedRTTMicros != current.Quality.SmoothedRTTMicros {
+		return candidate.Quality.SmoothedRTTMicros < current.Quality.SmoothedRTTMicros
+	}
+	return candidate.IDHash < current.IDHash
 }
 
 func (observer *runtimeStatus) publishSessionUpdates(updates []statusapi.Session, exceptID string) {

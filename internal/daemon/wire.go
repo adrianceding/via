@@ -19,7 +19,7 @@ import (
 const (
 	authTimeout   = 5 * time.Second
 	sendTimeout   = 10 * time.Second
-	probeInterval = time.Second
+	probeInterval = 5 * time.Second
 	probeTimeout  = 3 * time.Second
 )
 
@@ -134,6 +134,9 @@ func (session *wireSession) startProbe(now time.Time) (protocol.Probe, bool, boo
 	if expired {
 		session.probeStall = true
 		session.runtime.setStallPenalty(probeTimeout)
+		session.probeToken = 0
+		session.probeSent = time.Time{}
+		session.probeProgress = false
 	}
 	if session.probeToken != 0 && !expired ||
 		!session.lastProbe.IsZero() && now.Sub(session.lastProbe) < probeInterval ||

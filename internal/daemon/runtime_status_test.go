@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/adrianceding/via/internal/auth"
+	clientcore "github.com/adrianceding/via/internal/client"
 	"github.com/adrianceding/via/internal/flow"
 	pathcore "github.com/adrianceding/via/internal/path"
 	"github.com/adrianceding/via/internal/policy"
@@ -472,6 +473,58 @@ func TestRuntimeStatusMovesFastestSessionMarker(t *testing.T) {
 		snapshot := repository.Snapshot()
 		return len(snapshot.Sessions) == 1 && snapshot.Sessions[0].Interface == "wan-slow" && snapshot.Sessions[0].Fastest
 	}, "fastest marker after removal")
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRuntimeStatusBatchClientSyncSelectsFastestSession(t *testing.T) {
+	repository, err := statusapi.NewRepository(statusapi.Limits{Interfaces: 1, Sessions: 3, Flows: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- repository.Run(ctx, nil) }()
+	var key [32]byte
+	key[0] = 7
+	observer, err := newRuntimeStatusWithKey(repository, 1, 1, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for generation, rtt := range map[uint64]time.Duration{
+		1: 50 * time.Millisecond,
+		2: 20 * time.Millisecond,
+		3: 80 * time.Millisecond,
+	} {
+		observer.runtime[generation] = sessionRuntimeSnapshot{
+			Quality: policy.QualitySnapshot{ProbeSamples: 1, SRTT: rtt},
+		}
+	}
+	observer.syncClientSessions("tcp", "edge-1", clientcore.SessionManagerSnapshot{
+		Sessions: []clientcore.ManagedSessionSnapshot{
+			{Generation: 1, Candidate: pathcore.Candidate{InterfaceIndex: 1, InterfaceName: "wan-slow", LocalAddress: netip.MustParseAddr("192.0.2.1")}, PathGroupID: protocol.PathGroupID{1}, State: clientcore.ManagedSessionReady},
+			{Generation: 2, Candidate: pathcore.Candidate{InterfaceIndex: 2, InterfaceName: "wan-fast", LocalAddress: netip.MustParseAddr("192.0.2.2")}, PathGroupID: protocol.PathGroupID{1}, State: clientcore.ManagedSessionReady},
+			{Generation: 3, Candidate: pathcore.Candidate{InterfaceIndex: 3, InterfaceName: "wan-slower", LocalAddress: netip.MustParseAddr("192.0.2.3")}, PathGroupID: protocol.PathGroupID{1}, State: clientcore.ManagedSessionReady},
+		},
+	}, nil)
+	waitFor(t, time.Second, func() bool {
+		return len(repository.Snapshot().Sessions) == 3
+	}, "batched client sessions")
+	fastest := ""
+	for _, session := range repository.Snapshot().Sessions {
+		if session.Fastest {
+			if fastest != "" {
+				t.Fatalf("multiple fastest sessions = %q and %q", fastest, session.Interface)
+			}
+			fastest = session.Interface
+		}
+	}
+	if fastest != "wan-fast" {
+		t.Fatalf("fastest session = %q, want wan-fast", fastest)
+	}
 	cancel()
 	if err := <-done; err != nil {
 		t.Fatal(err)

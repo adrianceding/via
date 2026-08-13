@@ -41,6 +41,27 @@ func TestClientRelayNeedsSessionRefresh(t *testing.T) {
 	}
 }
 
+func TestClientRefreshNeedsSessionSync(t *testing.T) {
+	tests := []struct {
+		name    string
+		events  []pathcore.Event
+		actions []clientcore.SessionManagerAction
+		want    bool
+	}{
+		{name: "unchanged"},
+		{name: "path event", events: []pathcore.Event{{Kind: pathcore.CandidateAdded}}, want: true},
+		{name: "session action", actions: []clientcore.SessionManagerAction{{Kind: clientcore.SessionActionDial}}, want: true},
+		{name: "path event and session action", events: []pathcore.Event{{Kind: pathcore.CandidateRemoved}}, actions: []clientcore.SessionManagerAction{{Kind: clientcore.SessionActionLost}}, want: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := clientRefreshNeedsSessionSync(test.events, test.actions); got != test.want {
+				t.Fatalf("clientRefreshNeedsSessionSync() = %t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
 func TestClientFlowEventBackpressureDoesNotCancelFlow(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

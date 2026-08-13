@@ -510,6 +510,30 @@ func TestSessionRuntimeThrottlesDiagnosticNotifications(t *testing.T) {
 	}
 }
 
+func TestSessionRuntimeAlwaysPublishesProbeQuality(t *testing.T) {
+	now := time.Unix(1_500, 0).UTC()
+	runtime, err := newSessionRuntimeWithClock(context.Background(), newRuntimeTestConnection(), nil, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.close(transport.ErrClosed)
+	var snapshots []sessionRuntimeSnapshot
+	runtime.setSnapshotObserver(func(snapshot sessionRuntimeSnapshot) {
+		snapshots = append(snapshots, snapshot)
+	})
+
+	runtime.observeProbe(20 * time.Millisecond)
+	now = now.Add(snapshotNotifyInterval / 2)
+	runtime.observeProbe(30 * time.Millisecond)
+	if got := len(snapshots); got != 3 {
+		t.Fatalf("probe notifications = %d, want 3", got)
+	}
+	latest := snapshots[len(snapshots)-1].Quality
+	if latest.ProbeSamples != 2 || latest.SRTT == 0 {
+		t.Fatalf("latest probe quality = %#v", latest)
+	}
+}
+
 func TestSessionRuntimeTerminalCloseAlwaysNotifiesObserver(t *testing.T) {
 	now := time.Unix(2_000, 0).UTC()
 	connection := newRuntimeTestConnection()

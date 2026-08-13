@@ -491,7 +491,11 @@ func (runtime *sessionRuntime) observeProbe(rtt time.Duration) {
 	}
 	runtime.mu.Lock()
 	_ = runtime.quality.ObserveProbe(rtt)
-	snapshot, notify := runtime.snapshotIfNotifyDueLocked()
+	notify := runtime.onSnapshot != nil
+	if notify {
+		runtime.lastNotify = runtime.now()
+	}
+	snapshot := runtime.snapshotLocked()
 	runtime.mu.Unlock()
 	if notify {
 		runtime.notifySnapshot(snapshot)
