@@ -108,6 +108,109 @@ func TestClientFlowRemoteOverflowDoesNotBlockSharedSession(t *testing.T) {
 	}
 }
 
+func TestClientFlowDefersRemoteMessagesUntilAttachmentPublication(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	flowID := protocol.FlowID{1}
+	attachment := flow.AttachmentKey{SessionGeneration: 7, AttachmentGeneration: 9}
+	machine := flow.NewFlowWithWindows(1024, 1024)
+	relay, err := clientcore.NewApplicationRelay(flowID, policy.Config{
+		Mode: protocol.DeliveryAdaptive, Selection: protocol.PathFastest,
+	}, machine)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := relay.Handle(clientcore.ApplicationRelayEvent{Kind: clientcore.ApplicationRelayStart}); err != nil {
+		t.Fatal(err)
+	}
+	coordinator := pendingOpenCoordinator(t, flowID, attachment.SessionGeneration)
+	instance := &clientFlow{
+		ctx: ctx, cancel: cancel, flowID: flowID, relay: relay, openJoin: coordinator,
+		host:        &clientDaemon{configuration: config.Client{Limits: config.ClientLimits{FlowReceiveWindowBytes: 1024}}},
+		relayTimers: make(map[relayTimerKey]*time.Timer),
+	}
+	defer func() {
+		for _, timer := range instance.relayTimers {
+			timer.Stop()
+		}
+	}()
+	data := protocol.Data{FlowID: flowID, Offset: 0, Bytes: []byte("banner")}
+	instance.handleRemote(clientFlowRemote{message: data, sessionGeneration: attachment.SessionGeneration})
+	if len(instance.deferredRemote) != 1 || instance.deferredBytes != uint64(len(data.Bytes)) {
+		t.Fatalf("deferred remote = %#v, bytes %d", instance.deferredRemote, instance.deferredBytes)
+	}
+
+	if _, err := relay.Handle(clientcore.ApplicationRelayEvent{
+		Kind: clientcore.ApplicationRelayReserveAttachment, Generation: 11, Attachment: attachment,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := relay.Handle(clientcore.ApplicationRelayEvent{
+		Kind: clientcore.ApplicationRelayPublishAttachment, Generation: 11, Attachment: attachment,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	instance.replayDeferredRemote(attachment)
+	instance.drainOwnedEvents()
+	if len(instance.deferredRemote) != 0 || instance.deferredBytes != 0 {
+		t.Fatalf("deferred remote after publication = %#v, bytes %d", instance.deferredRemote, instance.deferredBytes)
+	}
+	if snapshot := relay.Snapshot(); snapshot.Flow.Rx.BufferedBytes != uint64(len(data.Bytes)) {
+		t.Fatalf("replayed receive snapshot = %#v", snapshot.Flow.Rx)
+	}
+}
+
+func TestClientFlowDeferredRemoteMessagesAreBounded(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	instance := &clientFlow{
+		ctx: ctx, cancel: cancel, relay: &clientcore.ApplicationRelay{},
+		openJoin: pendingOpenCoordinator(t, protocol.FlowID{1}, 7),
+		host:     &clientDaemon{configuration: config.Client{Limits: config.ClientLimits{FlowReceiveWindowBytes: 4}}},
+	}
+	instance.deferRemote(clientFlowRemote{
+		message: protocol.Data{FlowID: protocol.FlowID{1}, Bytes: []byte("12345")}, sessionGeneration: 7,
+	})
+	select {
+	case <-ctx.Done():
+	default:
+		t.Fatal("deferred remote overflow did not cancel the flow")
+	}
+	if got := protocol.ResetReason(instance.cancelCode.Load()); got != protocol.ResetResourceLimit {
+		t.Fatalf("overflow reset reason = %d, want %d", got, protocol.ResetResourceLimit)
+	}
+}
+
+func pendingOpenCoordinator(t *testing.T, flowID protocol.FlowID, sessionGeneration uint64) *clientcore.OpenJoinCoordinator {
+	t.Helper()
+	coordinator, err := clientcore.NewOpenJoinCoordinator(clientcore.OpenJoinSpec{
+		Target:       protocol.Target{Address: netip.MustParseAddr("192.0.2.1"), Port: 80},
+		DeliveryMode: protocol.DeliveryAdaptive, PathSelection: protocol.PathFastest,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	actions, err := coordinator.Handle(clientcore.OpenJoinEvent{Kind: clientcore.OpenJoinStart})
+	if err != nil || len(actions) == 0 {
+		t.Fatalf("start actions = %#v, %v", actions, err)
+	}
+	identityGeneration := actions[0].Generation
+	if _, err := coordinator.Handle(clientcore.OpenJoinEvent{
+		Kind: clientcore.OpenJoinIdentityGenerated, Generation: identityGeneration,
+		FlowID: flowID, OpenToken: protocol.OpenToken{1},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := coordinator.Handle(clientcore.OpenJoinEvent{
+		Kind: clientcore.OpenJoinSessionReady, SessionGeneration: sessionGeneration,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := coordinator.PendingAttempt(sessionGeneration, clientcore.OpenJoinAttemptOpen); !ok {
+		t.Fatal("coordinator did not start pending OPEN")
+	}
+	return coordinator
+}
+
 func TestClientFlowInitialOpenHeadStartUsesBoundedSessionRTT(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

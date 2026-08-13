@@ -33,7 +33,7 @@ type bucketSpec struct {
 }
 
 var (
-	authSourceSpec    = bucketSpec{interval: 6 * time.Second, burst: 5}
+	authSourceSpec    = bucketSpec{interval: 6 * time.Second, burst: 64}
 	authGlobalSpec    = bucketSpec{interval: 60 * time.Millisecond, burst: 100}
 	openPrincipalSpec = bucketSpec{interval: 60 * time.Millisecond, burst: 128}
 	openGlobalSpec    = bucketSpec{interval: 6 * time.Millisecond, burst: 512}
@@ -119,7 +119,7 @@ func NewRateLimiter(maxKeys int) (*RateLimiter, error) {
 	}, nil
 }
 
-// AllowAuth applies 10/minute with burst 5 per source and 1000/minute with burst 100 globally.
+// AllowAuth applies 10/minute with burst 64 per source and 1000/minute with burst 100 globally.
 func (limiter *RateLimiter) AllowAuth(now time.Time, source netip.Addr) bool {
 	if limiter == nil {
 		return false

@@ -557,10 +557,8 @@ func (daemon *clientDaemon) readClientSession(session *wireSession) {
 			if !ok {
 				return
 			}
-			attachment, published := session.attachment(flowID)
-			if published {
-				daemon.routeClientMessage(session, flowID, message, attachment)
-			}
+			attachment, _ := session.attachment(flowID)
+			daemon.routeClientMessage(session, flowID, message, attachment)
 		default:
 			return
 		}

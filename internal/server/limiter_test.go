@@ -15,7 +15,7 @@ func TestRateLimiterAuthBurstRefillAndIPv6Aggregation(t *testing.T) {
 	limiter := mustRateLimiter(t, DefaultRateLimitKeys)
 	now := time.Unix(100, 0)
 	source := netip.MustParseAddr("192.0.2.10")
-	for attempt := 0; attempt < 5; attempt++ {
+	for attempt := 0; attempt < authSourceSpec.burst; attempt++ {
 		if !limiter.AllowAuth(now, source) {
 			t.Fatalf("auth burst attempt %d rejected", attempt+1)
 		}
@@ -34,7 +34,7 @@ func TestRateLimiterAuthBurstRefillAndIPv6Aggregation(t *testing.T) {
 	first := netip.MustParseAddr("2001:db8:1:2::1")
 	samePrefix := netip.MustParseAddr("2001:db8:1:2::ffff")
 	otherPrefix := netip.MustParseAddr("2001:db8:1:3::1")
-	for attempt := 0; attempt < 5; attempt++ {
+	for attempt := 0; attempt < authSourceSpec.burst; attempt++ {
 		if !limiter.AllowAuth(now, first) {
 			t.Fatalf("IPv6 burst attempt %d rejected", attempt+1)
 		}

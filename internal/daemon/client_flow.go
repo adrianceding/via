@@ -42,6 +42,7 @@ type clientFlowRemote struct {
 const (
 	minimumInitialOpenHeadStart = 25 * time.Millisecond
 	maximumInitialOpenHeadStart = 250 * time.Millisecond
+	maxDeferredRemoteMessages   = 2*flow.MaxReplaySegments + flow.MaxAttachments
 )
 
 type clientFlowSessionReady struct {
@@ -98,6 +99,8 @@ type clientFlow struct {
 	openJoinTimers map[openJoinTimerKey]*time.Timer
 	relayTimers    map[relayTimerKey]*time.Timer
 	publications   map[flow.AttachmentKey]uint64
+	deferredRemote []clientFlowRemote
+	deferredBytes  uint64
 	// Events emitted synchronously by the actor bypass the bounded external queue.
 	ownedEvents    []any
 	recoveringSlot bool
@@ -604,11 +607,61 @@ func (instance *clientFlow) handleRemote(event clientFlowRemote) {
 			})
 		}
 	case protocol.Data, protocol.ACK, protocol.FIN, protocol.FINACK, protocol.Reset:
-		if instance.relay != nil {
+		if event.attachment == (flow.AttachmentKey{}) {
+			if session := instance.host.session(event.sessionGeneration); session != nil {
+				event.attachment, _ = session.attachment(instance.flowID)
+			}
+		}
+		if event.attachment != (flow.AttachmentKey{}) && instance.relay != nil {
 			instance.handleRelay(clientcore.ApplicationRelayEvent{
 				Kind: clientcore.ApplicationRelayRemoteMessage, Message: event.message, Attachment: event.attachment,
 			})
+		} else {
+			instance.deferRemote(event)
 		}
+	}
+}
+
+func (instance *clientFlow) deferRemote(event clientFlowRemote) {
+	if instance == nil || instance.relay == nil || event.sessionGeneration == 0 {
+		return
+	}
+	_, opening := instance.openJoin.PendingAttempt(event.sessionGeneration, clientcore.OpenJoinAttemptOpen)
+	_, joining := instance.openJoin.PendingAttempt(event.sessionGeneration, clientcore.OpenJoinAttemptJoin)
+	if !opening && !joining {
+		return
+	}
+	dataBytes := uint64(0)
+	if data, ok := event.message.(protocol.Data); ok {
+		dataBytes = uint64(len(data.Bytes))
+	}
+	limit := instance.host.configuration.Limits.FlowReceiveWindowBytes
+	if len(instance.deferredRemote) >= maxDeferredRemoteMessages || instance.deferredBytes > limit ||
+		dataBytes > limit-instance.deferredBytes {
+		instance.requestCancel(protocol.ResetResourceLimit)
+		return
+	}
+	instance.deferredRemote = append(instance.deferredRemote, event)
+	instance.deferredBytes += dataBytes
+}
+
+func (instance *clientFlow) replayDeferredRemote(attachment flow.AttachmentKey) {
+	if instance == nil || attachment == (flow.AttachmentKey{}) || len(instance.deferredRemote) == 0 {
+		return
+	}
+	pending := instance.deferredRemote
+	instance.deferredRemote = nil
+	instance.deferredBytes = 0
+	for _, event := range pending {
+		if event.sessionGeneration != attachment.SessionGeneration {
+			instance.deferredRemote = append(instance.deferredRemote, event)
+			if data, ok := event.message.(protocol.Data); ok {
+				instance.deferredBytes += uint64(len(data.Bytes))
+			}
+			continue
+		}
+		event.attachment = attachment
+		instance.emitOwned(event)
 	}
 }
 
@@ -1017,6 +1070,7 @@ func (instance *clientFlow) executeRelay(actions []clientcore.ApplicationRelayAc
 					SessionGeneration: action.Attachment.SessionGeneration,
 				})
 			} else {
+				instance.replayDeferredRemote(action.Attachment)
 				_, quality, _ := instance.host.pathGroupQuality(action.Attachment.SessionGeneration)
 				instance.handleRelay(clientcore.ApplicationRelayEvent{
 					Kind: clientcore.ApplicationRelaySetSessionQuality, Attachment: action.Attachment,
