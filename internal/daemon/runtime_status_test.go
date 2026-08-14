@@ -245,7 +245,9 @@ func TestRuntimeStatusPublishesResourceLimitsAndRejections(t *testing.T) {
 	observer.setResourceLimits(64, 128, 16, 8, 512)
 	observer.rejectSession()
 	observer.rejectSession()
-	observer.rejectFlow()
+	observer.rejectFlow(flowRejectionRateLimited)
+	observer.rejectFlow(flowRejectionOpeningCapacity)
+	observer.rejectFlow(flowRejectionTargetDialCapacity)
 	observer.rejectSOCKS()
 	observer.rejectSOCKS()
 	observer.rejectSOCKS()
@@ -253,7 +255,9 @@ func TestRuntimeStatusPublishesResourceLimitsAndRejections(t *testing.T) {
 	waitFor(t, time.Second, func() bool {
 		snapshot := repository.Snapshot()
 		return snapshot.Resources.MaxSessions == 64 && snapshot.Rejected.Sessions == 2 &&
-			snapshot.Rejected.Flows == 1 && snapshot.Rejected.SOCKSConnections == 3
+			snapshot.Rejected.Flows == 3 && snapshot.Rejected.FlowRateLimited == 1 &&
+			snapshot.Rejected.FlowOpeningCapacity == 1 && snapshot.Rejected.FlowTargetDialCapacity == 1 &&
+			snapshot.Rejected.SOCKSConnections == 3
 	}, "resource limits and rejections")
 	snapshot := repository.Snapshot()
 	if snapshot.Resources.MaxFlows != 128 || snapshot.Resources.MaxSOCKSConnections != 16 ||

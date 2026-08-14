@@ -65,7 +65,11 @@ func TestHTTPHandlerExposesOnlyFixedReadRoutes(t *testing.T) {
 	now := time.Unix(4_000, 0).UTC()
 	snapshot := Snapshot{
 		GeneratedAt: now, Healthy: true, Role: RoleClient,
-		Resources: Resources{Flows: 1, Sessions: 1}, Counters: Counters{BytesSent: 10},
+		Resources: Resources{Flows: 1, Sessions: 1},
+		Rejected: Rejected{
+			Flows: 3, FlowRateLimited: 1, FlowOpeningCapacity: 1, FlowTargetDialCapacity: 1,
+		},
+		Counters:   Counters{BytesSent: 10},
 		Interfaces: []Interface{{Index: 1, Name: "eth0", Addresses: []string{"192.0.2.1"}, Reason: InterfaceEligible}},
 		Sessions:   []Session{validTestSession(1)},
 		Flows:      []Flow{validTestFlow(2)},
@@ -100,8 +104,10 @@ func TestHTTPHandlerExposesOnlyFixedReadRoutes(t *testing.T) {
 	var summary summaryResponse
 	summaryRecorder := httptest.NewRecorder()
 	handler.ServeHTTP(summaryRecorder, httptest.NewRequest(http.MethodGet, "/api/v1/summary", nil))
-	if err := json.Unmarshal(summaryRecorder.Body.Bytes(), &summary); err != nil || summary.Role != RoleClient {
-		t.Fatalf("summary role = %v, %v", summary.Role, err)
+	if err := json.Unmarshal(summaryRecorder.Body.Bytes(), &summary); err != nil || summary.Role != RoleClient ||
+		summary.Rejected.Flows != 3 || summary.Rejected.FlowRateLimited != 1 ||
+		summary.Rejected.FlowOpeningCapacity != 1 || summary.Rejected.FlowTargetDialCapacity != 1 {
+		t.Fatalf("summary = %#v, %v", summary, err)
 	}
 
 	for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete} {

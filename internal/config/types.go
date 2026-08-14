@@ -93,20 +93,24 @@ func (limits ClientLimits) flowWindows() (uint64, uint64) {
 }
 
 type ServerLimits struct {
-	Flows                  uint64
-	PerPrincipalFlows      uint64
-	OpeningFlows           uint64
-	RecoveringFlows        uint64
-	Sessions               uint64
-	SessionsPerPrincipal   uint64
-	AuthInProgress         uint64
-	TargetDials            uint64
-	Tombstones             uint64
-	TombstonesPerPrincipal uint64
-	RateLimitKeys          uint64
-	FlowSendWindowBytes    uint64
-	FlowReceiveWindowBytes uint64
-	MemoryBudgetBytes      uint64
+	Flows                         uint64
+	PerPrincipalFlows             uint64
+	OpeningFlows                  uint64
+	RecoveringFlows               uint64
+	Sessions                      uint64
+	SessionsPerPrincipal          uint64
+	AuthInProgress                uint64
+	TargetDials                   uint64
+	Tombstones                    uint64
+	TombstonesPerPrincipal        uint64
+	RateLimitKeys                 uint64
+	OpenRatePerMinutePerPrincipal uint64
+	OpenBurstPerPrincipal         uint64
+	OpenRatePerMinuteGlobal       uint64
+	OpenBurstGlobal               uint64
+	FlowSendWindowBytes           uint64
+	FlowReceiveWindowBytes        uint64
+	MemoryBudgetBytes             uint64
 }
 
 func (limits ServerLimits) flowWindows() (uint64, uint64) {
@@ -168,6 +172,8 @@ func defaultServerLimits() ServerLimits {
 		Flows: 8192, PerPrincipalFlows: 8192, OpeningFlows: 512, RecoveringFlows: 2048,
 		Sessions: 4096, SessionsPerPrincipal: 4096, AuthInProgress: 512, TargetDials: 512,
 		Tombstones: 32768, TombstonesPerPrincipal: 32768, RateLimitKeys: 16384,
+		OpenRatePerMinutePerPrincipal: 1_000, OpenBurstPerPrincipal: 256,
+		OpenRatePerMinuteGlobal: 10_000, OpenBurstGlobal: 512,
 		FlowSendWindowBytes: DefaultFlowWindowBytes, FlowReceiveWindowBytes: DefaultFlowWindowBytes,
 	}
 }

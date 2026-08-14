@@ -492,10 +492,6 @@ func (instance *clientFlow) executeOpenJoin(actions []clientcore.OpenJoinAction)
 			instance.signalResult(protocol.OpenSuccess)
 		case clientcore.OpenJoinActionFailFlow:
 			instance.signalResult(action.OpenResult)
-			if instance.relay != nil {
-				instance.handleRelay(clientcore.ApplicationRelayEvent{Kind: clientcore.ApplicationRelayResetRequested, ResetReason: protocol.ResetInternalFailure})
-			}
-			instance.cancel()
 		}
 	}
 	instance.sendOrderedOpens(openActions)
@@ -1213,7 +1209,11 @@ func (instance *clientFlow) cleanup() {
 }
 
 func (instance *clientFlow) close() {
+	instance.closeFor(protocol.ResetCancelled)
+}
+
+func (instance *clientFlow) closeFor(reason protocol.ResetReason) {
 	if instance != nil {
-		instance.requestCancel(protocol.ResetCancelled)
+		instance.requestCancel(reason)
 	}
 }

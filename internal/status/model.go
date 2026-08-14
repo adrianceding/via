@@ -127,9 +127,12 @@ type Resources struct {
 // Rejected counts admission denials since daemon start. Each counter
 // saturates and is reset only on process restart.
 type Rejected struct {
-	Flows            uint64 `json:"flows"`
-	Sessions         uint64 `json:"sessions"`
-	SOCKSConnections uint64 `json:"socks_connections"`
+	Flows                  uint64 `json:"flows"`
+	FlowRateLimited        uint64 `json:"flow_rate_limited"`
+	FlowOpeningCapacity    uint64 `json:"flow_opening_capacity"`
+	FlowTargetDialCapacity uint64 `json:"flow_target_dial_capacity"`
+	Sessions               uint64 `json:"sessions"`
+	SOCKSConnections       uint64 `json:"socks_connections"`
 }
 
 type Counters struct {

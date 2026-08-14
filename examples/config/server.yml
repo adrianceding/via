@@ -42,8 +42,8 @@ principals:
 #     username: "observer"
 #     password: "replace-with-a-strong-password"
 
-# 可选：所有数量字段省略或设为 0 均表示不设置人工配额。
-# Omitting a count or setting it to 0 disables its configured quota.
+# 可选：所有数量字段省略或设为 0 时使用安全默认值；不能关闭内部硬上限。
+# Omitting a count or setting it to 0 uses a safe default; internal hard limits cannot be disabled.
 # memory_budget_bytes 为 0 时不启用配置内存预算。
 # Setting memory_budget_bytes to 0 disables the configured memory budget.
 # limits:
@@ -58,9 +58,13 @@ principals:
 #   tombstones: 0                  # 已结束数据流的短期记录总数，用于处理迟到或重复消息 / Short-lived records for closed flows, used for late or duplicate messages
 #   tombstones_per_principal: 0    # 单个客户端身份的结束记录数，不得大于 tombstones / Closed-flow records for one identity; cannot exceed tombstones
 #   rate_limit_keys: 0             # 速率限制器同时保存的客户端或数据流状态数 / Client or flow states retained by rate limiters
+#   open_rate_per_minute_per_principal: 1000 # 单个身份每分钟持续允许的 OPEN；范围 1..60000 / Sustained OPEN rate per identity per minute; range 1..60000
+#   open_burst_per_principal: 256           # 单个身份的瞬时 OPEN；默认 min(opening_flows, 256) / Immediate OPEN burst per identity; defaults to min(opening_flows, 256)
+#   open_rate_per_minute_global: 10000      # 所有身份每分钟持续允许的 OPEN，不得小于单身份值 / Sustained global OPEN rate per minute; cannot be below the per-identity rate
+#   open_burst_global: 512                  # 所有身份的瞬时 OPEN；默认 opening_flows，且不得小于单身份值 / Immediate global OPEN burst; defaults to opening_flows and cannot be below the per-identity burst
 #   flow_send_window_bytes: 4194304    # 每个 Flow 的发送窗口，默认 320 KiB，范围 65512 到 4 MiB / Per-flow send window; default 320 KiB, range 65512 to 4 MiB
 #   flow_receive_window_bytes: 4194304 # 每个 Flow 的接收窗口，默认 320 KiB，范围 65512 到 4 MiB / Per-flow receive window; default 320 KiB, range 65512 to 4 MiB
-#   memory_budget_bytes: 0         # 估算资源超过此字节数时拒绝启动；0 表示不检查 / Reject startup above this estimated resource size; 0 disables the check
+#   memory_budget_bytes: 0         # 估算资源超过此字节数时拒绝启动；仅此字段的 0 表示不检查 / Reject startup above this estimated resource size; only this field uses 0 to disable the check
 
 # 可选：以下均为默认值。通常无需修改。
 # The values below are defaults and usually do not need to be changed.

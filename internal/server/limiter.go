@@ -18,6 +18,13 @@ const (
 
 var ErrRateLimitConfiguration = errors.New("server: invalid rate limit configuration")
 
+type OpenRateLimits struct {
+	PrincipalRatePerMinute int
+	PrincipalBurst         int
+	GlobalRatePerMinute    int
+	GlobalBurst            int
+}
+
 type rateKeyKind uint8
 
 const (
@@ -35,8 +42,10 @@ type bucketSpec struct {
 var (
 	authSourceSpec    = bucketSpec{interval: 6 * time.Second, burst: 64}
 	authGlobalSpec    = bucketSpec{interval: 60 * time.Millisecond, burst: 100}
-	openPrincipalSpec = bucketSpec{interval: 60 * time.Millisecond, burst: 128}
-	openGlobalSpec    = bucketSpec{interval: 6 * time.Millisecond, burst: 512}
+	defaultOpenLimits = OpenRateLimits{
+		PrincipalRatePerMinute: 1_000, PrincipalBurst: 128,
+		GlobalRatePerMinute: 10_000, GlobalBurst: 512,
+	}
 	joinFlowSpec      = bucketSpec{interval: 6 * time.Second, burst: flow.MaxAttachments}
 	joinPrincipalSpec = bucketSpec{interval: 30 * time.Millisecond, burst: 128}
 )
@@ -107,16 +116,38 @@ type RateLimiter struct {
 	keys       map[rateKey]*rateEntry
 	authGlobal rateBucket
 	openGlobal rateBucket
+	openLocal  bucketSpec
+	openAll    bucketSpec
 }
 
-func NewRateLimiter(maxKeys int) (*RateLimiter, error) {
-	if maxKeys < 1 || maxKeys > MaxRateLimitKeys {
+func NewRateLimiter(maxKeys int, configured ...OpenRateLimits) (*RateLimiter, error) {
+	if maxKeys < 1 || maxKeys > MaxRateLimitKeys || len(configured) > 1 {
+		return nil, ErrRateLimitConfiguration
+	}
+	limits := defaultOpenLimits
+	if len(configured) == 1 {
+		limits = configured[0]
+	}
+	openLocal, ok := openBucketSpec(limits.PrincipalRatePerMinute, limits.PrincipalBurst)
+	if !ok {
+		return nil, ErrRateLimitConfiguration
+	}
+	openAll, ok := openBucketSpec(limits.GlobalRatePerMinute, limits.GlobalBurst)
+	if !ok {
 		return nil, ErrRateLimitConfiguration
 	}
 	return &RateLimiter{
-		maxKeys: maxKeys,
-		keys:    make(map[rateKey]*rateEntry, maxKeys),
+		maxKeys: maxKeys, keys: make(map[rateKey]*rateEntry, maxKeys),
+		openLocal: openLocal, openAll: openAll,
 	}, nil
+}
+
+func openBucketSpec(ratePerMinute, burst int) (bucketSpec, bool) {
+	if ratePerMinute < 1 || burst < 1 {
+		return bucketSpec{}, false
+	}
+	interval := time.Minute / time.Duration(ratePerMinute)
+	return bucketSpec{interval: interval, burst: burst}, interval > 0
 }
 
 // AllowAuth applies 10/minute with burst 64 per source and 1000/minute with burst 100 globally.
@@ -136,7 +167,7 @@ func (limiter *RateLimiter) AllowAuth(now time.Time, source netip.Addr) bool {
 	)
 }
 
-// AllowOpen applies 1000/minute with burst 128 per principal and 10000/minute with burst 512 globally.
+// AllowOpen applies the configured per-principal and global OPEN limits.
 func (limiter *RateLimiter) AllowOpen(now time.Time, principalID string) bool {
 	if limiter == nil || !protocol.ValidPrincipalID(principalID) {
 		return false
@@ -144,8 +175,8 @@ func (limiter *RateLimiter) AllowOpen(now time.Time, principalID string) bool {
 	limiter.mu.Lock()
 	defer limiter.mu.Unlock()
 	return limiter.allow(now,
-		[]localRateRequest{{key: rateKey{kind: rateKeyOpenPrincipal, subject: principalID}, spec: openPrincipalSpec}},
-		[]globalRateRequest{{bucket: &limiter.openGlobal, spec: openGlobalSpec}},
+		[]localRateRequest{{key: rateKey{kind: rateKeyOpenPrincipal, subject: principalID}, spec: limiter.openLocal}},
+		[]globalRateRequest{{bucket: &limiter.openGlobal, spec: limiter.openAll}},
 	)
 }
 

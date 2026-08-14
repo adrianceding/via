@@ -122,7 +122,12 @@ func newServerDaemon(configuration config.Server) (*serverDaemon, error) {
 	if err != nil {
 		return nil, err
 	}
-	limiter, err := servercore.NewRateLimiter(int(configuration.Limits.RateLimitKeys))
+	limiter, err := servercore.NewRateLimiter(int(configuration.Limits.RateLimitKeys), servercore.OpenRateLimits{
+		PrincipalRatePerMinute: int(configuration.Limits.OpenRatePerMinutePerPrincipal),
+		PrincipalBurst:         int(configuration.Limits.OpenBurstPerPrincipal),
+		GlobalRatePerMinute:    int(configuration.Limits.OpenRatePerMinuteGlobal),
+		GlobalBurst:            int(configuration.Limits.OpenBurstGlobal),
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -502,7 +507,7 @@ func (daemon *serverDaemon) handleOpen(session *wireSession, request protocol.Op
 	}
 	outcome := daemon.registry.HandleOpen(session.principal, request)
 	if outcome.GenerateCapability != nil && !daemon.limiter.AllowOpen(time.Now(), session.principal) {
-		daemon.statusObserver.rejectFlow()
+		daemon.statusObserver.rejectFlow(flowRejectionRateLimited)
 		failure := daemon.registry.RejectOpen(
 			outcome.GenerateCapability.Key, outcome.GenerateCapability.Generation, protocol.OpenResourceLimit,
 		)
@@ -513,6 +518,14 @@ func (daemon *serverDaemon) handleOpen(session *wireSession, request protocol.Op
 		return session.send(protocol.OpenResult{FlowID: request.FlowID, Result: protocol.OpenResourceLimit})
 	}
 	if outcome.Ready {
+		switch outcome.Rejection {
+		case servercore.OpenRejectedOpeningCapacity:
+			daemon.statusObserver.rejectFlow(flowRejectionOpeningCapacity)
+		case servercore.OpenRejectedTargetDialCapacity:
+			daemon.statusObserver.rejectFlow(flowRejectionTargetDialCapacity)
+		case servercore.OpenRejectedCapacity:
+			daemon.statusObserver.rejectFlow()
+		}
 		return daemon.completeOpenSession(session, request, outcome.Result)
 	}
 	if outcome.GenerateCapability != nil {
@@ -521,6 +534,7 @@ func (daemon *serverDaemon) handleOpen(session *wireSession, request protocol.Op
 				session.close()
 			}
 		}) {
+			daemon.statusObserver.rejectFlow(flowRejectionOpeningCapacity)
 			failure := daemon.registry.RejectOpen(
 				outcome.GenerateCapability.Key, outcome.GenerateCapability.Generation, protocol.OpenResourceLimit,
 			)

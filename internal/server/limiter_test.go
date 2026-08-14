@@ -103,6 +103,41 @@ func TestRateLimiterOpenAndJoinFixedLimits(t *testing.T) {
 	}
 }
 
+func TestRateLimiterConfiguredOpenBurstAndRefill(t *testing.T) {
+	limiter, err := NewRateLimiter(DefaultRateLimitKeys, OpenRateLimits{
+		PrincipalRatePerMinute: 15_360,
+		PrincipalBurst:         256,
+		GlobalRatePerMinute:    30_720,
+		GlobalBurst:            512,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(350, 0)
+	for attempt := 0; attempt < 256; attempt++ {
+		if !limiter.AllowOpen(now, "client-01") {
+			t.Fatalf("principal OPEN burst attempt %d rejected", attempt+1)
+		}
+	}
+	if limiter.AllowOpen(now, "client-01") {
+		t.Fatal("principal OPEN burst exceeded")
+	}
+	for attempt := 0; attempt < 256; attempt++ {
+		if !limiter.AllowOpen(now, "client-02") {
+			t.Fatalf("global OPEN burst attempt %d rejected", attempt+257)
+		}
+	}
+	if limiter.AllowOpen(now, "client-02") {
+		t.Fatal("global OPEN burst exceeded")
+	}
+	if !limiter.AllowOpen(now.Add(time.Second/256), "client-01") {
+		t.Fatal("principal OPEN rate did not refill one token")
+	}
+	if limiter.AllowOpen(now.Add(time.Second/256), "client-01") {
+		t.Fatal("principal OPEN rate refilled more than one token")
+	}
+}
+
 func TestRateLimiterUnknownJoinDoesNotCreateFlowKey(t *testing.T) {
 	limiter := mustRateLimiter(t, DefaultRateLimitKeys)
 	now := time.Unix(400, 0)

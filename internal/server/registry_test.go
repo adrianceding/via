@@ -462,9 +462,25 @@ func TestRegistryQuotaReservationsAreHardAndPreserveExistingFlows(t *testing.T) 
 		firstRequest := testOpen(11)
 		first := registry.HandleOpen("client-a", firstRequest)
 		requireCapabilityAction(t, first)
-		requireOpenFailure(t, registry.HandleOpen("client-a", testOpen(12)), protocol.OpenResourceLimit)
+		rejected := registry.HandleOpen("client-a", testOpen(12))
+		requireOpenFailure(t, rejected, protocol.OpenResourceLimit)
+		if rejected.Rejection != OpenRejectedOpeningCapacity {
+			t.Fatalf("opening rejection = %d", rejected.Rejection)
+		}
 		if snapshot, _ := registry.Lookup(FlowKey{PrincipalID: "client-a", FlowID: firstRequest.FlowID}); snapshot.State != RegistryOpeningCapability {
 			t.Fatalf("resource refusal changed existing flow: %#v", snapshot)
+		}
+	})
+
+	t.Run("target dial", func(t *testing.T) {
+		clock := newRegistryTestClock()
+		limits := RegistryLimits{Flows: 2, FlowsPerPrincipal: 2, OpeningFlows: 2, TargetDials: 1, Tombstones: 2, TombstonesPerPrincipal: 2}
+		registry := newTestRegistry(t, limits, &countingCapabilityReader{value: 0x12}, clock.Now)
+		requireCapabilityAction(t, registry.HandleOpen("client-a", testOpen(18)))
+		rejected := registry.HandleOpen("client-a", testOpen(19))
+		requireOpenFailure(t, rejected, protocol.OpenResourceLimit)
+		if rejected.Rejection != OpenRejectedTargetDialCapacity {
+			t.Fatalf("target dial rejection = %d", rejected.Rejection)
 		}
 	})
 

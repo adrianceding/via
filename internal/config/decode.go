@@ -623,7 +623,7 @@ func decodeClientLimits(node *yaml.Node, limits *ClientLimits) error {
 }
 
 func decodeServerLimits(node *yaml.Node, limits *ServerLimits) error {
-	fields, err := fieldsOf(node, "limits", "flows", "per_principal_flows", "opening_flows", "recovering_flows", "transport_connections", "transport_connections_per_principal", "transport_auth_in_progress", "target_dials", "tombstones", "tombstones_per_principal", "rate_limit_keys", "flow_send_window_bytes", "flow_receive_window_bytes", "memory_budget_bytes")
+	fields, err := fieldsOf(node, "limits", "flows", "per_principal_flows", "opening_flows", "recovering_flows", "transport_connections", "transport_connections_per_principal", "transport_auth_in_progress", "target_dials", "tombstones", "tombstones_per_principal", "rate_limit_keys", "open_rate_per_minute_per_principal", "open_burst_per_principal", "open_rate_per_minute_global", "open_burst_global", "flow_send_window_bytes", "flow_receive_window_bytes", "memory_budget_bytes")
 	if err != nil {
 		return err
 	}
@@ -636,6 +636,8 @@ func decodeServerLimits(node *yaml.Node, limits *ServerLimits) error {
 		{"transport_connections_per_principal", &limits.SessionsPerPrincipal},
 		{"transport_auth_in_progress", &limits.AuthInProgress}, {"target_dials", &limits.TargetDials}, {"tombstones", &limits.Tombstones},
 		{"tombstones_per_principal", &limits.TombstonesPerPrincipal}, {"rate_limit_keys", &limits.RateLimitKeys},
+		{"open_rate_per_minute_per_principal", &limits.OpenRatePerMinutePerPrincipal}, {"open_burst_per_principal", &limits.OpenBurstPerPrincipal},
+		{"open_rate_per_minute_global", &limits.OpenRatePerMinuteGlobal}, {"open_burst_global", &limits.OpenBurstGlobal},
 		{"flow_send_window_bytes", &limits.FlowSendWindowBytes}, {"flow_receive_window_bytes", &limits.FlowReceiveWindowBytes},
 		{"memory_budget_bytes", &limits.MemoryBudgetBytes},
 	}

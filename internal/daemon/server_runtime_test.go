@@ -119,6 +119,37 @@ func TestServerDuplicateOpenReturnsExistingFlowWithoutDial(t *testing.T) {
 	}
 }
 
+func TestServerDaemonUsesConfiguredOpenRateLimits(t *testing.T) {
+	configuration := decodeServerForDaemonTest(t, reserveAddress(t))
+	daemon, err := newServerDaemon(configuration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		daemon.cancelDials()
+		daemon.cancelRuntime()
+		_ = daemon.listener.Close()
+	})
+
+	now := time.Unix(125, 0)
+	for attempt := 0; attempt < 256; attempt++ {
+		if !daemon.limiter.AllowOpen(now, "client-01") {
+			t.Fatalf("principal OPEN burst attempt %d rejected", attempt+1)
+		}
+	}
+	if daemon.limiter.AllowOpen(now, "client-01") {
+		t.Fatal("principal OPEN burst exceeded")
+	}
+	for attempt := 0; attempt < 256; attempt++ {
+		if !daemon.limiter.AllowOpen(now, "client-02") {
+			t.Fatalf("global OPEN burst attempt %d rejected", attempt+257)
+		}
+	}
+	if daemon.limiter.AllowOpen(now, "client-02") {
+		t.Fatal("global OPEN burst exceeded")
+	}
+}
+
 func TestServerRedundantOpenPublishesOriginatingSession(t *testing.T) {
 	harness := newServerRuntimeHarness(t)
 	defer harness.close()
@@ -699,10 +730,94 @@ func TestServerOpenWorkerExhaustionKeepsSharedSessionUsable(t *testing.T) {
 	if harness.connection.isClosed() {
 		t.Fatal("OPEN worker exhaustion closed the shared session")
 	}
+	harness.daemon.statusObserver.mu.Lock()
+	rejected := harness.daemon.statusObserver.rejections
+	harness.daemon.statusObserver.mu.Unlock()
+	if rejected.Flows != 1 || rejected.FlowOpeningCapacity != 1 {
+		t.Fatalf("OPEN worker rejection = %#v", rejected)
+	}
 	if err := harness.daemon.handleJoin(harness.session, protocol.Join{
 		FlowID: harness.flowID, Capability: harness.capability,
 	}); err != nil {
 		t.Fatalf("existing Flow JOIN after OPEN exhaustion: %v", err)
+	}
+}
+
+func TestServerOpenAdmissionRejectionsAreClassified(t *testing.T) {
+	t.Run("rate limited", func(t *testing.T) {
+		harness := newServerRuntimeHarness(t)
+		defer harness.close()
+		limiter, err := servercore.NewRateLimiter(8, servercore.OpenRateLimits{
+			PrincipalRatePerMinute: 1, PrincipalBurst: 1,
+			GlobalRatePerMinute: 1, GlobalBurst: 1,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		harness.daemon.limiter = limiter
+		if !limiter.AllowOpen(time.Now(), harness.session.principal) {
+			t.Fatal("could not consume initial OPEN token")
+		}
+		request := protocol.Open{
+			FlowID: protocol.FlowID{0x31}, OpenToken: protocol.OpenToken{0x32}, DeliveryMode: protocol.DeliveryRedundant,
+			PathSelection: protocol.PathNone,
+			Target:        protocol.Target{Address: netip.MustParseAddr("127.0.0.1"), Port: 31},
+		}
+		if err := harness.daemon.handleOpen(harness.session, request); err != nil {
+			t.Fatal(err)
+		}
+		assertFlowRejections(t, harness.daemon.statusObserver, statusapi.Rejected{Flows: 1, FlowRateLimited: 1})
+	})
+
+	for name, testCase := range map[string]struct {
+		limits   servercore.RegistryLimits
+		expected statusapi.Rejected
+	}{
+		"opening capacity": {
+			limits:   servercore.RegistryLimits{Flows: 3, FlowsPerPrincipal: 3, OpeningFlows: 1, TargetDials: 1, Tombstones: 3, TombstonesPerPrincipal: 3},
+			expected: statusapi.Rejected{Flows: 1, FlowOpeningCapacity: 1},
+		},
+		"target dial capacity": {
+			limits:   servercore.RegistryLimits{Flows: 3, FlowsPerPrincipal: 3, OpeningFlows: 2, TargetDials: 1, Tombstones: 3, TombstonesPerPrincipal: 3},
+			expected: statusapi.Rejected{Flows: 1, FlowTargetDialCapacity: 1},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			harness := newServerRuntimeHarness(t)
+			defer harness.close()
+			registry, err := servercore.NewRegistry(testCase.limits, zeroFreeReader{}, time.Now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			first := protocol.Open{
+				FlowID: protocol.FlowID{0x33}, OpenToken: protocol.OpenToken{0x34}, DeliveryMode: protocol.DeliveryRedundant,
+				PathSelection: protocol.PathNone,
+				Target:        protocol.Target{Address: netip.MustParseAddr("127.0.0.1"), Port: 33},
+			}
+			if outcome := registry.HandleOpen(harness.session.principal, first); outcome.GenerateCapability == nil {
+				t.Fatalf("initial OPEN reservation = %#v", outcome)
+			}
+			original := harness.daemon.registry
+			harness.daemon.registry = registry
+			defer func() { harness.daemon.registry = original }()
+			second := first
+			second.FlowID = protocol.FlowID{0x35}
+			second.OpenToken = protocol.OpenToken{0x36}
+			if err := harness.daemon.handleOpen(harness.session, second); err != nil {
+				t.Fatal(err)
+			}
+			assertFlowRejections(t, harness.daemon.statusObserver, testCase.expected)
+		})
+	}
+}
+
+func assertFlowRejections(t *testing.T, observer *runtimeStatus, want statusapi.Rejected) {
+	t.Helper()
+	observer.mu.Lock()
+	got := observer.rejections
+	observer.mu.Unlock()
+	if got != want {
+		t.Fatalf("Flow rejections = %#v, want %#v", got, want)
 	}
 }
 

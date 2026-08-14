@@ -860,6 +860,14 @@ func (observer *runtimeStatus) setResourceLimits(sessions, flows, socksConnectio
 	observer.mu.Unlock()
 }
 
+type flowRejection uint8
+
+const (
+	flowRejectionRateLimited flowRejection = iota + 1
+	flowRejectionOpeningCapacity
+	flowRejectionTargetDialCapacity
+)
+
 // rejectSession, rejectFlow and rejectSOCKS saturate the matching admission
 // denial counter and publish it immediately. They are safe to call from any
 // daemon path and are not throttled: denials are rare, control-plane events.
@@ -867,8 +875,24 @@ func (observer *runtimeStatus) rejectSession() {
 	observer.reject(1, 0, 0)
 }
 
-func (observer *runtimeStatus) rejectFlow() {
-	observer.reject(0, 1, 0)
+func (observer *runtimeStatus) rejectFlow(classification ...flowRejection) {
+	if observer == nil {
+		return
+	}
+	observer.mu.Lock()
+	observer.rejections.Flows = adjustResource(observer.rejections.Flows, 1)
+	if len(classification) == 1 {
+		switch classification[0] {
+		case flowRejectionRateLimited:
+			observer.rejections.FlowRateLimited = adjustResource(observer.rejections.FlowRateLimited, 1)
+		case flowRejectionOpeningCapacity:
+			observer.rejections.FlowOpeningCapacity = adjustResource(observer.rejections.FlowOpeningCapacity, 1)
+		case flowRejectionTargetDialCapacity:
+			observer.rejections.FlowTargetDialCapacity = adjustResource(observer.rejections.FlowTargetDialCapacity, 1)
+		}
+	}
+	observer.repository.TryRecord(statusapi.Event{Kind: statusapi.EventSetRejected, Rejected: observer.rejections})
+	observer.mu.Unlock()
 }
 
 func (observer *runtimeStatus) rejectSOCKS() {

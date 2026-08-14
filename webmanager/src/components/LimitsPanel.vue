@@ -2,6 +2,8 @@
 import { computed } from 'vue';
 import { useI18n } from 'vue-i18n';
 
+import { flowRejectionNoteParams } from '../observability.js';
+
 const props = defineProps({
   summary: { type: Object, required: true },
 });
@@ -13,7 +15,7 @@ const rows = computed(() => {
   const rejected = props.summary.rejected || {};
   const entries = [
     { label: t('charts.limitsSessions'), value: Number(resources.sessions) || 0, max: Number(resources.max_sessions) || 0, note: t('charts.limitsRejected', { count: rejected.sessions || 0 }) },
-    { label: t('charts.limitsFlows'), value: Number(resources.flows) || 0, max: Number(resources.max_flows) || 0, note: t('charts.limitsRejected', { count: rejected.flows || 0 }) },
+    { label: t('charts.limitsFlows'), value: Number(resources.flows) || 0, max: Number(resources.max_flows) || 0, note: t('charts.limitsFlowRejected', flowRejectionNoteParams(rejected)) },
     { label: t('charts.limitsSOCKS'), value: Number(resources.socks_connections) || 0, max: Number(resources.max_socks_connections) || 0, note: t('charts.limitsRejected', { count: rejected.socks_connections || 0 }) },
     { label: t('charts.limitsTerminals'), value: Number(resources.tombstones) || 0, max: Number(resources.max_tombstones) || 0, note: t('charts.limitsTerminalsNote') },
   ];

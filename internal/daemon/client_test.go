@@ -647,6 +647,36 @@ func TestWriteSOCKSReplyArmsFreshBoundedDeadline(t *testing.T) {
 	}
 }
 
+func TestClientFlowOpenFailureWaitsForSOCKSReplyBeforeCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	instance := &clientFlow{
+		ctx: ctx, cancel: cancel, openResult: make(chan protocol.OpenResultCode, 1),
+	}
+
+	instance.executeOpenJoin([]clientcore.OpenJoinAction{{
+		Kind: clientcore.OpenJoinActionFailFlow, OpenResult: protocol.OpenResourceLimit,
+	}})
+
+	if result := <-instance.openResult; result != protocol.OpenResourceLimit {
+		t.Fatalf("open result = %d, want %d", result, protocol.OpenResourceLimit)
+	}
+	select {
+	case <-ctx.Done():
+		t.Fatal("flow cancelled before SOCKS failure reply")
+	default:
+	}
+	instance.closeFor(protocol.ResetInternalFailure)
+	select {
+	case <-ctx.Done():
+	default:
+		t.Fatal("SOCKS owner did not cancel failed flow")
+	}
+	if reason := protocol.ResetReason(instance.cancelCode.Load()); reason != protocol.ResetInternalFailure {
+		t.Fatalf("reset reason = %d, want %d", reason, protocol.ResetInternalFailure)
+	}
+}
+
 func TestClientDaemonOpeningLimitIsExact(t *testing.T) {
 	daemon := &clientDaemon{openingSlots: make(chan struct{}, 1)}
 	if !daemon.acquireOpening() {

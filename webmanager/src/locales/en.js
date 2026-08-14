@@ -216,5 +216,6 @@ export default {
     limitsTerminals: 'Terminal summaries',
     limitsTerminalsNote: 'Retained 15 minutes',
     limitsRejected: '{count} rejected',
+    limitsFlowRejected: '{count} rejected: {rate} rate, {opening} opening, {target} target dial',
   },
 };

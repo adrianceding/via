@@ -296,6 +296,10 @@ func validateServerLimits(limits ServerLimits) error {
 		{"transport_auth_in_progress", limits.AuthInProgress, 1, 512}, {"target_dials", limits.TargetDials, 1, 512},
 		{"tombstones", limits.Tombstones, 1, 32768}, {"tombstones_per_principal", limits.TombstonesPerPrincipal, 1, 32768},
 		{"rate_limit_keys", limits.RateLimitKeys, 1, 16384}, {"memory_budget_bytes", limits.MemoryBudgetBytes, 1, MaxMemoryBudget},
+		{"open_rate_per_minute_per_principal", limits.OpenRatePerMinutePerPrincipal, 1, 60_000},
+		{"open_burst_per_principal", limits.OpenBurstPerPrincipal, 1, 512},
+		{"open_rate_per_minute_global", limits.OpenRatePerMinuteGlobal, 1, 60_000},
+		{"open_burst_global", limits.OpenBurstGlobal, 1, 512},
 		{"flow_send_window_bytes", limits.FlowSendWindowBytes, MinimumFlowWindowBytes, MaximumFlowWindowBytes},
 		{"flow_receive_window_bytes", limits.FlowReceiveWindowBytes, MinimumFlowWindowBytes, MaximumFlowWindowBytes},
 	}
@@ -304,7 +308,8 @@ func validateServerLimits(limits ServerLimits) error {
 	}
 	if limits.PerPrincipalFlows > limits.Flows || limits.OpeningFlows > limits.Flows || limits.RecoveringFlows > limits.Flows ||
 		limits.SessionsPerPrincipal > limits.Sessions || limits.AuthInProgress > limits.Sessions || limits.TargetDials > limits.OpeningFlows ||
-		limits.TombstonesPerPrincipal > limits.Tombstones {
+		limits.TombstonesPerPrincipal > limits.Tombstones || limits.OpenBurstPerPrincipal > limits.OpenBurstGlobal ||
+		limits.OpenBurstGlobal > limits.OpeningFlows || limits.OpenRatePerMinutePerPrincipal > limits.OpenRatePerMinuteGlobal {
 		return &FieldError{Path: "limits", Kind: ErrFieldValue}
 	}
 	return nil
@@ -380,6 +385,18 @@ func normalizeServerLimits(limits *ServerLimits) {
 	}
 	if limits.RateLimitKeys == 0 {
 		limits.RateLimitKeys = 16384
+	}
+	if limits.OpenRatePerMinutePerPrincipal == 0 {
+		limits.OpenRatePerMinutePerPrincipal = 1_000
+	}
+	if limits.OpenBurstPerPrincipal == 0 {
+		limits.OpenBurstPerPrincipal = min(limits.OpeningFlows, 256)
+	}
+	if limits.OpenRatePerMinuteGlobal == 0 {
+		limits.OpenRatePerMinuteGlobal = 10_000
+	}
+	if limits.OpenBurstGlobal == 0 {
+		limits.OpenBurstGlobal = limits.OpeningFlows
 	}
 }
 

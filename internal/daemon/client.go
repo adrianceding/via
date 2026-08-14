@@ -1022,7 +1022,7 @@ func (daemon *clientDaemon) serveSOCKS(connection net.Conn) {
 	result := <-instance.openResult
 	daemon.releaseOpening()
 	if writeSOCKSReply(connection, socks5.ReplyForOpenResult(result)) != nil || result != protocol.OpenSuccess {
-		instance.close()
+		instance.closeFor(protocol.ResetInternalFailure)
 		return
 	}
 	_ = connection.SetDeadline(time.Time{})

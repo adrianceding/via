@@ -216,5 +216,6 @@ export default {
     limitsTerminals: '终态摘要',
     limitsTerminalsNote: '保留 15 分钟',
     limitsRejected: '拒绝 {count}',
+    limitsFlowRejected: '拒绝 {count}：速率 {rate}，建立容量 {opening}，目标拨号 {target}',
   },
 };

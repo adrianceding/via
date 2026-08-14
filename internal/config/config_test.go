@@ -600,10 +600,43 @@ func TestZeroDependentLimitsFollowExplicitParentLimits(t *testing.T) {
 		Flows: 10, PerPrincipalFlows: 10, OpeningFlows: 10, RecoveringFlows: 10,
 		Sessions: 4, SessionsPerPrincipal: 4, AuthInProgress: 4, TargetDials: 10,
 		Tombstones: 10, TombstonesPerPrincipal: 10, RateLimitKeys: 17,
+		OpenRatePerMinutePerPrincipal: 1_000, OpenBurstPerPrincipal: 10,
+		OpenRatePerMinuteGlobal: 10_000, OpenBurstGlobal: 10,
 		FlowSendWindowBytes: DefaultFlowWindowBytes, FlowReceiveWindowBytes: DefaultFlowWindowBytes,
 	}
 	if server.Limits != wantServer {
 		t.Fatalf("partial server limits = %#v, want %#v", server.Limits, wantServer)
+	}
+}
+
+func TestServerOpenRateLimitsAreConfigurableAndCapacityBounded(t *testing.T) {
+	server, err := DecodeServer([]byte(minimalServerYAML() + `limits:
+  opening_flows: 512
+  open_rate_per_minute_per_principal: 15360
+  open_burst_per_principal: 256
+  open_rate_per_minute_global: 30720
+  open_burst_global: 512
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	limits := server.Limits
+	if limits.OpenRatePerMinutePerPrincipal != 15_360 || limits.OpenBurstPerPrincipal != 256 ||
+		limits.OpenRatePerMinuteGlobal != 30_720 || limits.OpenBurstGlobal != 512 {
+		t.Fatalf("OPEN rate limits = %#v", limits)
+	}
+
+	for name, fields := range map[string]string{
+		"principal burst above opening capacity": "opening_flows: 10\n  open_burst_per_principal: 11",
+		"global burst above opening capacity":    "opening_flows: 10\n  open_burst_global: 11",
+		"principal burst above global burst":     "open_burst_per_principal: 11\n  open_burst_global: 10",
+		"principal rate above global rate":       "open_rate_per_minute_per_principal: 601\n  open_rate_per_minute_global: 600",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := DecodeServer([]byte(minimalServerYAML() + "limits:\n  " + fields + "\n")); !errors.Is(err, ErrFieldValue) {
+				t.Fatalf("error = %v", err)
+			}
+		})
 	}
 }
 
@@ -643,6 +676,10 @@ func TestPositiveLimitsKeepInternalSafetyBounds(t *testing.T) {
 		{"transport_auth_in_progress", "transport_auth_in_progress: 513"}, {"target_dials", "target_dials: 513"},
 		{"tombstones", "tombstones: 32769"}, {"tombstones_per_principal", "tombstones_per_principal: 32769"},
 		{"rate_limit_keys", "rate_limit_keys: 16385"},
+		{"open_rate_per_minute_per_principal", "open_rate_per_minute_per_principal: 60001"},
+		{"open_burst_per_principal", "open_burst_per_principal: 513"},
+		{"open_rate_per_minute_global", "open_rate_per_minute_global: 60001"},
+		{"open_burst_global", "open_burst_global: 513"},
 	}
 	for _, testCase := range serverFields {
 		assertField("server-"+testCase.name, true, testCase.field, testCase.name)

@@ -69,6 +69,15 @@ const (
 	TerminalReset
 )
 
+type OpenRejection uint8
+
+const (
+	OpenRejectionNone OpenRejection = iota
+	OpenRejectedCapacity
+	OpenRejectedOpeningCapacity
+	OpenRejectedTargetDialCapacity
+)
+
 // GenerateCapabilityAction is the only random action allowed after OPEN reserves all resources.
 type GenerateCapabilityAction struct {
 	Key        FlowKey
@@ -91,6 +100,7 @@ type OpenDialAction struct {
 type OpenOutcome struct {
 	Ready              bool
 	Result             protocol.OpenResult
+	Rejection          OpenRejection
 	Operation          *OpenOperation
 	GenerateCapability *GenerateCapabilityAction
 	Dial               *OpenDialAction
@@ -278,9 +288,11 @@ func (registry *Registry) HandleOpen(principalID string, request protocol.Open) 
 		registry.mu.Unlock()
 		return openFailure(request.FlowID, protocol.OpenInternalFailure)
 	}
-	if !registry.reserveLocked(principalID) {
+	if rejection := registry.reserveLocked(principalID); rejection != OpenRejectionNone {
 		registry.mu.Unlock()
-		return openFailure(request.FlowID, protocol.OpenResourceLimit)
+		outcome := openFailure(request.FlowID, protocol.OpenResourceLimit)
+		outcome.Rejection = rejection
+		return outcome
 	}
 	registry.nextGeneration++
 	generation := registry.nextGeneration
@@ -646,7 +658,7 @@ func normalizedTarget(target protocol.Target) protocol.Target {
 	return target
 }
 
-func (registry *Registry) reserveLocked(principalID string) bool {
+func (registry *Registry) reserveLocked(principalID string) OpenRejection {
 	usage := registry.principal[principalID]
 	if usage == nil {
 		usage = &principalUsage{}
@@ -654,10 +666,14 @@ func (registry *Registry) reserveLocked(principalID string) bool {
 	// Check per-principal terminal record capacity before global terminal record capacity.
 	if usage.tombstoneReservations >= registry.limits.TombstonesPerPrincipal ||
 		registry.tombstoneReservations >= registry.limits.Tombstones ||
-		usage.flows >= registry.limits.FlowsPerPrincipal || registry.flows >= registry.limits.Flows ||
-		registry.openingFlows >= registry.limits.OpeningFlows ||
-		registry.targetDialReservations >= registry.limits.TargetDials {
-		return false
+		usage.flows >= registry.limits.FlowsPerPrincipal || registry.flows >= registry.limits.Flows {
+		return OpenRejectedCapacity
+	}
+	if registry.openingFlows >= registry.limits.OpeningFlows {
+		return OpenRejectedOpeningCapacity
+	}
+	if registry.targetDialReservations >= registry.limits.TargetDials {
+		return OpenRejectedTargetDialCapacity
 	}
 	if registry.principal[principalID] == nil {
 		registry.principal[principalID] = usage
@@ -668,7 +684,7 @@ func (registry *Registry) reserveLocked(principalID string) bool {
 	registry.openingFlows++
 	registry.targetDialReservations++
 	registry.tombstoneReservations++
-	return true
+	return OpenRejectionNone
 }
 
 func (registry *Registry) finishOpeningLocked(entry *registryEntry) {

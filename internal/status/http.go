@@ -110,7 +110,7 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	case "/api/v1/summary":
 		encoded, err = json.Marshal(summaryResponse{
 			GeneratedAt: snapshot.GeneratedAt, Healthy: snapshot.Healthy, Role: snapshot.Role,
-			Resources: snapshot.Resources, Counters: snapshot.Counters,
+			Resources: snapshot.Resources, Rejected: snapshot.Rejected, Counters: snapshot.Counters,
 			Interfaces: len(snapshot.Interfaces), Sessions: len(snapshot.Sessions),
 			Flows: activeFlowCount(snapshot.Flows), Terminals: len(snapshot.Terminals),
 		})
@@ -158,6 +158,7 @@ type summaryResponse struct {
 	Healthy     bool      `json:"healthy"`
 	Role        Role      `json:"role,omitempty"`
 	Resources   Resources `json:"resources"`
+	Rejected    Rejected  `json:"rejected"`
 	Counters    Counters  `json:"counters"`
 	Interfaces  int       `json:"interfaces"`
 	Sessions    int       `json:"sessions"`

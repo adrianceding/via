@@ -5,6 +5,20 @@ function counter(summary, name) {
   return Number.isFinite(value) && value >= 0 ? value : 0;
 }
 
+function rejection(rejected, name) {
+  const value = Number(rejected?.[name]);
+  return Number.isFinite(value) && value >= 0 ? value : 0;
+}
+
+export function flowRejectionNoteParams(rejected) {
+  return {
+    count: rejection(rejected, 'flows'),
+    rate: rejection(rejected, 'flow_rate_limited'),
+    opening: rejection(rejected, 'flow_opening_capacity'),
+    target: rejection(rejected, 'flow_target_dial_capacity'),
+  };
+}
+
 export function calculateRates(previous, next) {
   const previousAt = Date.parse(previous?.generated_at || '');
   const nextAt = Date.parse(next?.generated_at || '');
