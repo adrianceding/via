@@ -88,6 +88,8 @@ test('share summary falls back to path group without interface observations', ()
 test('traffic charts use localized headings and do not render an empty share canvas', async () => {
   const component = await readFile(new URL('../src/components/TrafficCharts.vue', import.meta.url), 'utf8');
 
+  assert.ok(component.includes('GraphicComponent'));
+  assert.ok(component.includes('use([CanvasRenderer, GraphicComponent,'));
   assert.ok(component.includes('summarizeDirectionalShareData('));
   assert.ok(component.includes("formatBytes(totalBytes)"));
   assert.ok(component.includes("v-if=\"directionalShares.uplink.hasData\""));

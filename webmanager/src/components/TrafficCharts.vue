@@ -1,5 +1,5 @@
 <script setup>
-import { GridComponent, LegendComponent, MarkLineComponent, TooltipComponent } from 'echarts/components';
+import { GraphicComponent, GridComponent, LegendComponent, MarkLineComponent, TooltipComponent } from 'echarts/components';
 import { LineChart, PieChart } from 'echarts/charts';
 import { init, use } from 'echarts/core';
 import { CanvasRenderer } from 'echarts/renderers';
@@ -10,7 +10,7 @@ import { formatBytes, formatRate } from '../format.js';
 import { MAX_SHARE_GROUPS, summarizeDirectionalShareData } from '../traffic-chart.js';
 import { directionalTrend } from '../trends.js';
 
-use([CanvasRenderer, GridComponent, LegendComponent, LineChart, MarkLineComponent, PieChart, TooltipComponent]);
+use([CanvasRenderer, GraphicComponent, GridComponent, LegendComponent, LineChart, MarkLineComponent, PieChart, TooltipComponent]);
 
 const MAX_SERIES = 12;
 const TREND_SLOTS = 120;
