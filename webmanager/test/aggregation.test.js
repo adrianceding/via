@@ -16,7 +16,7 @@ function session(id, options = {}) {
     quality: {
       capacity_bytes_sec: options.capacity ?? 1_048_576,
       data_sample_fresh: options.fresh ?? false,
-      data_sample_age_ms: options.age ?? null,
+      data_sample_age_ms: options.age ?? (options.fresh ? 0 : null),
       last_data_capacity_bytes_sec: options.lastCapacity ?? 0,
       smoothed_rtt_micros: options.rtt ?? 0,
       eligible_acked_data_payload_bytes: options.eligible ?? 0,
@@ -32,11 +32,11 @@ test('aggregation separates fresh uplink and downlink capacities', () => {
   const summary = summarizeAggregation([
     session('lane-1', {
       interface: 'eth0', capacity: 2_000_000, fresh: true, peerCapacity: 8_000_000,
-      peerSampleAt: '2026-08-01T10:00:00Z', peerExpiresAt: '2026-08-01T10:00:03Z',
+      peerSampleAt: '2026-08-01T10:00:01.900Z', peerExpiresAt: '2026-08-01T10:00:04.900Z',
     }),
     session('lane-2', {
       interface: 'eth0', capacity: 3_000_000, fresh: true, peerCapacity: 12_000_000,
-      peerSampleAt: '2026-08-01T10:00:01Z', peerExpiresAt: '2026-08-01T10:00:04Z',
+      peerSampleAt: '2026-08-01T10:00:01.800Z', peerExpiresAt: '2026-08-01T10:00:04.800Z',
     }),
   ], 'name', generatedAt);
 
@@ -48,6 +48,31 @@ test('aggregation separates fresh uplink and downlink capacities', () => {
     average: 10_000_000,
     max: 12_000_000,
   });
+});
+
+test('aggregation does not add lane capacities measured outside one sample window', () => {
+  const generatedAt = '2026-08-01T10:00:02Z';
+  const summary = summarizeAggregation([
+    session('lane-1', {
+      interface: 'eth0', capacity: 2_000_000, fresh: true, age: 100,
+      peerCapacity: 8_000_000, peerSampleAt: '2026-08-01T10:00:01.900Z',
+      peerExpiresAt: '2026-08-01T10:00:04.900Z',
+    }),
+    session('lane-2', {
+      interface: 'eth0', capacity: 3_000_000, fresh: true, age: 500,
+      peerCapacity: 12_000_000, peerSampleAt: '2026-08-01T10:00:01.500Z',
+      peerExpiresAt: '2026-08-01T10:00:04.500Z',
+    }),
+  ], 'name', generatedAt);
+
+  assert.equal(summary.totalCapacity, null);
+  assert.equal(summary.lastTotalCapacity, null);
+  assert.equal(summary.peerTotalCapacity, null);
+  assert.equal(summary.peerLastTotalCapacity, null);
+  assert.equal(summary.groups[0].totalCapacity, null);
+  assert.equal(summary.groups[0].peerTotalCapacity, null);
+  assert.equal(summary.highestCapacity, 3_000_000);
+  assert.equal(summary.peerHighestCapacity, 12_000_000);
 });
 
 test('aggregation excludes expired or incomplete downlink capacity samples', () => {
@@ -113,9 +138,9 @@ test('directional aggregation keeps stale references separate and maps server di
       peerExpiresAt: '2026-08-01T10:00:03Z',
     }),
     session('lane-2', {
-      interface: 'eth0', fresh: false, age: 7_000, lastCapacity: 8_000_000,
-      peerCapacity: 30_000_000, peerSampleAt: '2026-08-01T10:00:01Z',
-      peerExpiresAt: '2026-08-01T10:00:04Z',
+      interface: 'eth0', fresh: false, age: 7_900, lastCapacity: 8_000_000,
+      peerCapacity: 30_000_000, peerSampleAt: '2026-08-01T10:00:00.100Z',
+      peerExpiresAt: '2026-08-01T10:00:03.100Z',
     }),
   ], 'name', '2026-08-01T10:00:08Z');
   const directions = directionalAggregation(summary, 2);
@@ -123,11 +148,11 @@ test('directional aggregation keeps stale references separate and maps server di
   assert.equal(directions.uplink.totalCapacity, null);
   assert.equal(directions.uplink.lastTotalCapacity, 50_000_000);
   assert.equal(directions.uplink.lastHighestCapacity, 30_000_000);
-  assert.equal(directions.uplink.groups[0].lanes.find((row) => row.session.id === 'lane-2').sampleAgeMs, 7_000);
+  assert.equal(directions.uplink.groups[0].lanes.find((row) => row.session.id === 'lane-2').sampleAgeMs, 7_900);
   assert.equal(directions.downlink.totalCapacity, null);
   assert.equal(directions.downlink.lastTotalCapacity, 14_000_000);
   assert.equal(directions.downlink.lastHighestCapacity, 8_000_000);
-  assert.equal(directions.downlink.groups[0].lanes.find((row) => row.session.id === 'lane-2').sampleAgeMs, 7_000);
+  assert.equal(directions.downlink.groups[0].lanes.find((row) => row.session.id === 'lane-2').sampleAgeMs, 7_900);
 });
 
 test('aggregation excludes unmeasured fallback capacities', () => {

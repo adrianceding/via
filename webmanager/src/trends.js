@@ -1,4 +1,5 @@
 import { aggregationGroupIdentity } from './aggregation.js';
+import { concurrentCapacityTotal } from './capacity-samples.js';
 
 const MAX_TREND_SAMPLES = 120;
 const MAX_TREND_SERIES = 12;
@@ -25,9 +26,10 @@ function peerCapacitySample(quality, sampledAt) {
   const sampleAt = Date.parse(quality?.peer_send_data_sample_at || '');
   const expiresAt = Date.parse(quality?.peer_send_data_sample_expires_at || '');
   if (!Number.isFinite(capacity) || capacity <= 0 || !Number.isFinite(sampleAt)
-    || !Number.isFinite(expiresAt) || expiresAt < sampleAt) return { current: null, last: null };
+    || !Number.isFinite(expiresAt) || expiresAt < sampleAt) return { current: null, last: null, ageMs: null };
   const current = Number.isFinite(sampledAt) && sampledAt <= expiresAt ? capacity : null;
-  return { current, last: capacity };
+  const ageMs = Number.isFinite(sampledAt) ? Math.max(0, sampledAt - sampleAt) : null;
+  return { current, last: capacity, ageMs };
 }
 
 export function createSessionTrendStore() {
@@ -83,22 +85,24 @@ export function createSessionTrendStore() {
         const rxSamples = rxRate == null ? [...(existing?.rxSamples || [])] : [...(existing?.rxSamples || []), rxRate].slice(-MAX_TREND_SAMPLES);
         const ready = observation.sessions.filter((session) => session.state === 3);
         const measured = ready.filter((session) => session.quality?.data_sample_fresh === true);
-        const capacity = ready.length > 0 && measured.length === ready.length
-          ? ready.reduce((total, session) => total + Math.max(0, Number(session.quality?.capacity_bytes_sec) || 0), 0)
+        const localSamples = ready.map((session) => ({
+          capacity: session.quality?.data_sample_fresh === true
+            ? Math.max(0, Number(session.quality?.capacity_bytes_sec) || 0)
+            : null,
+          lastCapacity: session.quality?.data_sample_fresh === true
+            ? Number(session.quality?.capacity_bytes_sec)
+            : Number(session.quality?.last_data_capacity_bytes_sec) > 0
+              ? Number(session.quality.last_data_capacity_bytes_sec)
+              : null,
+          ageMs: session.quality?.data_sample_age_ms,
+        }));
+        const capacity = measured.length === ready.length
+          ? concurrentCapacityTotal(localSamples) ?? 0
           : 0;
-        const lastCapacities = ready.map((session) => session.quality?.data_sample_fresh === true
-          ? Number(session.quality?.capacity_bytes_sec)
-          : Number(session.quality?.last_data_capacity_bytes_sec));
-        const lastCapacity = ready.length > 0 && lastCapacities.every((value) => Number.isFinite(value) && value > 0)
-          ? lastCapacities.reduce((total, value) => total + value, 0)
-          : 0;
+        const lastCapacity = concurrentCapacityTotal(localSamples, 'lastCapacity') ?? 0;
         const peerSamples = ready.map((session) => peerCapacitySample(session.quality, sampledAt));
-        const peerCapacity = ready.length > 0 && peerSamples.every((sample) => sample.current != null)
-          ? peerSamples.reduce((total, sample) => total + sample.current, 0)
-          : 0;
-        const peerLastCapacity = ready.length > 0 && peerSamples.every((sample) => sample.last != null)
-          ? peerSamples.reduce((total, sample) => total + sample.last, 0)
-          : 0;
+        const peerCapacity = concurrentCapacityTotal(peerSamples, 'current') ?? 0;
+        const peerLastCapacity = concurrentCapacityTotal(peerSamples, 'last') ?? 0;
         trends.set(id, {
           id,
           label: observation.value,

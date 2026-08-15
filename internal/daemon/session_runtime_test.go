@@ -349,13 +349,13 @@ func TestSessionRuntimeAggregatesEligibleDataCreditsAtBoundaries(t *testing.T) {
 	if snapshot := runtime.snapshot(); snapshot.Quality.DataSamples != 0 || snapshot.EligibleAckedData != 64<<10 {
 		t.Fatalf("credit after baseline = %#v", snapshot)
 	}
-	now = start.Add(300 * time.Millisecond)
+	now = start.Add(350 * time.Millisecond)
 	runtime.observeDataCredit(32<<10, start.Add(220*time.Millisecond), now, true)
 	snapshot := runtime.snapshot()
 	if snapshot.Quality.DataSamples != 1 || snapshot.Quality.SRTT != 0 || snapshot.EligibleAckedData != 96<<10 {
 		t.Fatalf("byte threshold snapshot = %#v", snapshot)
 	}
-	wantCapacity := float64(64<<10) / (200 * time.Millisecond).Seconds()
+	wantCapacity := float64(64<<10) / dataCapacityWindowTime.Seconds()
 	if snapshot.Quality.CapacityBytesSec != wantCapacity {
 		t.Fatalf("capacity = %v, want %v", snapshot.Quality.CapacityBytesSec, wantCapacity)
 	}
@@ -404,13 +404,13 @@ func TestSessionRuntimeDropsIncompleteDataWindowAcrossIdleGap(t *testing.T) {
 	if snapshot := runtime.snapshot(); snapshot.Quality.DataSamples != 0 {
 		t.Fatalf("first credit after new baseline completed DATA window = %#v", snapshot)
 	}
-	now = now.Add(100 * time.Millisecond)
+	now = now.Add(150 * time.Millisecond)
 	runtime.observeDataCredit(32<<10, now, now.Add(100*time.Millisecond), true)
 	snapshot := runtime.snapshot()
 	if snapshot.Quality.DataSamples != 1 {
 		t.Fatalf("new continuous DATA window = %#v", snapshot)
 	}
-	wantCapacity := float64(64<<10) / (200 * time.Millisecond).Seconds()
+	wantCapacity := float64(64<<10) / dataCapacityWindowTime.Seconds()
 	if snapshot.Quality.CapacityBytesSec != wantCapacity {
 		t.Fatalf("capacity after idle gap = %v, want %v", snapshot.Quality.CapacityBytesSec, wantCapacity)
 	}
@@ -426,15 +426,41 @@ func TestSessionRuntimeSamplesCompleteDataWindowAtThreshold(t *testing.T) {
 	defer runtime.close(transport.ErrClosed)
 
 	runtime.observeDataCredit(1, start, start.Add(100*time.Millisecond), true)
-	runtime.observeDataCredit(48<<10, start.Add(110*time.Millisecond), start.Add(200*time.Millisecond), true)
-	runtime.observeDataCredit(32<<10, start.Add(120*time.Millisecond), start.Add(200*time.Millisecond), true)
+	runtime.observeDataCredit(48<<10, start.Add(110*time.Millisecond), start.Add(350*time.Millisecond), true)
+	runtime.observeDataCredit(32<<10, start.Add(120*time.Millisecond), start.Add(350*time.Millisecond), true)
 	snapshot := runtime.snapshot()
 	if snapshot.Quality.DataSamples != 1 || snapshot.EligibleAckedData != 80<<10+1 {
 		t.Fatalf("complete ACK window = %#v", snapshot)
 	}
-	wantCapacity := float64(80<<10) / (100 * time.Millisecond).Seconds()
+	wantCapacity := float64(80<<10) / dataCapacityWindowTime.Seconds()
 	if snapshot.Quality.CapacityBytesSec != wantCapacity {
 		t.Fatalf("capacity before idle gap = %v, want %v", snapshot.Quality.CapacityBytesSec, wantCapacity)
+	}
+}
+
+func TestSessionRuntimeWaitsForMinimumDurationBeforeCapacitySample(t *testing.T) {
+	connection := newRuntimeTestConnection()
+	start := time.Unix(825, 0)
+	runtime, err := newSessionRuntimeWithClock(context.Background(), connection, nil, func() time.Time { return start })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.close(transport.ErrClosed)
+
+	runtime.observeDataCredit(1, start, start, true)
+	runtime.observeDataCredit(64<<10, start.Add(500*time.Microsecond), start.Add(time.Millisecond), true)
+	if snapshot := runtime.snapshot(); snapshot.Quality.DataSamples != 0 {
+		t.Fatalf("compressed ACK burst produced a capacity sample = %#v", snapshot)
+	}
+
+	runtime.observeDataCredit(64<<10, start.Add(200*time.Millisecond), start.Add(dataCapacityWindowTime), true)
+	snapshot := runtime.snapshot()
+	if snapshot.Quality.DataSamples != 1 {
+		t.Fatalf("complete duration window did not produce a capacity sample = %#v", snapshot)
+	}
+	wantCapacity := float64(128<<10) / dataCapacityWindowTime.Seconds()
+	if snapshot.Quality.CapacityBytesSec != wantCapacity {
+		t.Fatalf("capacity after minimum duration = %v, want %v", snapshot.Quality.CapacityBytesSec, wantCapacity)
 	}
 }
 

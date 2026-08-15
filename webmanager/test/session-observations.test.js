@@ -16,7 +16,7 @@ function lane(id, options = {}) {
       smoothed_rtt_micros: options.rtt ?? 0,
       capacity_bytes_sec: options.capacity ?? 0,
       data_sample_fresh: options.fresh ?? false,
-      data_sample_age_ms: options.age ?? null,
+      data_sample_age_ms: options.age ?? (options.fresh ? 0 : null),
       last_data_capacity_bytes_sec: options.lastCapacity ?? 0,
       peer_send_capacity_bytes_sec: options.peerCapacity ?? 0,
       peer_send_data_sample_at: options.peerSampleAt,
@@ -50,8 +50,8 @@ test('session observations separate complete current and stale reference capacit
       peerCapacity: 400, peerSampleAt: '2026-08-01T10:00:00Z', peerExpiresAt: '2026-08-01T10:00:03Z',
     }),
     lane('b', {
-      lane: 2, fresh: false, age: 7_000, lastCapacity: 200,
-      peerCapacity: 600, peerSampleAt: '2026-08-01T10:00:01Z', peerExpiresAt: '2026-08-01T10:00:04Z',
+      lane: 2, fresh: false, age: 7_900, lastCapacity: 200,
+      peerCapacity: 600, peerSampleAt: '2026-08-01T10:00:00.100Z', peerExpiresAt: '2026-08-01T10:00:03.100Z',
     }),
   ], 'name', 2, '2026-08-01T10:00:08Z');
 
@@ -70,6 +70,17 @@ test('session observations do not report partial interface capacity as current t
   ], 'name', 1);
 
   assert.equal(observations[0].uplink.freshCount, 1);
+  assert.equal(observations[0].uplink.capacity, null);
+  assert.equal(observations[0].uplink.lastCapacity, null);
+});
+
+test('session observations do not add lane capacities measured at different times', () => {
+  const observations = summarizeSessionObservations([
+    lane('recent', { lane: 1, fresh: true, age: 100, capacity: 100 }),
+    lane('older', { lane: 2, fresh: true, age: 500, capacity: 200 }),
+  ], 'name', 1);
+
+  assert.equal(observations[0].uplink.freshCount, 2);
   assert.equal(observations[0].uplink.capacity, null);
   assert.equal(observations[0].uplink.lastCapacity, null);
 });

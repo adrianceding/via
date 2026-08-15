@@ -1,4 +1,5 @@
 import { aggregationGroupIdentity } from './aggregation.js';
+import { concurrentCapacityTotal } from './capacity-samples.js';
 import { sortSessions } from './quality.js';
 
 function validNumber(value) {
@@ -49,12 +50,8 @@ function summarizeDirection(ready, direction) {
   const samples = ready.map((session) => session.capacityDirections[direction]);
   return {
     freshCount: samples.filter((sample) => sample.state === 'fresh').length,
-    capacity: samples.length > 0 && samples.every((sample) => sample.capacity != null)
-      ? samples.reduce((total, sample) => total + sample.capacity, 0)
-      : null,
-    lastCapacity: samples.length > 0 && samples.every((sample) => sample.lastCapacity != null)
-      ? samples.reduce((total, sample) => total + sample.lastCapacity, 0)
-      : null,
+    capacity: concurrentCapacityTotal(samples),
+    lastCapacity: concurrentCapacityTotal(samples, 'lastCapacity'),
   };
 }
 

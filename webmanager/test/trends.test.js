@@ -23,6 +23,7 @@ function lane(id, interfaceName, written, received = 0) {
       received_data_payload_bytes: received,
       capacity_bytes_sec: 100,
       data_sample_fresh: true,
+      data_sample_age_ms: 0,
     },
   };
 }
@@ -110,6 +111,21 @@ test('trend store requires complete local capacity and retains fresh values as r
   ], '2026-08-01T10:00:04Z');
   assert.equal(store.snapshot()[0].capacity, 1_000);
   assert.equal(store.snapshot()[0].lastCapacity, 1_000);
+});
+
+test('trend store does not add lane capacities measured at different times', () => {
+  const store = createSessionTrendStore();
+  store.update([
+    lane('a', 'eth0', 100),
+    lane('b', 'eth0', 100),
+  ], '2026-08-01T10:00:00Z');
+  store.update([
+    { ...lane('a', 'eth0', 200), quality: { ...lane('a', 'eth0', 200).quality, data_sample_age_ms: 100 } },
+    { ...lane('b', 'eth0', 200), quality: { ...lane('b', 'eth0', 200).quality, data_sample_age_ms: 500 } },
+  ], '2026-08-01T10:00:01Z');
+
+  assert.equal(store.snapshot()[0].capacity, 0);
+  assert.equal(store.snapshot()[0].lastCapacity, 0);
 });
 
 test('trend store ignores missing or invalid received DATA counters', () => {

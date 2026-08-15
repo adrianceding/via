@@ -1,3 +1,5 @@
+import { concurrentCapacityTotal } from './capacity-samples.js';
+
 export const AGGREGATION_MAX_GROUPS = 12;
 
 function sessionKey(session, fallback = '') {
@@ -64,18 +66,18 @@ function summarizeGroup(group) {
   const rttRange = summarizeValues(lanes.map((lane) => lane.rtt).filter((rtt) => rtt > 0));
   const freshCount = lanes.filter((lane) => lane.sampleState === 'fresh').length;
   const peerFreshCount = lanes.filter((lane) => lane.peerSampleState === 'fresh').length;
-  const totalCapacity = freshCount === lanes.length
-    ? lanes.reduce((total, lane) => total + lane.capacity, 0)
-    : null;
-  const peerTotalCapacity = peerFreshCount === lanes.length
-    ? lanes.reduce((total, lane) => total + lane.peerCapacity, 0)
-    : null;
-  const lastTotalCapacity = lanes.every((lane) => lane.lastCapacity != null)
-    ? lanes.reduce((total, lane) => total + lane.lastCapacity, 0)
-    : null;
-  const peerLastTotalCapacity = lanes.every((lane) => lane.peerLastCapacity != null)
-    ? lanes.reduce((total, lane) => total + lane.peerLastCapacity, 0)
-    : null;
+  const totalCapacity = concurrentCapacityTotal(lanes.map((lane) => ({
+    capacity: lane.capacity, ageMs: lane.sampleAgeMs,
+  })));
+  const peerTotalCapacity = concurrentCapacityTotal(lanes.map((lane) => ({
+    capacity: lane.peerCapacity, ageMs: lane.peerSampleAgeMs,
+  })));
+  const lastTotalCapacity = concurrentCapacityTotal(lanes.map((lane) => ({
+    capacity: lane.lastCapacity, ageMs: lane.sampleAgeMs,
+  })));
+  const peerLastTotalCapacity = concurrentCapacityTotal(lanes.map((lane) => ({
+    capacity: lane.peerLastCapacity, ageMs: lane.peerSampleAgeMs,
+  })));
   const highestRow = lanes.find((lane) => lane.capacity != null) || null;
   const highestCapacity = highestRow?.capacity ?? null;
   const peerHighestCapacity = Math.max(...lanes.map((lane) => lane.peerCapacity).filter((capacity) => capacity != null), -1);
@@ -169,14 +171,18 @@ export function summarizeAggregation(sessions, mode = 'name', generatedAt = '') 
   const peerFreshCount = readyRows.filter((row) => row.peerSampleState === 'fresh').length;
   const complete = readyCount > 0 && freshCount === readyCount;
   const peerComplete = readyCount > 0 && peerFreshCount === readyCount;
-  const totalCapacity = complete ? readyRows.reduce((total, row) => total + row.capacity, 0) : null;
-  const peerTotalCapacity = peerComplete ? readyRows.reduce((total, row) => total + row.peerCapacity, 0) : null;
-  const lastTotalCapacity = readyCount > 0 && readyRows.every((row) => row.lastCapacity != null)
-    ? readyRows.reduce((total, row) => total + row.lastCapacity, 0)
-    : null;
-  const peerLastTotalCapacity = readyCount > 0 && readyRows.every((row) => row.peerLastCapacity != null)
-    ? readyRows.reduce((total, row) => total + row.peerLastCapacity, 0)
-    : null;
+  const totalCapacity = complete ? concurrentCapacityTotal(readyRows.map((row) => ({
+    capacity: row.capacity, ageMs: row.sampleAgeMs,
+  }))) : null;
+  const peerTotalCapacity = peerComplete ? concurrentCapacityTotal(readyRows.map((row) => ({
+    capacity: row.peerCapacity, ageMs: row.peerSampleAgeMs,
+  }))) : null;
+  const lastTotalCapacity = concurrentCapacityTotal(readyRows.map((row) => ({
+    capacity: row.lastCapacity, ageMs: row.sampleAgeMs,
+  })));
+  const peerLastTotalCapacity = concurrentCapacityTotal(readyRows.map((row) => ({
+    capacity: row.peerLastCapacity, ageMs: row.peerSampleAgeMs,
+  })));
   const highestRow = readyRows.slice().sort(compareRows).find((row) => row.capacity != null) || null;
   const highestCapacity = highestRow?.capacity ?? null;
   const lift = readyCount >= 2 && totalCapacity != null && highestCapacity > 0

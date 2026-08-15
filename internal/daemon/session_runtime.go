@@ -567,7 +567,8 @@ func (runtime *sessionRuntime) observeFlowDataCredit(flowID protocol.FlowID, ack
 		runtime.dataWindowLastACK = acknowledgedAt
 	}
 	runtime.dataWindowBytes = saturatingUint64(runtime.dataWindowBytes, acknowledgedBytes)
-	if runtime.dataWindowBytes < dataCapacityWindowBytes {
+	interval := runtime.dataWindowLastACK.Sub(runtime.dataWindowStart)
+	if runtime.dataWindowBytes < dataCapacityWindowBytes || interval < dataCapacityWindowTime {
 		snapshot, notify := runtime.snapshotIfNotifyDueLocked()
 		runtime.mu.Unlock()
 		if notify {
@@ -575,7 +576,6 @@ func (runtime *sessionRuntime) observeFlowDataCredit(flowID protocol.FlowID, ack
 		}
 		return
 	}
-	interval := runtime.dataWindowLastACK.Sub(runtime.dataWindowStart)
 	if interval > 0 {
 		_ = runtime.quality.ObserveData(0, runtime.dataWindowBytes, interval)
 	}
