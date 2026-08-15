@@ -856,20 +856,29 @@ func writeJSONFile(path string, value any) error {
 func dumpStatus(arguments []string) error {
 	flags := flag.NewFlagSet("dump-status", flag.ContinueOnError)
 	base := flags.String("base-url", "http://127.0.0.1:18081", "status base URL")
+	compact := flags.Bool("compact", false, "only print health and summary")
 	var rejected stringValues
 	flags.Var(&rejected, "reject-value", "sensitive value that must not appear in status responses")
 	if err := flags.Parse(arguments); err != nil || flags.NArg() != 0 {
 		return errors.New("invalid dump-status flags")
 	}
-	return inspectStatus(*base, rejected, os.Stdout)
+	routes := []string{"health", "summary", "interfaces", "sessions", "flows"}
+	if *compact {
+		routes = routes[:2]
+	}
+	return inspectStatusRoutes(*base, rejected, os.Stdout, routes)
 }
 
 func inspectStatus(base string, rejected []string, output io.Writer) error {
+	return inspectStatusRoutes(base, rejected, output, []string{"health", "summary", "interfaces", "sessions", "flows"})
+}
+
+func inspectStatusRoutes(base string, rejected []string, output io.Writer, routes []string) error {
 	if strings.TrimSpace(base) == "" || output == nil {
 		return errors.New("invalid status inspection")
 	}
 	var result error
-	for _, route := range []string{"health", "summary", "interfaces", "sessions", "flows"} {
+	for _, route := range routes {
 		data, err := getURL(strings.TrimRight(base, "/") + "/api/v1/" + route)
 		if err != nil {
 			result = errors.Join(result, fmt.Errorf("%s: %w", route, err))

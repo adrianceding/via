@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -298,5 +299,25 @@ func TestInspectStatusRequiresAllJSONRoutesAndRejectsSensitiveValues(t *testing.
 	}
 	if strings.Contains(rejectedOutput.String(), "redacted") {
 		t.Fatal("sensitive status response was written to diagnostics")
+	}
+}
+
+func TestInspectStatusRoutesCanLimitFailureSummary(t *testing.T) {
+	var paths []string
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		paths = append(paths, request.URL.Path)
+		_, _ = writer.Write([]byte(`{"ok":true}`))
+	}))
+	defer server.Close()
+
+	var output bytes.Buffer
+	if err := inspectStatusRoutes(server.URL, nil, &output, []string{"health", "summary"}); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(paths, []string{"/api/v1/health", "/api/v1/summary"}) {
+		t.Fatalf("status paths = %v", paths)
+	}
+	if got := output.String(); strings.Contains(got, "interfaces:") || strings.Count(strings.TrimSpace(got), "\n")+1 != 2 {
+		t.Fatalf("compact status output = %q", got)
 	}
 }

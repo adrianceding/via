@@ -70,6 +70,7 @@ SERVER_LOG="$ARTIFACT_DIR/server.log"
 CLIENT_STATUS_LOG="$ARTIFACT_DIR/client-status.log"
 SERVER_STATUS_LOG="$ARTIFACT_DIR/server-status.log"
 TC_LOG="$ARTIFACT_DIR/tc.log"
+FULL_DIAGNOSTICS_LOG="$ARTIFACT_DIR/diagnostics-full.log"
 NETWORK_TEST_PSK="MTIzNDU2Nzg5MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTI="
 CLIENT_LOG=""
 CLIENT_LAUNCH_PID=""
@@ -77,6 +78,22 @@ TARGET_LAUNCH_PID=""
 SERVER_LAUNCH_PID=""
 EXPECTED_TARGET_CONNECTIONS=0
 NEXT_REQUEST_ID=1000
+CURRENT_STAGE="initialization"
+FAILURE_STATUS=0
+FAILURE_LINE=0
+FAILURE_COMMAND=""
+
+capture_failure() {
+	local status="$1"
+	local line="$2"
+	local command="$3"
+	if ((FAILURE_STATUS == 0)); then
+		FAILURE_STATUS="$status"
+		FAILURE_LINE="$line"
+		FAILURE_COMMAND="${command//$NETWORK_TEST_PSK/[redacted]}"
+		FAILURE_COMMAND="${FAILURE_COMMAND//network-test-password/[redacted]}"
+	fi
+}
 
 kill_namespace_processes() {
 	local namespace="$1"
@@ -121,35 +138,64 @@ run_in_namespace_timeout() {
 		setpriv --reuid="$RUN_UID" --regid="$RUN_GID" --clear-groups "$@"
 }
 
-dump_diagnostics() {
+write_full_diagnostics() {
 	set +e
-	echo "test-network: 诊断目录: $ARTIFACT_DIR" >&2
+	{
+		echo "failure: stage=$CURRENT_STAGE status=$FAILURE_STATUS line=$FAILURE_LINE"
+		echo "command: $FAILURE_COMMAND"
 	for logfile in "$SERVER_LOG" "$CLIENT_LOG" "$TARGET_LOG" "$TC_LOG" "$CLIENT_STATUS_LOG" "$SERVER_STATUS_LOG"; do
 		if [[ -n "$logfile" && -f "$logfile" ]]; then
-			echo "===== $logfile =====" >&2
-			tail -n 200 "$logfile" >&2
+			echo "===== $logfile ====="
+			cat "$logfile"
 		fi
 	done
 	if sudo -n ip netns list | awk '{print $1}' | awk -v wanted="$CLIENT_NS" '$0 == wanted { found = 1 } END { exit !found }'; then
-		echo "===== client addr/rule/route/qdisc =====" >&2
-		sudo -n ip -n "$CLIENT_NS" -details address show >&2
-		sudo -n ip -n "$CLIENT_NS" rule show >&2
-		sudo -n ip -n "$CLIENT_NS" route show table all >&2
-		sudo -n ip netns exec "$CLIENT_NS" tc -s qdisc show >&2
-		run_in_namespace "$CLIENT_NS" "$HARNESS_BINARY" dump-status --base-url "$STATUS_ENDPOINT" >&2 || true
+		echo "===== client addr/rule/route/qdisc ====="
+		sudo -n ip -n "$CLIENT_NS" -details address show
+		sudo -n ip -n "$CLIENT_NS" rule show
+		sudo -n ip -n "$CLIENT_NS" route show table all
+		sudo -n ip netns exec "$CLIENT_NS" tc -s qdisc show
+		run_in_namespace "$CLIENT_NS" "$HARNESS_BINARY" dump-status --base-url "$STATUS_ENDPOINT" || true
 	fi
 	if sudo -n ip netns list | awk '{print $1}' | awk -v wanted="$SERVER_NS" '$0 == wanted { found = 1 } END { exit !found }'; then
-		echo "===== server addr/route/qdisc =====" >&2
-		sudo -n ip -n "$SERVER_NS" -details address show >&2
-		sudo -n ip -n "$SERVER_NS" route show table all >&2
-		sudo -n ip netns exec "$SERVER_NS" tc -s qdisc show >&2
-		run_in_namespace "$SERVER_NS" "$HARNESS_BINARY" dump-status --base-url "http://127.0.0.1:18082" >&2 || true
+		echo "===== server addr/route/qdisc ====="
+		sudo -n ip -n "$SERVER_NS" -details address show
+		sudo -n ip -n "$SERVER_NS" route show table all
+		sudo -n ip netns exec "$SERVER_NS" tc -s qdisc show
+		run_in_namespace "$SERVER_NS" "$HARNESS_BINARY" dump-status --base-url "http://127.0.0.1:18082" || true
+	fi
+	if [[ -f "$TARGET_STATE" ]]; then
+		echo "===== target state ====="
+		cat "$TARGET_STATE"
+	fi
+	} >"$FULL_DIAGNOSTICS_LOG" 2>&1
+}
+
+dump_diagnostics() {
+	set +e
+	write_full_diagnostics
+	echo "test-network: FAIL stage=$CURRENT_STAGE status=$FAILURE_STATUS line=$FAILURE_LINE" >&2
+	echo "test-network: command: $FAILURE_COMMAND" >&2
+	for logfile in "$SERVER_LOG" "$CLIENT_LOG" "$TARGET_LOG"; do
+		if [[ -n "$logfile" && -s "$logfile" ]]; then
+			echo "===== $(basename "$logfile") (last 20 lines) =====" >&2
+			tail -n 20 "$logfile" >&2
+		fi
+	done
+	if sudo -n ip netns list | awk '{print $1}' | awk -v wanted="$CLIENT_NS" '$0 == wanted { found = 1 } END { exit !found }'; then
+		echo "===== client health/summary =====" >&2
+		run_in_namespace "$CLIENT_NS" "$HARNESS_BINARY" dump-status --compact --base-url "$STATUS_ENDPOINT" >&2 || true
+	fi
+	if sudo -n ip netns list | awk '{print $1}' | awk -v wanted="$SERVER_NS" '$0 == wanted { found = 1 } END { exit !found }'; then
+		echo "===== server health/summary =====" >&2
+		run_in_namespace "$SERVER_NS" "$HARNESS_BINARY" dump-status --compact --base-url "http://127.0.0.1:18082" >&2 || true
 	fi
 	if [[ -f "$TARGET_STATE" ]]; then
 		echo "===== target state =====" >&2
 		tr -d '\n' <"$TARGET_STATE" >&2
 		echo >&2
 	fi
+	echo "test-network: 完整诊断: $FULL_DIAGNOSTICS_LOG" >&2
 }
 
 cleanup() {
@@ -173,6 +219,7 @@ cleanup() {
 	exit "$exit_status"
 }
 trap cleanup EXIT
+trap 'capture_failure "$?" "$LINENO" "$BASH_COMMAND"' ERR
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
@@ -432,11 +479,16 @@ stop_client() {
 start_client() {
 	local name="$1"
 	local delivery="$2"
+	CURRENT_STAGE="client/$name/stop-previous"
 	stop_client
+	CURRENT_STAGE="client/$name/wait-old-server"
+	wait_server_resources 0
 	write_client_config "$delivery"
 	CLIENT_LOG="$ARTIFACT_DIR/client-${name}.log"
+	CURRENT_STAGE="client/$name/start"
 	run_in_namespace "$CLIENT_NS" "$VIA_BINARY" client --config "$CLIENT_CONFIG" >"$CLIENT_LOG" 2>&1 &
 	CLIENT_LAUNCH_PID=$!
+	CURRENT_STAGE="client/$name/wait-ready"
 	run_in_namespace_timeout 30s "$CLIENT_NS" "$HARNESS_BINARY" wait-status \
 		--url "$STATUS_ENDPOINT/api/v1/sessions" --ready-sessions 2 \
 		--ready-interface "$CLIENT_A" --ready-interface "$CLIENT_B" --timeout 25s
@@ -445,11 +497,16 @@ start_client() {
 start_multilane_client() {
 	local name="$1"
 	local lanes="$2"
+	CURRENT_STAGE="client/$name/stop-previous"
 	stop_client
+	CURRENT_STAGE="client/$name/wait-old-server"
+	wait_server_resources 0
 	write_client_config $'delivery:\n  mode: adaptive\n  path_selection: fastest' "$lanes" "$CLIENT_A"
 	CLIENT_LOG="$ARTIFACT_DIR/client-${name}.log"
+	CURRENT_STAGE="client/$name/start"
 	run_in_namespace "$CLIENT_NS" "$VIA_BINARY" client --config "$CLIENT_CONFIG" >"$CLIENT_LOG" 2>&1 &
 	CLIENT_LAUNCH_PID=$!
+	CURRENT_STAGE="client/$name/wait-ready"
 	run_in_namespace_timeout 15s "$CLIENT_NS" "$HARNESS_BINARY" wait-status \
 		--url "$STATUS_ENDPOINT/api/v1/sessions" --ready-sessions "$lanes" \
 		--ready-interface "$CLIENT_A" --timeout 10s
@@ -505,6 +562,7 @@ run_transfer() {
 	local label="$1"
 	local mode="$2"
 	local size="${3:-524288}"
+	CURRENT_STAGE="transfer/$label"
 	local upload=0
 	local download=0
 	case "$mode" in
@@ -533,6 +591,7 @@ run_timed_transfer() {
 	local label="$1"
 	local mode="$2"
 	local size="$3"
+	CURRENT_STAGE="transfer/$label"
 	local upload=0
 	local download=0
 	case "$mode" in
@@ -568,6 +627,12 @@ server_session_written() {
 		--url "http://127.0.0.1:18082/api/v1/sessions" --remote-host "$remote_host"
 }
 
+client_session_written() {
+	local interface_name="$1"
+	run_in_namespace_timeout 10s "$CLIENT_NS" "$HARNESS_BINARY" session-written \
+		--url "$STATUS_ENDPOINT/api/v1/sessions" --interface "$interface_name"
+}
+
 assert_distributed_aggregation() {
 	local size=$((16 << 20))
 	clear_all_netem
@@ -593,6 +658,7 @@ assert_distributed_aggregation() {
 	wait_client_ready 2 "$CLIENT_A" "$CLIENT_B"
 	start_client adaptive-distributed-aggregation-dual $'delivery:\n  mode: adaptive\n  path_selection: distributed'
 
+	CURRENT_STAGE="distributed-aggregation/read-baseline"
 	local before_a before_b after_a after_b delta_a delta_b total fastest
 	before_a="$(server_session_written "$CLIENT_A_ADDRESS")"
 	before_b="$(server_session_written "$CLIENT_B_ADDRESS")"
@@ -605,6 +671,7 @@ assert_distributed_aggregation() {
 		--result-file "$window_summary" --window-bytes $((320 << 10)) --interval 50ms --timeout 80s &
 	local window_sampler_pid=$!
 	run_timed_transfer aggregate-dual download "$size"
+	CURRENT_STAGE="distributed-aggregation/check-dual"
 	wait "$window_sampler_pid"
 	echo "test-network: 双路 Flow 窗口 $(cat "$window_summary")"
 	local dual="$LAST_TRANSFER_NANOS"
@@ -646,6 +713,7 @@ assert_multilane_aggregation() {
 	run_timed_transfer multilane-four download "$size"
 	local four="$LAST_TRANSFER_NANOS"
 
+	CURRENT_STAGE="multilane/check-speedup"
 	echo "test-network: 单 interface 聚合耗时 one=${single}ns four=${four}ns"
 	if ((four * 100 > single * 60)); then
 		echo "test-network: 四 lane 耗时超过单 lane 的 60%" >&2
@@ -662,15 +730,16 @@ assert_fastest_capacity_shift() {
 	set_path_a_netem delay 2ms rate 10mbit
 	set_path_b_netem delay 12ms rate 5mbit
 	wait_fastest_a
-	run_transfer fastest-capacity-warmup download "$learning_size"
+	run_transfer fastest-capacity-warmup upload "$learning_size"
 	wait_fastest_a
 
 	local before_a before_b after_a after_b delta_a delta_b total
-	before_a="$(server_session_written "$CLIENT_A_ADDRESS")"
-	before_b="$(server_session_written "$CLIENT_B_ADDRESS")"
-	run_transfer fastest-capacity-initial download "$initial_size"
-	after_a="$(server_session_written "$CLIENT_A_ADDRESS")"
-	after_b="$(server_session_written "$CLIENT_B_ADDRESS")"
+	before_a="$(client_session_written "$CLIENT_A")"
+	before_b="$(client_session_written "$CLIENT_B")"
+	run_transfer fastest-capacity-initial upload "$initial_size"
+	CURRENT_STAGE="fastest-capacity/check-initial"
+	after_a="$(client_session_written "$CLIENT_A")"
+	after_b="$(client_session_written "$CLIENT_B")"
 	delta_a=$((after_a - before_a))
 	delta_b=$((after_b - before_b))
 	total=$((delta_a + delta_b))
@@ -681,12 +750,13 @@ assert_fastest_capacity_shift() {
 	fi
 
 	set_path_a_netem delay 2ms rate 2mbit
-	run_transfer fastest-capacity-learning download "$learning_size"
-	before_a="$(server_session_written "$CLIENT_A_ADDRESS")"
-	before_b="$(server_session_written "$CLIENT_B_ADDRESS")"
-	run_transfer fastest-capacity-after-shift download "$followup_size"
-	after_a="$(server_session_written "$CLIENT_A_ADDRESS")"
-	after_b="$(server_session_written "$CLIENT_B_ADDRESS")"
+	run_transfer fastest-capacity-learning upload "$learning_size"
+	before_a="$(client_session_written "$CLIENT_A")"
+	before_b="$(client_session_written "$CLIENT_B")"
+	run_transfer fastest-capacity-after-shift upload "$followup_size"
+	CURRENT_STAGE="fastest-capacity/check-shift"
+	after_a="$(client_session_written "$CLIENT_A")"
+	after_b="$(client_session_written "$CLIENT_B")"
 	delta_a=$((after_a - before_a))
 	delta_b=$((after_b - before_b))
 	total=$((delta_a + delta_b))
