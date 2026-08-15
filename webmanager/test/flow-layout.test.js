@@ -12,4 +12,6 @@ test('flow views use compact semantic columns without fixed overflow widths', as
   assert.ok(active.includes('v-if="flows.length === 0" class="empty-block compact-empty"'));
   assert.ok(terminal.includes('v-if="terminals.length === 0" class="empty-block compact-empty"'));
   assert.ok(section.includes('role="tablist"'));
+  assert.ok(section.includes("await nextTick()"));
+  assert.ok(section.includes("terminalTabButton.value)?.focus()"));
 });

@@ -109,7 +109,7 @@ func TestComputeProofFixedVector(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ComputeProof() error = %v", err)
 	}
-	want, _ := hex.DecodeString("f8819e1d97c5ac0e12d85ad1428d8842fbb6d4b5d70265bbd1a9d611de00faa0")
+	want, _ := hex.DecodeString("184a3765e6e21274515ad9b22c37a3261cbaffaf37b236254a322b66c20efd65")
 	if !bytes.Equal(proof[:], want) {
 		t.Fatalf("proof = %x, want %x", proof, want)
 	}

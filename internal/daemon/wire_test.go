@@ -336,6 +336,93 @@ func TestWireProbePublishesSessionQualitySnapshot(t *testing.T) {
 	}
 }
 
+func TestWireProbeACKCarriesLocalSendCapacity(t *testing.T) {
+	now := time.Unix(300, 0)
+	session, err := newWireSessionWithClock(context.Background(), 1, blockingWireConnection{}, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.close()
+
+	session.runtime.mu.Lock()
+	if err := session.runtime.quality.ObserveData(0, 64<<10, time.Second); err != nil {
+		session.runtime.mu.Unlock()
+		t.Fatal(err)
+	}
+	session.runtime.mu.Unlock()
+
+	ack := session.probeACK(7)
+	if ack.Token != 7 || ack.SendCapacityBytesSec != 64<<10 || ack.SendCapacitySampleAgeNanos != 0 ||
+		ack.SendCapacityFreshForNanos != uint64(3*time.Second) {
+		t.Fatalf("probe ack = %#v", ack)
+	}
+}
+
+func TestWirePeerSendCapacityFollowsMatchingProbeACK(t *testing.T) {
+	now := time.Unix(400, 0)
+	session, err := newWireSessionWithClock(context.Background(), 1, blockingWireConnection{}, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.close()
+	repository, err := statusapi.NewRepository(statusapi.Limits{Interfaces: 1, Sessions: 1, Flows: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var statusKey [32]byte
+	statusKey[0] = 8
+	observer, err := newRuntimeStatusWithClock(repository, 1, 1, statusKey, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	observer.upsertSession(1, "tcp", "eth0", netip.MustParseAddr("192.0.2.1"), statusapi.SessionReady, statusapi.ReasonPathAdded)
+	session.setStatusObserver(observer)
+
+	probe, ok, expired, dead := session.startProbe(now)
+	if !ok || expired || dead {
+		t.Fatalf("probe = %#v, ok=%t expired=%t dead=%t", probe, ok, expired, dead)
+	}
+	ack := protocol.ProbeACK{
+		Token: probe.Token, SendCapacityBytesSec: 8 << 20,
+		SendCapacitySampleAgeNanos: uint64(time.Second), SendCapacityFreshForNanos: uint64(3 * time.Second),
+	}
+	now = now.Add(100 * time.Millisecond)
+	if rtt, accepted := session.completeProbeACK(ack, now); !accepted || rtt != 100*time.Millisecond {
+		t.Fatalf("complete probe = %v, %t", rtt, accepted)
+	}
+	fresh := session.peerSendCapacitySnapshot(now.Add(2 * time.Second))
+	if !fresh.Measured || !fresh.Fresh || fresh.CapacityBytesSec != 8<<20 || fresh.SampleAge != 3*time.Second {
+		t.Fatalf("fresh peer capacity = %#v", fresh)
+	}
+	statusQuality := observer.sessions[observer.hasher.SessionID(1)].Quality
+	if statusQuality.PeerSendCapacityBytesSec != 8<<20 || statusQuality.PeerSendDataSampleExpiresAt == nil {
+		t.Fatalf("peer capacity was not published = %#v", statusQuality)
+	}
+	stale := session.peerSendCapacitySnapshot(now.Add(2*time.Second + time.Nanosecond))
+	if !stale.Measured || stale.Fresh || stale.CapacityBytesSec != 8<<20 {
+		t.Fatalf("stale peer capacity = %#v", stale)
+	}
+	if _, accepted := session.completeProbeACK(protocol.ProbeACK{Token: probe.Token}, now.Add(time.Second)); accepted {
+		t.Fatal("duplicate probe ack was accepted")
+	}
+	if after := session.peerSendCapacitySnapshot(now.Add(time.Second)); after.CapacityBytesSec != 8<<20 {
+		t.Fatalf("duplicate probe ack changed peer capacity = %#v", after)
+	}
+
+	now = now.Add(probeInterval)
+	next, ok, expired, dead := session.startProbe(now)
+	if !ok || expired || dead {
+		t.Fatalf("next probe = %#v, ok=%t expired=%t dead=%t", next, ok, expired, dead)
+	}
+	now = now.Add(time.Millisecond)
+	if _, accepted := session.completeProbeACK(protocol.ProbeACK{Token: next.Token}, now); !accepted {
+		t.Fatal("unmeasured probe ack was rejected")
+	}
+	if cleared := session.peerSendCapacitySnapshot(now); cleared.Measured || cleared.CapacityBytesSec != 0 {
+		t.Fatalf("unmeasured peer capacity = %#v", cleared)
+	}
+}
+
 type blockingWireConnection struct{}
 
 func (blockingWireConnection) Capabilities() transport.Capabilities {

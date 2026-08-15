@@ -19,15 +19,16 @@ test('view state rejects unknown options and omits defaults when serialized', ()
     query: '',
     onlyAnomalies: false,
     flowTab: 'active',
-    sessionSort: 'source',
+    sessionSort: 'name',
   });
   assert.equal(serializeViewState(parseViewState('')), '');
   assert.equal(serializeViewState({
     query: ' connection-a ',
     onlyAnomalies: true,
     flowTab: 'terminal',
-    sessionSort: 'state',
-  }), '?q=connection-a&anomaly=1&flow=terminal&sort=state');
+    sessionSort: 'name',
+  }), '?q=connection-a&anomaly=1&flow=terminal');
+  assert.equal(parseViewState('?sort=source').sessionSort, 'name');
 });
 
 test('shared view URL preserves location while replacing supported state', () => {

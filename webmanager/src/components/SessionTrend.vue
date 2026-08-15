@@ -3,7 +3,7 @@ import { GridComponent, LegendComponent, TooltipComponent } from 'echarts/compon
 import { LineChart } from 'echarts/charts';
 import { init, use } from 'echarts/core';
 import { CanvasRenderer } from 'echarts/renderers';
-import { onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
 
 import { buildTrendOption, selectionBySeriesID, toggleTrendIsolation } from '../trend-option.js';
@@ -21,6 +21,11 @@ const container = ref(null);
 let chart = null;
 let resizeObserver = null;
 let legendSelection = {};
+const hasData = computed(() => Boolean(props.aggregate || props.trends.length));
+const summaryLabel = computed(() => t('trend.summary', {
+  connections: props.trends.length,
+  aggregate: props.aggregate ? 1 : 0,
+}));
 
 function render() {
   if (!chart) return;
@@ -30,7 +35,17 @@ function render() {
   chart.setOption(buildTrendOption(trends, legendSelection, t('trend.connection'), t('trend.axis')), { notMerge: true });
 }
 
-onMounted(() => {
+function disposeChart() {
+  resizeObserver?.unobserve(container.value);
+  chart?.off('legendselectchanged');
+  chart?.off('click');
+  chart?.dispose();
+  chart = null;
+  legendSelection = {};
+}
+
+function ensureChart() {
+  if (!hasData.value || chart || !container.value) return;
   chart = init(container.value, null, { renderer: 'canvas' });
   chart.on('legendselectchanged', ({ selected }) => {
     const currentSeries = chart.getOption().series;
@@ -42,21 +57,29 @@ onMounted(() => {
     legendSelection = toggleTrendIsolation(currentSeries, legendSelection, seriesName);
     render();
   });
+  resizeObserver?.observe(container.value);
+  render();
+}
+
+onMounted(() => {
   resizeObserver = new ResizeObserver(() => chart?.resize());
-  resizeObserver.observe(container.value);
+  ensureChart();
+});
+
+watch([() => props.aggregate, () => props.trends, locale, hasData], async () => {
+  if (!hasData.value) {
+    disposeChart();
+    return;
+  }
+  await nextTick();
+  ensureChart();
   render();
 });
 
-watch([() => props.aggregate, () => props.trends, locale], render);
-
 onBeforeUnmount(() => {
   resizeObserver?.disconnect();
-  chart?.off('legendselectchanged');
-  chart?.off('click');
-  chart?.dispose();
+  disposeChart();
   resizeObserver = null;
-  chart = null;
-  legendSelection = {};
 });
 </script>
 
@@ -67,7 +90,16 @@ onBeforeUnmount(() => {
       <span class="count">{{ trends.length }}</span>
     </header>
     <div class="trend-chart-wrap">
-      <div ref="container" class="trend-chart" role="img" :aria-label="t('trend.aria')" />
+      <div
+        v-if="hasData"
+        ref="container"
+        class="trend-chart"
+        role="img"
+        aria-labelledby="trend-heading"
+        aria-describedby="trend-summary"
+      />
+      <p v-else class="trend-empty">{{ t('trend.empty') }}</p>
     </div>
+    <p id="trend-summary" class="visually-hidden" aria-live="polite">{{ summaryLabel }}</p>
   </section>
 </template>

@@ -27,7 +27,7 @@ test('session sorting remains stable when the fastest marker changes', () => {
     { connection_id: 'b', interface: 'eth1', fastest: true, state: 3, quality: { smoothed_rtt_micros: 100 } },
     { connection_id: 'a', interface: 'eth0', state: 4, quality: { smoothed_rtt_micros: 300 } },
   ];
-  assert.deepEqual(sortSessions(sessions, 'source').map((session) => session.connection_id), ['a', 'b']);
+  assert.deepEqual(sortSessions(sessions, 'name').map((session) => session.connection_id), ['a', 'b']);
   assert.deepEqual(sortSessions(sessions, 'rtt').map((session) => session.connection_id), ['b', 'a']);
   assert.deepEqual(sortSessions(sessions, 'state').map((session) => session.connection_id), ['a', 'b']);
   assert.deepEqual(sessions.map((session) => session.connection_id), ['b', 'a']);

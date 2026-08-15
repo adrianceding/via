@@ -33,6 +33,7 @@ export function sessionMatchesFilter(session, query, onlyAnomalies) {
     session.connection_id,
     session.path_group_id,
     session.id,
+    session.lane,
     session.interface,
     session.principal,
     session.local_endpoint,

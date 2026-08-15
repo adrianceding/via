@@ -548,11 +548,11 @@ func (daemon *clientDaemon) readClientSession(session *wireSession) {
 		}
 		switch typed := message.(type) {
 		case protocol.Probe:
-			if session.send(protocol.ProbeACK{Token: typed.Token}) != nil {
+			if session.send(session.probeACK(typed.Token)) != nil {
 				return
 			}
 		case protocol.ProbeACK:
-			if rtt, ok := session.completeProbe(typed.Token, time.Now()); ok {
+			if rtt, ok := session.completeProbeACK(typed, time.Now()); ok {
 				daemon.notifyProbeQuality(session, rtt)
 			}
 		case protocol.OpenResult:

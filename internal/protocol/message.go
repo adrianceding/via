@@ -138,7 +138,10 @@ type Probe struct {
 }
 
 type ProbeACK struct {
-	Token uint64
+	Token                      uint64
+	SendCapacityBytesSec       uint64
+	SendCapacitySampleAgeNanos uint64
+	SendCapacityFreshForNanos  uint64
 }
 
 type Open struct {
@@ -310,7 +313,16 @@ func DecodeMessage(frame Frame) (Message, error) {
 	case TypeProbe:
 		return Probe{Token: binary.BigEndian.Uint64(payload)}, nil
 	case TypeProbeACK:
-		return ProbeACK{Token: binary.BigEndian.Uint64(payload)}, nil
+		message := ProbeACK{
+			Token:                      binary.BigEndian.Uint64(payload[:8]),
+			SendCapacityBytesSec:       binary.BigEndian.Uint64(payload[8:16]),
+			SendCapacitySampleAgeNanos: binary.BigEndian.Uint64(payload[16:24]),
+			SendCapacityFreshForNanos:  binary.BigEndian.Uint64(payload[24:32]),
+		}
+		if !validProbeACKSendCapacity(message) {
+			return nil, invalidPayload(frame.Type, "send capacity")
+		}
+		return message, nil
 	case TypeOpen:
 		mode := DeliveryMode(payload[48])
 		selection := PathSelection(payload[49])
@@ -456,9 +468,25 @@ func (message Probe) marshalPayload() ([]byte, error) {
 }
 
 func (message ProbeACK) marshalPayload() ([]byte, error) {
-	payload := make([]byte, 8)
+	if !validProbeACKSendCapacity(message) {
+		return nil, invalidPayload(TypeProbeACK, "send capacity")
+	}
+	payload := make([]byte, 32)
 	binary.BigEndian.PutUint64(payload, message.Token)
+	binary.BigEndian.PutUint64(payload[8:], message.SendCapacityBytesSec)
+	binary.BigEndian.PutUint64(payload[16:], message.SendCapacitySampleAgeNanos)
+	binary.BigEndian.PutUint64(payload[24:], message.SendCapacityFreshForNanos)
 	return payload, nil
+}
+
+func validProbeACKSendCapacity(message ProbeACK) bool {
+	if message.SendCapacitySampleAgeNanos > math.MaxInt64 || message.SendCapacityFreshForNanos > math.MaxInt64 {
+		return false
+	}
+	if message.SendCapacityBytesSec == 0 {
+		return message.SendCapacitySampleAgeNanos == 0 && message.SendCapacityFreshForNanos == 0
+	}
+	return message.SendCapacityFreshForNanos != 0
 }
 
 func (message Open) marshalPayload() ([]byte, error) {

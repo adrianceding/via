@@ -136,6 +136,36 @@ func TestRuntimeStatusAccumulatesReceivedDataPayload(t *testing.T) {
 	}
 }
 
+func TestRuntimeStatusPublishesPeerSendCapacityTimes(t *testing.T) {
+	repository, err := statusapi.NewRepository(statusapi.Limits{Interfaces: 1, Sessions: 1, Flows: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(2_000, 0).UTC()
+	var statusKey [32]byte
+	statusKey[0] = 7
+	observer, err := newRuntimeStatusWithClock(repository, 1, 1, statusKey, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	observer.upsertSession(1, "tcp", "eth0", netip.MustParseAddr("192.0.2.1"), statusapi.SessionReady, statusapi.ReasonPathAdded)
+	observer.observeSessionPeerSendCapacity(1, peerSendCapacitySnapshot{
+		CapacityBytesSec: 8 << 20, SampleAge: time.Second, SampleFreshness: 3 * time.Second, Measured: true, Fresh: true,
+	})
+	session := observer.sessions[observer.hasher.SessionID(1)]
+	if session.Quality.PeerSendCapacityBytesSec != 8<<20 || session.Quality.PeerSendDataSampleAt == nil ||
+		*session.Quality.PeerSendDataSampleAt != now.Add(-time.Second) || session.Quality.PeerSendDataSampleExpiresAt == nil ||
+		*session.Quality.PeerSendDataSampleExpiresAt != now.Add(2*time.Second) {
+		t.Fatalf("peer send capacity status = %#v", session.Quality)
+	}
+	observer.observeSessionPeerSendCapacity(1, peerSendCapacitySnapshot{})
+	session = observer.sessions[observer.hasher.SessionID(1)]
+	if session.Quality.PeerSendCapacityBytesSec != 0 || session.Quality.PeerSendDataSampleAt != nil ||
+		session.Quality.PeerSendDataSampleExpiresAt != nil {
+		t.Fatalf("cleared peer send capacity status = %#v", session.Quality)
+	}
+}
+
 func TestRuntimeStatusDropsLateClosedSnapshotAfterSessionRemoval(t *testing.T) {
 	repository, err := statusapi.NewRepository(statusapi.Limits{Interfaces: 1, Sessions: 1, Flows: 1})
 	if err != nil {

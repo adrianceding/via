@@ -404,9 +404,9 @@ func (daemon *serverDaemon) serveConnection(generation uint64, connection transp
 func (daemon *serverDaemon) dispatch(session *wireSession, message protocol.Message) error {
 	switch typed := message.(type) {
 	case protocol.Probe:
-		return session.send(protocol.ProbeACK{Token: typed.Token})
+		return session.send(session.probeACK(typed.Token))
 	case protocol.ProbeACK:
-		if rtt, ok := session.completeProbe(typed.Token, time.Now()); ok {
+		if rtt, ok := session.completeProbeACK(typed, time.Now()); ok {
 			daemon.notifyServerProbeQuality(session, rtt)
 		}
 		return nil

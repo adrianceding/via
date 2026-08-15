@@ -24,3 +24,14 @@ test('normalizeSnapshot preserves totals and reports any truncated response', ()
   assert.equal(snapshot.flowTotal, 2);
   assert.equal(snapshot.terminalTotal, 4);
 });
+
+test('normalizeSnapshot preserves the sessions response timestamp', () => {
+  const snapshot = normalizeSnapshot({
+    summary: { generated_at: '2026-08-01T10:00:00Z' },
+    interfaces: {},
+    sessions: { generated_at: '2026-08-01T10:00:01Z', items: [] },
+    flows: {},
+  });
+
+  assert.equal(snapshot.sessionsGeneratedAt, '2026-08-01T10:00:01Z');
+});

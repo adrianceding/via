@@ -1,6 +1,34 @@
+import { aggregationGroupIdentity } from './aggregation.js';
+
 const MAX_TREND_SAMPLES = 120;
 const MAX_TREND_SERIES = 12;
 const AGGREGATE_ID = '__aggregate__';
+
+export function directionalTrend(trend, role) {
+  const localSend = {
+    samples: [...(trend?.samples || [])],
+    capacity: Number(trend?.capacity) || 0,
+    lastCapacity: Number(trend?.lastCapacity) || 0,
+  };
+  const peerSend = {
+    samples: [...(trend?.rxSamples || [])],
+    capacity: Number(trend?.peerCapacity) || 0,
+    lastCapacity: Number(trend?.peerLastCapacity) || 0,
+  };
+  return role === 2
+    ? { uplink: peerSend, downlink: localSend }
+    : { uplink: localSend, downlink: peerSend };
+}
+
+function peerCapacitySample(quality, sampledAt) {
+  const capacity = Number(quality?.peer_send_capacity_bytes_sec);
+  const sampleAt = Date.parse(quality?.peer_send_data_sample_at || '');
+  const expiresAt = Date.parse(quality?.peer_send_data_sample_expires_at || '');
+  if (!Number.isFinite(capacity) || capacity <= 0 || !Number.isFinite(sampleAt)
+    || !Number.isFinite(expiresAt) || expiresAt < sampleAt) return { current: null, last: null };
+  const current = Number.isFinite(sampledAt) && sampledAt <= expiresAt ? capacity : null;
+  return { current, last: capacity };
+}
 
 export function createSessionTrendStore() {
   const trends = new Map();
@@ -9,62 +37,94 @@ export function createSessionTrendStore() {
   return {
     update(sessions, generatedAt) {
       const sampledAt = Date.parse(generatedAt || '');
-      const activeIDs = new Set();
-      sessions.forEach((session) => {
-        const id = session.connection_id || session.id;
-        if (id) activeIDs.add(id);
+      const observations = new Map();
+      sessions.forEach((session, index) => {
+        const identity = aggregationGroupIdentity(session, index);
+        const id = `${identity.type}:${identity.value}`;
+        if (!observations.has(id)) observations.set(id, { ...identity, id, sessions: [] });
+        observations.get(id).sessions.push(session);
       });
+      const activeIDs = new Set(observations.keys());
       const selectedIDs = new Set(
         [...trends.keys()].filter((id) => activeIDs.has(id)).slice(0, MAX_TREND_SERIES),
       );
-      sessions.forEach((session) => {
-        const id = session.connection_id || session.id;
+      observations.forEach(({ id }) => {
         if (id && selectedIDs.size < MAX_TREND_SERIES) selectedIDs.add(id);
       });
       trends.forEach((_trend, id) => {
         if (!selectedIDs.has(id)) trends.delete(id);
       });
 
-      const sampledIDs = new Set();
-      sessions.forEach((session) => {
-        const id = session.connection_id || session.id;
-        if (!selectedIDs.has(id) || sampledIDs.has(id)) return;
-        sampledIDs.add(id);
+      observations.forEach((observation, id) => {
+        if (!selectedIDs.has(id)) return;
         const existing = trends.get(id);
-        const written = Number(session.quality?.written_data_payload_bytes);
+        const memberIDs = observation.sessions.map((session, index) => String(session.connection_id || session.id || `${id}:${index}`)).sort();
+        const membershipChanged = memberIDs.length !== (existing?.memberIDs || []).length
+          || memberIDs.some((memberID, index) => memberID !== existing.memberIDs[index]);
+        const writtenValues = observation.sessions.map((session) => Number(session.quality?.written_data_payload_bytes));
+        const written = writtenValues.every((value) => Number.isFinite(value) && value >= 0)
+          ? writtenValues.reduce((total, value) => total + value, 0)
+          : null;
         const previousWritten = existing?.lastWritten;
         const previousAt = existing?.lastAt;
         const elapsedSeconds = (sampledAt - previousAt) / 1000;
-        const rate = Number.isFinite(written) && written >= 0 && Number.isFinite(previousWritten)
+        const rate = !membershipChanged && Number.isFinite(written) && written >= 0 && Number.isFinite(previousWritten)
           && previousWritten >= 0 && Number.isFinite(elapsedSeconds) && elapsedSeconds > 0
           && written >= previousWritten ? (written - previousWritten) / elapsedSeconds : null;
         const samples = rate == null ? [...(existing?.samples || [])] : [...(existing?.samples || []), rate].slice(-MAX_TREND_SAMPLES);
-        const received = Number(session.quality?.received_data_payload_bytes);
+        const receivedValues = observation.sessions.map((session) => Number(session.quality?.received_data_payload_bytes));
+        const received = receivedValues.every((value) => Number.isFinite(value) && value >= 0)
+          ? receivedValues.reduce((total, value) => total + value, 0)
+          : null;
         const previousReceived = existing?.lastRxWritten;
-        const rxRate = Number.isFinite(received) && received >= 0 && Number.isFinite(previousReceived)
+        const rxRate = !membershipChanged && Number.isFinite(received) && received >= 0 && Number.isFinite(previousReceived)
           && previousReceived >= 0 && Number.isFinite(elapsedSeconds) && elapsedSeconds > 0
           && received >= previousReceived ? (received - previousReceived) / elapsedSeconds : null;
         const rxSamples = rxRate == null ? [...(existing?.rxSamples || [])] : [...(existing?.rxSamples || []), rxRate].slice(-MAX_TREND_SAMPLES);
+        const ready = observation.sessions.filter((session) => session.state === 3);
+        const measured = ready.filter((session) => session.quality?.data_sample_fresh === true);
+        const capacity = ready.length > 0 && measured.length === ready.length
+          ? ready.reduce((total, session) => total + Math.max(0, Number(session.quality?.capacity_bytes_sec) || 0), 0)
+          : 0;
+        const lastCapacities = ready.map((session) => session.quality?.data_sample_fresh === true
+          ? Number(session.quality?.capacity_bytes_sec)
+          : Number(session.quality?.last_data_capacity_bytes_sec));
+        const lastCapacity = ready.length > 0 && lastCapacities.every((value) => Number.isFinite(value) && value > 0)
+          ? lastCapacities.reduce((total, value) => total + value, 0)
+          : 0;
+        const peerSamples = ready.map((session) => peerCapacitySample(session.quality, sampledAt));
+        const peerCapacity = ready.length > 0 && peerSamples.every((sample) => sample.current != null)
+          ? peerSamples.reduce((total, sample) => total + sample.current, 0)
+          : 0;
+        const peerLastCapacity = ready.length > 0 && peerSamples.every((sample) => sample.last != null)
+          ? peerSamples.reduce((total, sample) => total + sample.last, 0)
+          : 0;
         trends.set(id, {
           id,
-          label: session.interface || session.principal || '',
-          localEndpoint: session.local_endpoint || session.local_address || '',
-          remoteEndpoint: session.remote_endpoint || '',
+          label: observation.value,
+          localEndpoint: observation.interfaceName || observation.pathGroupID || observation.principal || '',
+          remoteEndpoint: '',
           samples,
           rxSamples,
+          capacity,
+          lastCapacity,
+          peerCapacity,
+          peerLastCapacity,
           lastWritten: Number.isFinite(written) && written >= 0 ? written : null,
           lastRxWritten: Number.isFinite(received) && received >= 0 ? received : null,
           lastAt: Number.isFinite(sampledAt) ? sampledAt : null,
+          memberIDs,
         });
       });
 
       if (Number.isFinite(sampledAt)) {
-        const currentIDs = [...activeIDs].sort();
+        const currentIDs = sessions.map((session, index) => String(
+          session.connection_id || session.id || `session-${index}`,
+        )).sort();
         const membershipChanged = currentIDs.length !== aggregate.memberIDs.length
           || currentIDs.some((id, index) => id !== aggregate.memberIDs[index]);
-        const writtenValues = currentIDs.map((id) => {
-          const session = sessions.find((item) => (item.connection_id || item.id) === id);
-          const written = Number(session?.quality?.written_data_payload_bytes);
+        const writtenValues = sessions.map((session) => {
+          const written = Number(session.quality?.written_data_payload_bytes);
           return Number.isFinite(written) && written >= 0 ? written : null;
         });
         const hasCompleteCounters = writtenValues.every((written) => written != null);
@@ -82,7 +142,8 @@ export function createSessionTrendStore() {
     snapshot() {
       return [...trends.values()].map((trend) => ({
         id: trend.id, label: trend.label, localEndpoint: trend.localEndpoint, remoteEndpoint: trend.remoteEndpoint,
-        samples: [...trend.samples], rxSamples: [...(trend.rxSamples || [])],
+        samples: [...trend.samples], rxSamples: [...(trend.rxSamples || [])], capacity: trend.capacity,
+        lastCapacity: trend.lastCapacity, peerCapacity: trend.peerCapacity, peerLastCapacity: trend.peerLastCapacity,
       })).filter((trend) => trend.samples.length > 0);
     },
     aggregateSnapshot() {

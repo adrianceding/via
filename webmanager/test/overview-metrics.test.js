@@ -8,4 +8,6 @@ test('overview active flow count follows the filtered flow response', async () =
   assert.ok(component.includes('activeFlows: { type: Number, required: true }'));
   assert.ok(component.includes('String(props.activeFlows)'));
   assert.ok(app.includes(':active-flows="controller.snapshot.value.flowTotal"'));
+  assert.ok(app.includes('const trendTotal = computed(() => normalizedQuery.value || onlyAnomalies.value'));
+  assert.ok(app.includes(':total="trendTotal"'));
 });

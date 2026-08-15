@@ -46,14 +46,26 @@ type wireSession struct {
 	closeOnce            sync.Once
 	status               *runtimeStatus
 
-	probeMu       sync.Mutex
-	nextProbe     uint64
-	probeToken    uint64
-	probeSent     time.Time
-	lastProbe     time.Time
-	probeSRTT     time.Duration
-	probeStall    bool
-	probeProgress bool
+	probeMu            sync.Mutex
+	nextProbe          uint64
+	probeToken         uint64
+	probeSent          time.Time
+	lastProbe          time.Time
+	probeSRTT          time.Duration
+	probeStall         bool
+	probeProgress      bool
+	peerSendCapacity   uint64
+	peerSendSampleAge  time.Duration
+	peerSendFreshness  time.Duration
+	peerSendObservedAt time.Time
+}
+
+type peerSendCapacitySnapshot struct {
+	CapacityBytesSec uint64
+	SampleAge        time.Duration
+	SampleFreshness  time.Duration
+	Measured         bool
+	Fresh            bool
 }
 
 type wireAttachmentRegistry struct {
@@ -72,11 +84,15 @@ type pendingSessionWrite struct {
 }
 
 func newWireSession(ctx context.Context, generation uint64, connection transport.Connection) (*wireSession, error) {
+	return newWireSessionWithClock(ctx, generation, connection, time.Now)
+}
+
+func newWireSessionWithClock(ctx context.Context, generation uint64, connection transport.Connection, now func() time.Time) (*wireSession, error) {
 	if ctx == nil || generation == 0 || connection == nil {
 		return nil, ErrWireProtocol
 	}
 	sessionCtx, cancel := context.WithCancel(ctx)
-	runtime, err := newSessionRuntime(sessionCtx, connection, func(error) { _ = connection.Close() })
+	runtime, err := newSessionRuntimeWithClock(sessionCtx, connection, func(error) { _ = connection.Close() }, now)
 	if err != nil {
 		cancel()
 		return nil, err
@@ -163,6 +179,18 @@ func (session *wireSession) noteInboundProgress() {
 }
 
 func (session *wireSession) completeProbe(token uint64, now time.Time) (time.Duration, bool) {
+	return session.completeProbeToken(token, now, nil)
+}
+
+func (session *wireSession) completeProbeACK(message protocol.ProbeACK, now time.Time) (time.Duration, bool) {
+	rtt, accepted := session.completeProbeToken(message.Token, now, &message)
+	if accepted && session.status != nil {
+		session.status.observeSessionPeerSendCapacity(session.generation, session.peerSendCapacitySnapshot(now))
+	}
+	return rtt, accepted
+}
+
+func (session *wireSession) completeProbeToken(token uint64, now time.Time, message *protocol.ProbeACK) (time.Duration, bool) {
 	if session == nil || token == 0 || now.IsZero() {
 		return 0, false
 	}
@@ -176,6 +204,12 @@ func (session *wireSession) completeProbe(token uint64, now time.Time) (time.Dur
 	session.probeSent = time.Time{}
 	session.probeStall = false
 	session.probeProgress = false
+	if message != nil {
+		session.peerSendCapacity = message.SendCapacityBytesSec
+		session.peerSendSampleAge = time.Duration(message.SendCapacitySampleAgeNanos)
+		session.peerSendFreshness = time.Duration(message.SendCapacityFreshForNanos)
+		session.peerSendObservedAt = now
+	}
 	if session.probeSRTT == 0 {
 		session.probeSRTT = rtt
 	} else {
@@ -184,6 +218,40 @@ func (session *wireSession) completeProbe(token uint64, now time.Time) (time.Dur
 	session.runtime.observeProbe(rtt)
 	session.runtime.setStallPenalty(0)
 	return rtt, true
+}
+
+func (session *wireSession) probeACK(token uint64) protocol.ProbeACK {
+	message := protocol.ProbeACK{Token: token}
+	snapshot := session.qualitySnapshot()
+	if snapshot.DataSamples == 0 || snapshot.LastDataCapacity <= 0 || snapshot.DataSampleFreshness <= 0 {
+		return message
+	}
+	message.SendCapacityBytesSec = finiteRate(snapshot.LastDataCapacity)
+	if message.SendCapacityBytesSec == 0 {
+		return protocol.ProbeACK{Token: token}
+	}
+	message.SendCapacitySampleAgeNanos = uint64(snapshot.DataSampleAge)
+	message.SendCapacityFreshForNanos = uint64(snapshot.DataSampleFreshness)
+	return message
+}
+
+func (session *wireSession) peerSendCapacitySnapshot(now time.Time) peerSendCapacitySnapshot {
+	if session == nil || now.IsZero() {
+		return peerSendCapacitySnapshot{}
+	}
+	session.probeMu.Lock()
+	defer session.probeMu.Unlock()
+	if session.peerSendCapacity == 0 || session.peerSendObservedAt.IsZero() || now.Before(session.peerSendObservedAt) {
+		return peerSendCapacitySnapshot{}
+	}
+	age := session.peerSendSampleAge + now.Sub(session.peerSendObservedAt)
+	return peerSendCapacitySnapshot{
+		CapacityBytesSec: session.peerSendCapacity,
+		SampleAge:        age,
+		SampleFreshness:  session.peerSendFreshness,
+		Measured:         true,
+		Fresh:            age <= session.peerSendFreshness,
+	}
 }
 
 func (session *wireSession) smoothedProbeRTT() time.Duration {

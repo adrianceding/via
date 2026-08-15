@@ -337,6 +337,36 @@ func (observer *runtimeStatus) observeSessionDataReceived(generation uint64, pay
 	observer.mu.Unlock()
 }
 
+func (observer *runtimeStatus) observeSessionPeerSendCapacity(generation uint64, snapshot peerSendCapacitySnapshot) {
+	if observer == nil || generation == 0 {
+		return
+	}
+	id := observer.hasher.SessionID(generation)
+	if id == "" {
+		return
+	}
+	observer.mu.Lock()
+	entry, exists := observer.sessions[id]
+	if !exists {
+		observer.mu.Unlock()
+		return
+	}
+	entry.Quality.PeerSendCapacityBytesSec = 0
+	entry.Quality.PeerSendDataSampleAt = nil
+	entry.Quality.PeerSendDataSampleExpiresAt = nil
+	if snapshot.Measured && snapshot.CapacityBytesSec != 0 && snapshot.SampleAge >= 0 && snapshot.SampleFreshness > 0 {
+		observedAt := observer.now()
+		sampleAt := observedAt.Add(-snapshot.SampleAge)
+		expiresAt := sampleAt.Add(snapshot.SampleFreshness)
+		entry.Quality.PeerSendCapacityBytesSec = snapshot.CapacityBytesSec
+		entry.Quality.PeerSendDataSampleAt = &sampleAt
+		entry.Quality.PeerSendDataSampleExpiresAt = &expiresAt
+	}
+	observer.sessions[id] = entry
+	observer.mu.Unlock()
+	observer.repository.TryRecord(statusapi.Event{Kind: statusapi.EventUpsertSession, Session: entry})
+}
+
 func (observer *runtimeStatus) observeSessionRuntime(generation uint64, snapshot sessionRuntimeSnapshot) {
 	if observer == nil || generation == 0 {
 		return

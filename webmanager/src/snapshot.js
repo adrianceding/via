@@ -11,6 +11,7 @@ export function normalizeSnapshot(payloads) {
     summary: payloads.summary || {},
     interfaces,
     sessions,
+    sessionsGeneratedAt: payloads.sessions?.generated_at || payloads.summary?.generated_at || '',
     flows,
     terminals,
     sessionTotal: payloads.sessions?.total ?? sessions.length,

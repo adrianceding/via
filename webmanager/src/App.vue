@@ -23,6 +23,7 @@ import {
   sessionMatchesFilter,
   terminalMatchesFilter,
 } from './filters.js';
+import { aggregationGroupIdentity } from './aggregation.js';
 import { statusErrorCode } from './api.js';
 import { persistLocale } from './i18n.js';
 import { describeFreshness } from './observability.js';
@@ -46,14 +47,23 @@ let ageTimer = null;
 
 const freshness = computed(() => describeFreshness(controller.lastSuccessAt.value, currentTime.value, paused.value));
 const freshnessLabel = computed(() => t(`freshness.${freshness.value.state}`, { count: freshness.value.ageSeconds }));
+const initialLoading = computed(() => controller.lastSuccessAt.value === null);
 const normalizedQuery = computed(() => query.value.trim().toLowerCase());
 const visibleSessions = computed(() => controller.snapshot.value.sessions.filter((session) => sessionMatchesFilter(session, normalizedQuery.value, onlyAnomalies.value)));
 const visibleFlows = computed(() => controller.snapshot.value.flows.filter((flow) => flowMatchesFilter(flow, normalizedQuery.value, onlyAnomalies.value)));
 const visibleTerminals = computed(() => controller.snapshot.value.terminals.filter((flow) => terminalMatchesFilter(flow, normalizedQuery.value, onlyAnomalies.value)));
 const visibleInterfaces = computed(() => controller.snapshot.value.interfaces.filter((item) => interfaceMatchesFilter(item, normalizedQuery.value, onlyAnomalies.value)));
-const visibleSessionIDs = computed(() => new Set(visibleSessions.value.map((session) => session.connection_id || session.id)));
-const visibleTrends = computed(() => controller.trends.value.filter((trend) => visibleSessionIDs.value.has(trend.id)
-  && (!normalizedQuery.value || `${trend.label} ${trend.id} ${trend.localEndpoint} ${trend.remoteEndpoint}`.toLowerCase().includes(normalizedQuery.value))));
+const visibleObservationIDs = computed(() => new Set(visibleSessions.value.map((session, index) => {
+  const identity = aggregationGroupIdentity(session, index);
+  return `${identity.type}:${identity.value}`;
+})));
+const visibleTrends = computed(() => controller.trends.value.filter((trend) => visibleObservationIDs.value.has(trend.id)));
+const trendTotal = computed(() => normalizedQuery.value || onlyAnomalies.value
+  ? visibleObservationIDs.value.size
+  : new Set(controller.snapshot.value.sessions.map((session, index) => {
+    const identity = aggregationGroupIdentity(session, index);
+    return `${identity.type}:${identity.value}`;
+  })).size);
 const anomalyCount = computed(() => controller.snapshot.value.sessions.filter(isSessionAbnormal).length
   + controller.snapshot.value.flows.filter(isFlowAbnormal).length
   + controller.snapshot.value.terminals.filter(isTerminalAbnormal).length
@@ -64,20 +74,29 @@ const currentViewURL = computed(() => buildViewURL(window.location.href, {
   flowTab: flowTab.value,
   sessionSort: sessionSort.value,
 }));
-const healthLevel = computed(() => {
-  if (controller.error.value || freshness.value.stale && !paused.value) return 'error';
-  return controller.health.value.level;
-});
-const connectionLabel = computed(() => controller.error.value
-  ? t(`errors.${statusErrorCode(controller.error.value)}`)
-  : t(`status.${controller.health.value.level}`));
 const healthReasons = computed(() => controller.health.value.reasons.map((reason) => t(`health.${reason.code}`, { count: reason.count })));
+const statusPresentation = computed(() => {
+  if (controller.error.value) {
+    return { level: 'error', label: t(`errors.${statusErrorCode(controller.error.value)}`) };
+  }
+  if (freshness.value.state === 'unavailable') {
+    return { level: 'connecting', label: t('status.connecting') };
+  }
+  if (freshness.value.state === 'stale') {
+    return { level: 'unhealthy', label: t('status.stale') };
+  }
+  const level = controller.health.value.level;
+  return { level, label: t(`status.${level}`) };
+});
+const healthLevel = computed(() => statusPresentation.value.level);
+const connectionLabel = computed(() => statusPresentation.value.label);
 const runtimeTitle = computed(() => t('header.title', {
   role: t(roles[controller.snapshot.value.summary.role] || 'status.role.runtime'),
 }));
 const navSections = computed(() => [
   { id: 'overview', label: t('nav.overview') },
-  { id: 'sessions', label: t('nav.sessions') },
+  { id: 'bandwidth', label: t('nav.bandwidth') },
+  { id: 'interfaces', label: t('nav.interfaces') },
   { id: 'flows', label: t('nav.flows') },
   { id: 'limits', label: t('nav.limits') },
 ]);
@@ -216,19 +235,34 @@ onBeforeUnmount(() => {
             :sessions="visibleSessions"
             :summary="controller.snapshot.value.summary"
           />
-          <AggregationPanel :sessions="visibleSessions" />
-          <TrafficCharts
+        </section>
+        <section id="bandwidth" class="main-section">
+          <AggregationPanel
+            v-model:sort="sessionSort"
+            :filtered="Boolean(normalizedQuery) || onlyAnomalies"
+            :loading="initialLoading"
+            :role="controller.snapshot.value.summary.role"
             :sessions="visibleSessions"
+            :snapshot-at="controller.snapshot.value.sessionsGeneratedAt"
+            :total="controller.snapshot.value.sessionTotal"
+            :truncated="controller.snapshot.value.truncated"
+          />
+          <TrafficCharts
+            :role="controller.snapshot.value.summary.role"
+            :sessions="visibleSessions"
+            :total="trendTotal"
             :trends="visibleTrends"
           />
         </section>
-        <section id="sessions" class="main-section">
+        <section id="interfaces" class="main-section">
           <SessionTable
             v-model:sort="sessionSort"
+            :filtered="Boolean(normalizedQuery) || onlyAnomalies"
             :only-anomalies="false"
             query=""
             :role="controller.snapshot.value.summary.role"
             :sessions="visibleSessions"
+            :snapshot-at="controller.snapshot.value.sessionsGeneratedAt"
             :total="controller.snapshot.value.sessionTotal"
             @filter="filterBy"
           />

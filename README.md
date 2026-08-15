@@ -86,7 +86,7 @@ status:
 
 When `basic_auth` is configured, the page, static assets, JSON API, and health endpoint all require credentials. Basic Auth over plain HTTP does not encrypt those credentials.
 
-Session status separates Probe RTT and stall from DATA capacity, queue, and in-flight load. Capacity samples become stale after a bounded RTT-derived interval; stale values remain visible for diagnosis but placement falls back to the default capacity. The Manager retains at most 120 throughput samples and displays at most 12 individual session series while the aggregate includes every active session.
+Session status separates Probe RTT and stall from DATA capacity, queue, and in-flight load. Each peer reports its measured send capacity so the Manager can display uplink and downlink capacity separately; received DATA remains throughput, not a capacity estimate. Capacity samples become stale after a bounded RTT-derived interval. Stale values remain visible as last-measured references but are excluded from current totals and placement falls back to the default capacity. The Manager retains at most 120 throughput samples per interface and displays at most 12 interface series per direction while aggregation includes every active session.
 
 ## Security Boundary
 

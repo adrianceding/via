@@ -29,11 +29,12 @@ const generatedLabel = computed(() => {
 
 <template>
   <header class="topbar">
-    <div class="topbar-title">{{ t('app.controlTitle') }}</div>
+    <h1 class="topbar-title">{{ title }}</h1>
     <div class="topbar-meta">
       <span class="chip" :class="healthLevel">
         <span class="dot" :class="healthLevel" aria-hidden="true" />
-        <strong :title="healthReasons.join('; ')">{{ connectionLabel }}</strong>
+        <strong>{{ connectionLabel }}</strong>
+        <span v-if="healthReasons.length" class="chip-detail" :title="healthReasons.join('; ')">{{ healthReasons[0] }}</span>
         <time :datetime="generatedAt" :title="generatedLabel">{{ freshnessLabel }}</time>
       </span>
       <label class="locale-control" :title="t('locale.label')">

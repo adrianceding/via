@@ -8,7 +8,7 @@ import (
 )
 
 const (
-	Version        = 2
+	Version        = 3
 	HeaderSize     = 8
 	MaxPayloadSize = 65_536
 	MaxFrameSize   = HeaderSize + MaxPayloadSize
@@ -107,7 +107,7 @@ func NewDecoder(reader io.Reader) *Decoder {
 	return &Decoder{reader: reader}
 }
 
-// ParseHeader validates a complete v1 header, including the message-specific
+// ParseHeader validates a complete frame header, including the message-specific
 // payload length, before a transport allocates or reads the payload.
 func ParseHeader(header []byte) (Type, uint32, error) {
 	if len(header) != HeaderSize {
@@ -191,8 +191,10 @@ func validatePayloadLength(frameType Type, length int) error {
 		valid = length >= 82 && length <= 145
 	case TypeAuthResult:
 		valid = length == 1
-	case TypeProbe, TypeProbeACK:
+	case TypeProbe:
 		valid = length == 8
+	case TypeProbeACK:
+		valid = length == 32
 	case TypeOpen:
 		valid = length >= 72 && length <= 324
 	case TypeOpenResult:

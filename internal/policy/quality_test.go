@@ -107,7 +107,8 @@ func TestQualityDataFreshnessUsesProbeRTTAndFakeClock(t *testing.T) {
 	if err := quality.ObserveData(100*time.Millisecond, 64<<10, time.Second); err != nil {
 		t.Fatal(err)
 	}
-	if snapshot := quality.Snapshot(); !snapshot.DataSampleFresh || snapshot.CapacityBytesSec != 64<<10 || snapshot.DataSampleAge != 0 {
+	if snapshot := quality.Snapshot(); !snapshot.DataSampleFresh || snapshot.CapacityBytesSec != 64<<10 ||
+		snapshot.DataSampleAge != 0 || snapshot.DataSampleFreshness != 3*time.Second {
 		t.Fatalf("fresh quality snapshot = %#v", snapshot)
 	}
 	now = now.Add(2*time.Second - time.Nanosecond)
@@ -127,7 +128,7 @@ func TestQualityFreshnessFallsBackToThreeSecondsWithoutProbe(t *testing.T) {
 		t.Fatal(err)
 	}
 	now = now.Add(3*time.Second - time.Nanosecond)
-	if !quality.Snapshot().DataSampleFresh {
+	if snapshot := quality.Snapshot(); !snapshot.DataSampleFresh || snapshot.DataSampleFreshness != 3*time.Second {
 		t.Fatal("sample became stale before the three-second boundary")
 	}
 	now = now.Add(2 * time.Nanosecond)

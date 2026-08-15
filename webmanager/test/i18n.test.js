@@ -61,3 +61,12 @@ test('Chinese and English message catalogs have matching keys', () => {
     assert.ok(messageKeys(en).includes(key), `missing core message: ${key}`);
   }
 });
+
+test('throughput chart labels separate current and last measured capacity by direction', () => {
+  assert.match(zhCN.charts.uplinkTitle, /上行/);
+  assert.match(zhCN.charts.downlinkTitle, /下行/);
+  assert.match(zhCN.charts.lastCapacityReferenceTitle, /过期.*参考/);
+  assert.match(en.charts.uplinkTitle, /uplink/i);
+  assert.match(en.charts.downlinkTitle, /downlink/i);
+  assert.match(en.charts.lastCapacityReferenceTitle, /expired reference/i);
+});

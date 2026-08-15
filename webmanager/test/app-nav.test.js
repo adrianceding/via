@@ -4,8 +4,8 @@ import assert from 'node:assert/strict';
 import { computeActiveSection, computeNavigateTop } from '../src/app-nav.js';
 
 // 区块绝对位置（页面顶部起）
-const absoluteTop = { overview: 0, sessions: 620, flows: 1800, limits: 3000 };
-const ids = ['overview', 'sessions', 'flows', 'limits'];
+const absoluteTop = { overview: 0, bandwidth: 620, interfaces: 1800, flows: 2600, limits: 3800 };
+const ids = ['overview', 'bandwidth', 'interfaces', 'flows', 'limits'];
 
 // 构造给定滚动位置下各区块的 rect top（相对视口）
 function sectionsAt(scrollY) {
@@ -19,16 +19,18 @@ test('computeActiveSection selects overview at top', () => {
 });
 
 test('computeActiveSection follows probe line through sections', () => {
-  // 滚动 400：probe = 400 + 280 = 680；sessions 绝对位置 620 ≤ 680 → sessions
-  assert.equal(computeActiveSection(sectionsAt(400), { ...viewport, scrollY: 400 }), 'sessions');
-  // 滚动 1200：probe = 1480；flows(1800) 未越过 → sessions
-  assert.equal(computeActiveSection(sectionsAt(1200), { ...viewport, scrollY: 1200 }), 'sessions');
-  // 滚动 1700：probe = 1980；flows(1800) 已越过 → flows
-  assert.equal(computeActiveSection(sectionsAt(1700), { ...viewport, scrollY: 1700 }), 'flows');
+  // 滚动 400：probe = 400 + 280 = 680；bandwidth 绝对位置 620 ≤ 680
+  assert.equal(computeActiveSection(sectionsAt(400), { ...viewport, scrollY: 400 }), 'bandwidth');
+  // 滚动 1200：probe = 1480；interfaces(1800) 未越过 → bandwidth
+  assert.equal(computeActiveSection(sectionsAt(1200), { ...viewport, scrollY: 1200 }), 'bandwidth');
+  // 滚动 1700：probe = 1980；interfaces(1800) 已越过 → interfaces
+  assert.equal(computeActiveSection(sectionsAt(1700), { ...viewport, scrollY: 1700 }), 'interfaces');
+  // 滚动 2400：probe = 2680；flows(2600) 已越过 → flows
+  assert.equal(computeActiveSection(sectionsAt(2400), { ...viewport, scrollY: 2400 }), 'flows');
 });
 
 test('computeActiveSection selects last section when scrolled to bottom', () => {
-  // 滚动到底 4200（5000-800）：limits(3000) 越过探测线 → limits
+  // 滚动到底 4200（5000-800）：limits(3800) 越过探测线 → limits
   assert.equal(
     computeActiveSection(sectionsAt(4200), { ...viewport, scrollY: 4200 }),
     'limits',

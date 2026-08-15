@@ -23,18 +23,19 @@ const (
 var ErrInvalidSample = errors.New("policy: invalid quality sample")
 
 type QualitySnapshot struct {
-	DataSamples      uint64
-	ProbeSamples     uint64
-	SRTT             time.Duration
-	RTTVariation     time.Duration
-	CapacityBytesSec float64
-	QueuedBytes      uint64
-	InFlightBytes    uint64
-	StallPenalty     time.Duration
-	RetryEstimate    time.Duration
-	DataSampleFresh  bool
-	DataSampleAge    time.Duration
-	LastDataCapacity float64
+	DataSamples         uint64
+	ProbeSamples        uint64
+	SRTT                time.Duration
+	RTTVariation        time.Duration
+	CapacityBytesSec    float64
+	QueuedBytes         uint64
+	InFlightBytes       uint64
+	StallPenalty        time.Duration
+	RetryEstimate       time.Duration
+	DataSampleFresh     bool
+	DataSampleAge       time.Duration
+	DataSampleFreshness time.Duration
+	LastDataCapacity    float64
 }
 
 type Quality struct {
@@ -132,18 +133,19 @@ func (quality *Quality) SnapshotAt(now time.Time) QualitySnapshot {
 		capacity = defaultCapacity
 	}
 	return QualitySnapshot{
-		DataSamples:      quality.dataSamples,
-		ProbeSamples:     quality.probeSamples,
-		SRTT:             srtt,
-		RTTVariation:     variation,
-		CapacityBytesSec: capacity,
-		QueuedBytes:      quality.queued,
-		InFlightBytes:    quality.inFlight,
-		StallPenalty:     quality.stallPenalty,
-		RetryEstimate:    retryEstimate(srtt, variation, quality.dataRTTSamples+quality.probeSamples),
-		DataSampleFresh:  fresh,
-		DataSampleAge:    age,
-		LastDataCapacity: quality.lastCapacity,
+		DataSamples:         quality.dataSamples,
+		ProbeSamples:        quality.probeSamples,
+		SRTT:                srtt,
+		RTTVariation:        variation,
+		CapacityBytesSec:    capacity,
+		QueuedBytes:         quality.queued,
+		InFlightBytes:       quality.inFlight,
+		StallPenalty:        quality.stallPenalty,
+		RetryEstimate:       retryEstimate(srtt, variation, quality.dataRTTSamples+quality.probeSamples),
+		DataSampleFresh:     fresh,
+		DataSampleAge:       age,
+		DataSampleFreshness: dataFreshness(quality.probeSRTT),
+		LastDataCapacity:    quality.lastCapacity,
 	}
 }
 

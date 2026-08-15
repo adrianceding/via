@@ -10,11 +10,11 @@ test('status controller atomically publishes a successful snapshot', async () =>
     fetchSnapshot: async () => ({
       summary: { healthy: true, role: 1, generated_at: '2026-08-01T10:00:00Z' },
       interfaces: { items: [] },
-      sessions: { items: [{ id: 'session-a', state: 3 }], total: 1 },
+      sessions: { generated_at: '2026-08-01T10:00:01Z', items: [{ id: 'session-a', state: 3 }], total: 1 },
       flows: { items: [], terminals: [] },
     }),
     trendStore: {
-      update: (sessions) => trendUpdates.push(sessions),
+      update: (sessions, generatedAt) => trendUpdates.push({ sessions, generatedAt }),
       snapshot: () => [{ id: 'session-a', label: 'eth0', samples: [1200] }],
     },
     now: () => now,
@@ -29,7 +29,10 @@ test('status controller atomically publishes a successful snapshot', async () =>
   assert.deepEqual(controller.rates.value, { sent: null, received: null });
   assert.equal(controller.refreshing.value, false);
   assert.equal(controller.error.value, null);
-  assert.deepEqual(trendUpdates, [[{ id: 'session-a', state: 3 }]]);
+  assert.deepEqual(trendUpdates, [{
+    sessions: [{ id: 'session-a', state: 3 }],
+    generatedAt: '2026-08-01T10:00:01Z',
+  }]);
   assert.equal(controller.trends.value.length, 1);
 });
 

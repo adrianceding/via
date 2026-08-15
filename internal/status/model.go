@@ -153,22 +153,25 @@ type Interface struct {
 }
 
 type Quality struct {
-	SmoothedRTTMicros             uint64  `json:"smoothed_rtt_micros"`
-	RetryMicros                   uint64  `json:"retry_micros"`
-	CapacityBytesSec              uint64  `json:"capacity_bytes_sec"`
-	QueuedBytes                   uint64  `json:"queued_bytes"`
-	InFlightBytes                 uint64  `json:"in_flight_bytes"`
-	StallPenaltyMicros            uint64  `json:"stall_penalty_micros"`
-	DataSampleFresh               bool    `json:"data_sample_fresh"`
-	DataSampleAgeMillis           *uint64 `json:"data_sample_age_ms"`
-	LastDataCapacityBytesSec      uint64  `json:"last_data_capacity_bytes_sec"`
-	ScheduledDataPayloadBytes     uint64  `json:"scheduled_data_payload_bytes"`
-	WrittenDataPayloadBytes       uint64  `json:"written_data_payload_bytes"`
-	EligibleAckedDataPayloadBytes uint64  `json:"eligible_acked_data_payload_bytes"`
-	ReceivedDataPayloadBytes      uint64  `json:"received_data_payload_bytes"`
-	DataQueueFrames               uint32  `json:"data_queue_frames"`
-	ActiveDataFlows               uint32  `json:"active_data_flows"`
-	ProbeSamples                  uint64  `json:"-"`
+	SmoothedRTTMicros             uint64     `json:"smoothed_rtt_micros"`
+	RetryMicros                   uint64     `json:"retry_micros"`
+	CapacityBytesSec              uint64     `json:"capacity_bytes_sec"`
+	QueuedBytes                   uint64     `json:"queued_bytes"`
+	InFlightBytes                 uint64     `json:"in_flight_bytes"`
+	StallPenaltyMicros            uint64     `json:"stall_penalty_micros"`
+	DataSampleFresh               bool       `json:"data_sample_fresh"`
+	DataSampleAgeMillis           *uint64    `json:"data_sample_age_ms"`
+	LastDataCapacityBytesSec      uint64     `json:"last_data_capacity_bytes_sec"`
+	ScheduledDataPayloadBytes     uint64     `json:"scheduled_data_payload_bytes"`
+	WrittenDataPayloadBytes       uint64     `json:"written_data_payload_bytes"`
+	EligibleAckedDataPayloadBytes uint64     `json:"eligible_acked_data_payload_bytes"`
+	ReceivedDataPayloadBytes      uint64     `json:"received_data_payload_bytes"`
+	PeerSendCapacityBytesSec      uint64     `json:"peer_send_capacity_bytes_sec"`
+	PeerSendDataSampleAt          *time.Time `json:"peer_send_data_sample_at,omitempty"`
+	PeerSendDataSampleExpiresAt   *time.Time `json:"peer_send_data_sample_expires_at,omitempty"`
+	DataQueueFrames               uint32     `json:"data_queue_frames"`
+	ActiveDataFlows               uint32     `json:"active_data_flows"`
+	ProbeSamples                  uint64     `json:"-"`
 }
 
 type Session struct {
@@ -358,6 +361,13 @@ func validSession(value Session) bool {
 		return false
 	}
 	if !validOptionalHash(value.PathGroupID) || value.Lane > 64 || value.Lane != 0 && value.PathGroupID == "" {
+		return false
+	}
+	peerCapacityTimed := value.Quality.PeerSendDataSampleAt != nil || value.Quality.PeerSendDataSampleExpiresAt != nil
+	if value.Quality.PeerSendCapacityBytesSec == 0 && peerCapacityTimed ||
+		value.Quality.PeerSendCapacityBytesSec != 0 && !peerCapacityTimed ||
+		peerCapacityTimed && (value.Quality.PeerSendDataSampleAt == nil || value.Quality.PeerSendDataSampleExpiresAt == nil ||
+			value.Quality.PeerSendDataSampleAt.IsZero() || value.Quality.PeerSendDataSampleExpiresAt.Before(*value.Quality.PeerSendDataSampleAt)) {
 		return false
 	}
 	address, err := netip.ParseAddr(value.LocalAddress)

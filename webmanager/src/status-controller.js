@@ -34,7 +34,7 @@ export function createStatusController({
       const previousDrops = Number(previousSummary.counters?.dropped_status_events || 0);
       const nextDrops = Number(nextSnapshot.summary.counters?.dropped_status_events || 0);
       const droppedDelta = lastSuccessAt.value === null ? 0 : Math.max(0, nextDrops - previousDrops);
-      trendStore.update(nextSnapshot.sessions, nextSnapshot.summary.generated_at);
+      trendStore.update(nextSnapshot.sessions, nextSnapshot.sessionsGeneratedAt);
       const nextTrends = trendStore.snapshot();
       const nextAggregateTrend = trendStore.aggregateSnapshot ? trendStore.aggregateSnapshot() : null;
       const nextRates = lastSuccessAt.value === null
