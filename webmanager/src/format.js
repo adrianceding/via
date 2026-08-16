@@ -11,6 +11,10 @@ export function formatBytes(value) {
   return `${size.toFixed(digits)} ${units[unit]}`;
 }
 
+export function formatCounter(value) {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? formatBytes(value) : '--';
+}
+
 export function formatRate(value) {
   if (value == null) return '--';
   const rate = Number(value);

@@ -1,13 +1,21 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { formatBytes, formatMicros, formatPercent, formatRate, formatTimestamp } from '../src/format.js';
+import { formatBytes, formatCounter, formatMicros, formatPercent, formatRate, formatTimestamp } from '../src/format.js';
 
 test('formatBytes uses bounded binary units', () => {
   assert.equal(formatBytes(0), '0 B');
   assert.equal(formatBytes(1024), '1.00 KiB');
   assert.equal(formatBytes(10 * 1024), '10.0 KiB');
   assert.equal(formatBytes(1024 ** 5), '1024 TiB');
+});
+
+test('formatCounter distinguishes unavailable counters from a real zero', () => {
+  assert.equal(formatCounter(0), '0 B');
+  assert.equal(formatCounter(undefined), '--');
+  assert.equal(formatCounter(null), '--');
+  assert.equal(formatCounter(Number.NaN), '--');
+  assert.equal(formatCounter(-1), '--');
 });
 
 test('formatMicros selects readable units', () => {

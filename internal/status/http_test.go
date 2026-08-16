@@ -106,7 +106,8 @@ func TestHTTPHandlerExposesOnlyFixedReadRoutes(t *testing.T) {
 	handler.ServeHTTP(summaryRecorder, httptest.NewRequest(http.MethodGet, "/api/v1/summary", nil))
 	if err := json.Unmarshal(summaryRecorder.Body.Bytes(), &summary); err != nil || summary.Role != RoleClient ||
 		summary.Rejected.Flows != 3 || summary.Rejected.FlowRateLimited != 1 ||
-		summary.Rejected.FlowOpeningCapacity != 1 || summary.Rejected.FlowTargetDialCapacity != 1 {
+		summary.Rejected.FlowOpeningCapacity != 1 || summary.Rejected.FlowTargetDialCapacity != 1 ||
+		summary.Sessions != 1 || summary.ReadySessions != 1 {
 		t.Fatalf("summary = %#v, %v", summary, err)
 	}
 
@@ -121,6 +122,56 @@ func TestHTTPHandlerExposesOnlyFixedReadRoutes(t *testing.T) {
 	handler.ServeHTTP(notFound, httptest.NewRequest(http.MethodGet, "/api/v1/control", nil))
 	if notFound.Code != http.StatusNotFound {
 		t.Fatalf("write route status = %d", notFound.Code)
+	}
+}
+
+func TestHTTPSummaryReportsReadySessionsFromCompleteSnapshot(t *testing.T) {
+	tests := []struct {
+		name         string
+		sessions     []Session
+		wantSessions int
+		wantReady    int
+	}{
+		{name: "empty", sessions: nil},
+		{
+			name: "mixed",
+			sessions: []Session{
+				{State: SessionReady},
+				{State: SessionDialing},
+				{State: SessionBackoff},
+				{State: SessionReady},
+			},
+			wantSessions: 4,
+			wantReady:    2,
+		},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			handler, err := NewHandler(staticProvider{snapshot: Snapshot{
+				Healthy: true, Role: RoleClient, Sessions: testCase.sessions,
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			get := httptest.NewRecorder()
+			handler.ServeHTTP(get, httptest.NewRequest(http.MethodGet, "/api/v1/summary", nil))
+			if get.Code != http.StatusOK {
+				t.Fatalf("GET summary status = %d", get.Code)
+			}
+			var summary summaryResponse
+			if err := json.Unmarshal(get.Body.Bytes(), &summary); err != nil {
+				t.Fatal(err)
+			}
+			if summary.Sessions != testCase.wantSessions || summary.ReadySessions != testCase.wantReady {
+				t.Fatalf("summary sessions = %d ready = %d, want %d/%d", summary.Sessions, summary.ReadySessions, testCase.wantSessions, testCase.wantReady)
+			}
+
+			head := httptest.NewRecorder()
+			handler.ServeHTTP(head, httptest.NewRequest(http.MethodHead, "/api/v1/summary", nil))
+			if head.Code != get.Code || head.Body.Len() != 0 || head.Header().Get("Content-Length") != get.Header().Get("Content-Length") {
+				t.Fatalf("HEAD summary = status %d body %d headers %#v", head.Code, head.Body.Len(), head.Header())
+			}
+		})
 	}
 }
 

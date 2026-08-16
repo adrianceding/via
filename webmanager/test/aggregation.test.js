@@ -317,13 +317,16 @@ test('aggregation panel consumes the shared summary and marks the measured-capac
   assert.ok(component.includes("import { directionalAggregation, summarizeAggregation } from '../aggregation.js';"));
   assert.ok(component.includes('summarizeAggregation(props.sessions, props.sort, props.snapshotAt)'));
   assert.ok(component.includes('directionalAggregation(summary.value, props.role)'));
+  assert.ok(component.includes('charts.aggregationDirections.${direction}.${key}'));
+  assert.ok(component.includes("directionText(name, 'currentTotal')"));
+  assert.ok(component.includes("directionText(name, row.isHighestCapacity ? 'highestNote' : 'measuredNote'"));
   assert.ok(component.includes('row.isHighestCapacity'));
   assert.ok(component.includes('formatRange(group.rttRange, formatMicros)'));
   assert.ok(component.includes('formatRange(group.capacityRange, formatRate)'));
   assert.ok(component.includes('formatRange(group.referenceCapacityRange, formatRate)'));
   assert.ok(component.includes('direction.totalCapacity == null'));
   assert.ok(component.includes('direction.lastTotalCapacity == null'));
-  assert.ok(component.includes('aggregationStaleReferenceNote'));
+  assert.ok(component.includes("directionText(name, 'staleReferenceNote'"));
   assert.ok(!component.includes('aggregationHiddenLanes'));
   assert.ok(!component.includes("t('charts.aggregationAck')"));
   assert.ok(!component.includes('index === 0'));

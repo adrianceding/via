@@ -21,14 +21,17 @@ const { t } = useI18n();
 
 const summary = computed(() => summarizeAggregation(props.sessions, props.sort, props.snapshotAt));
 const directions = computed(() => directionalAggregation(summary.value, props.role));
+function directionText(direction, key, params) {
+  return t(`charts.aggregationDirections.${direction}.${key}`, params);
+}
 const scopeLabel = computed(() => t('charts.aggregationScope', {
   shown: props.sessions.length,
   total: props.total || props.sessions.length,
 }));
-function sampleStateLabel(direction) {
+function sampleStateLabel(direction, name) {
   if (direction.readyCount === 0) return t('charts.aggregationNoReady');
-  if (direction.freshCount === 0) return t('charts.aggregationNoSample');
-  return t('charts.aggregationSampleScope', {
+  if (direction.freshCount === 0) return directionText(name, 'noSample');
+  return directionText(name, 'sampleScope', {
     fresh: direction.freshCount,
     ready: direction.readyCount,
   });
@@ -67,25 +70,25 @@ function formatSampleAge(value) {
       <article v-for="(direction, name) in directions" :key="name" class="agg-direction">
         <header class="agg-direction-head">
           <div><p class="eyebrow">{{ t(`charts.${name}Direction`) }}</p><h3>{{ t(`charts.${name}AggregationTitle`) }}</h3></div>
-          <span class="badge" :class="direction.readyCount === 0 ? 'tone-neutral' : direction.freshCount === direction.readyCount ? 'tone-good' : 'tone-warning'">{{ sampleStateLabel(direction) }}</span>
+          <span class="badge" :class="direction.readyCount === 0 ? 'tone-neutral' : direction.freshCount === direction.readyCount ? 'tone-good' : 'tone-warning'">{{ sampleStateLabel(direction, name) }}</span>
         </header>
         <dl class="agg-stats">
-          <div class="agg-stat"><dt>{{ t('charts.aggregationCurrentTotal') }}</dt><dd>{{ direction.totalCapacity == null ? t('charts.aggregationPending') : formatRate(direction.totalCapacity) }}</dd><small>{{ t('charts.aggregationTotalNote') }}</small></div>
-          <div class="agg-stat"><dt>{{ t('charts.aggregationCurrentHighest') }}</dt><dd>{{ direction.highestCapacity == null ? t('charts.aggregationPending') : formatRate(direction.highestCapacity) }}</dd><small>{{ t('charts.aggregationHighestCapacityNote') }}</small></div>
-          <div class="agg-stat"><dt>{{ t('charts.aggregationLift') }}</dt><dd>{{ direction.lift == null ? t('charts.aggregationPending') : `+${direction.lift.toFixed(1)}%` }}</dd><small>{{ t('charts.aggregationLiftNote') }}</small></div>
-          <div class="agg-stat agg-stat-reference"><dt>{{ t('charts.aggregationLastMeasured') }}</dt><dd>{{ direction.lastTotalCapacity == null ? t('charts.aggregationPending') : formatRate(direction.lastTotalCapacity) }}</dd><small>{{ t('charts.aggregationLastMeasuredNote') }}</small></div>
+          <div class="agg-stat"><dt>{{ directionText(name, 'currentTotal') }}</dt><dd>{{ direction.totalCapacity == null ? t('charts.aggregationPending') : formatRate(direction.totalCapacity) }}</dd><small>{{ directionText(name, 'totalNote') }}</small></div>
+          <div class="agg-stat"><dt>{{ directionText(name, 'currentHighest') }}</dt><dd>{{ direction.highestCapacity == null ? t('charts.aggregationPending') : formatRate(direction.highestCapacity) }}</dd><small>{{ directionText(name, 'highestCapacityNote') }}</small></div>
+          <div class="agg-stat"><dt>{{ directionText(name, 'lift') }}</dt><dd>{{ direction.lift == null ? t('charts.aggregationPending') : `+${direction.lift.toFixed(1)}%` }}</dd><small>{{ directionText(name, 'liftNote') }}</small></div>
+          <div class="agg-stat agg-stat-reference"><dt>{{ directionText(name, 'lastMeasured') }}</dt><dd>{{ direction.lastTotalCapacity == null ? t('charts.aggregationPending') : formatRate(direction.lastTotalCapacity) }}</dd><small>{{ directionText(name, 'lastMeasuredNote') }}</small></div>
         </dl>
         <div class="agg-groups">
           <details v-for="group in direction.groups" :key="`${name}:${group.key}`" class="agg-group">
             <summary class="agg-group-summary">
               <span class="agg-group-name"><strong>{{ group.label }}</strong><small>{{ t(`charts.aggregationGroupType.${group.type}`) }} · {{ group.laneCount }} {{ t('charts.aggregationLanes') }}</small></span>
               <span class="agg-group-metrics">
-                <span class="agg-group-metric"><small>{{ t('charts.aggregationCurrentTotal') }}</small><strong>{{ group.totalCapacity == null ? t('charts.aggregationPending') : formatRate(group.totalCapacity) }}</strong></span>
-                <span class="agg-group-metric"><small>{{ t('charts.aggregationLastMeasured') }}</small><strong>{{ group.lastTotalCapacity == null ? t('charts.aggregationPending') : formatRate(group.lastTotalCapacity) }}</strong></span>
+                <span class="agg-group-metric"><small>{{ directionText(name, 'currentTotal') }}</small><strong>{{ group.totalCapacity == null ? t('charts.aggregationPending') : formatRate(group.totalCapacity) }}</strong></span>
+                <span class="agg-group-metric"><small>{{ directionText(name, 'lastMeasured') }}</small><strong>{{ group.lastTotalCapacity == null ? t('charts.aggregationPending') : formatRate(group.lastTotalCapacity) }}</strong></span>
                 <span class="agg-group-metric"><small>{{ t('charts.aggregationSamples') }}</small><strong>{{ group.freshCount }} / {{ group.readyCount }}</strong></span>
-                <span class="agg-group-metric agg-group-range"><small>{{ t('charts.aggregationRttRange') }}</small><strong>{{ formatRange(group.rttRange, formatMicros) }}</strong></span>
-                <span class="agg-group-metric agg-group-range"><small>{{ t('charts.aggregationCurrentRange') }}</small><strong>{{ formatRange(group.capacityRange, formatRate) }}</strong></span>
-                <span class="agg-group-metric agg-group-range"><small>{{ t('charts.aggregationReferenceRange') }}</small><strong>{{ formatRange(group.referenceCapacityRange, formatRate) }}</strong></span>
+                <span class="agg-group-metric agg-group-range"><small>{{ directionText(name, 'rttRange') }}</small><strong>{{ formatRange(group.rttRange, formatMicros) }}</strong></span>
+                <span class="agg-group-metric agg-group-range"><small>{{ directionText(name, 'currentRange') }}</small><strong>{{ formatRange(group.capacityRange, formatRate) }}</strong></span>
+                <span class="agg-group-metric agg-group-range"><small>{{ directionText(name, 'referenceRange') }}</small><strong>{{ formatRange(group.referenceCapacityRange, formatRate) }}</strong></span>
               </span>
             </summary>
             <div class="agg-group-detail"><div class="agg-bars">
@@ -93,9 +96,9 @@ function formatSampleAge(value) {
                 <label>{{ row.session.lane ? t('sessions.lane', { lane: row.session.lane }) : row.session.id || '--' }}</label>
                 <div class="bar"><i v-if="row.capacity != null && group.highestCapacity > 0" class="bar-fill" :class="row.isHighestCapacity ? 'tone-good' : 'tone-info'" :style="{ width: formatPercent(row.capacity, group.highestCapacity) }" /></div>
                 <em>{{ formatRate(row.capacity ?? row.lastCapacity) }}</em>
-                <small v-if="row.sampleState === 'fresh'">{{ t(row.isHighestCapacity ? 'charts.aggregationHighestNote' : 'charts.aggregationMeasuredNote', { rtt: formatMicros(row.rtt), stall: formatMicros(row.stall) }) }}</small>
-                <small v-else-if="row.sampleState === 'stale'">{{ t('charts.aggregationStaleReferenceNote', { age: formatSampleAge(row.sampleAgeMs), rtt: formatMicros(row.rtt) }) }}</small>
-                <small v-else>{{ t('charts.aggregationWaitingNote', { rtt: formatMicros(row.rtt) }) }}</small>
+                <small v-if="row.sampleState === 'fresh'">{{ directionText(name, row.isHighestCapacity ? 'highestNote' : 'measuredNote', { rtt: formatMicros(row.rtt), stall: formatMicros(row.stall) }) }}</small>
+                <small v-else-if="row.sampleState === 'stale'">{{ directionText(name, 'staleReferenceNote', { age: formatSampleAge(row.sampleAgeMs), rtt: formatMicros(row.rtt) }) }}</small>
+                <small v-else>{{ directionText(name, 'waitingNote', { rtt: formatMicros(row.rtt) }) }}</small>
               </div>
             </div></div>
           </details>

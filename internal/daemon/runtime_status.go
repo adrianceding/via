@@ -151,6 +151,16 @@ func (observer *runtimeStatus) frameReceived(bytes uint64) {
 	observer.repository.AddCounter(statusapi.CounterBytesReceived, bytes)
 }
 
+// observeDataPayloadSent records a DATA payload only after the transport write
+// has completed successfully. The summary counter is independent of the
+// per-session snapshot and uses the repository's atomic saturation boundary.
+func (observer *runtimeStatus) observeDataPayloadSent(payloadBytes uint64) {
+	if observer == nil || payloadBytes == 0 {
+		return
+	}
+	observer.repository.AddCounter(statusapi.CounterDataPayloadBytesSent, payloadBytes)
+}
+
 func (observer *runtimeStatus) retransmitted(bytes uint64) {
 	if observer != nil && bytes != 0 {
 		observer.repository.AddCounter(statusapi.CounterRetransmittedBytes, bytes)
@@ -335,6 +345,7 @@ func (observer *runtimeStatus) observeSessionDataReceived(generation uint64, pay
 	entry.Quality.ReceivedDataPayloadBytes += payloadBytes
 	observer.sessions[id] = entry
 	observer.mu.Unlock()
+	observer.repository.AddCounter(statusapi.CounterDataPayloadBytesReceived, payloadBytes)
 }
 
 func (observer *runtimeStatus) observeSessionPeerSendCapacity(generation uint64, snapshot peerSendCapacitySnapshot) {

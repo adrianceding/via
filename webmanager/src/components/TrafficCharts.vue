@@ -75,11 +75,11 @@ const throughputSummary = computed(() => t('charts.throughputSummary', {
 function shareSummaryLabel(direction) {
   const summary = directionalShares.value[direction];
   return summary.hasData
-    ? t('charts.shareSummary', {
+    ? t(`charts.${direction}ShareSummary`, {
       groups: summary.groupCount,
       value: formatBytes(summary.totalBytes),
     })
-    : t('charts.shareEmpty');
+    : t(`charts.${direction}ShareEmpty`);
 }
 
 const palette = ['#0e7f6e', '#3a63c7', '#b0760a', '#8b99ad', '#7a4d9e', '#c2473d'];
@@ -186,7 +186,7 @@ function buildShareOption(direction) {
     }],
     graphic: [
       { type: 'text', left: 'center', top: '36%', style: { text: formatBytes(totalBytes), fontSize: 17, fontWeight: 700, fill: 'currentColor' } },
-      { type: 'text', left: 'center', top: '48%', style: { text: t('charts.shareTotal'), fontSize: 10, fill: 'currentColor', opacity: 0.6 } },
+      { type: 'text', left: 'center', top: '48%', style: { text: t(`charts.${direction}ShareTotal`), fontSize: 10, fill: 'currentColor', opacity: 0.6 } },
     ],
   };
 }
@@ -308,7 +308,7 @@ onBeforeUnmount(() => {
           <span class="badge tone-neutral">{{ t('charts.uplinkShareBadge') }}</span>
         </header>
         <div v-if="directionalShares.uplink.hasData" ref="uplinkShareContainer" class="chart" role="img" aria-labelledby="uplink-share-chart-heading" aria-describedby="uplink-share-chart-summary" />
-        <p v-else class="empty-block">{{ loading ? t('charts.shareLoading') : t('charts.shareEmpty') }}</p>
+        <p v-else class="empty-block">{{ loading ? t('charts.uplinkShareLoading') : t('charts.uplinkShareEmpty') }}</p>
         <p id="uplink-share-chart-summary" class="visually-hidden" aria-live="polite">{{ shareSummaryLabel('uplink') }}</p>
       </article>
     </div>
@@ -327,7 +327,7 @@ onBeforeUnmount(() => {
           <span class="badge tone-neutral">{{ t('charts.downlinkShareBadge') }}</span>
         </header>
         <div v-if="directionalShares.downlink.hasData" ref="downlinkShareContainer" class="chart" role="img" aria-labelledby="downlink-share-chart-heading" aria-describedby="downlink-share-chart-summary" />
-        <p v-else class="empty-block">{{ loading ? t('charts.shareLoading') : t('charts.shareEmpty') }}</p>
+        <p v-else class="empty-block">{{ loading ? t('charts.downlinkShareLoading') : t('charts.downlinkShareEmpty') }}</p>
         <p id="downlink-share-chart-summary" class="visually-hidden" aria-live="polite">{{ shareSummaryLabel('downlink') }}</p>
       </article>
     </div>

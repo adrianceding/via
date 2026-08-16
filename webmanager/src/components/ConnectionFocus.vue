@@ -3,6 +3,7 @@ import { computed } from 'vue';
 import { useI18n } from 'vue-i18n';
 
 import { formatMicros } from '../format.js';
+import { fastestEndpointValues } from '../focus.js';
 import { selectFastestSession } from '../quality.js';
 
 const props = defineProps({
@@ -15,6 +16,7 @@ const fastest = computed(() => selectFastestSession(props.sessions));
 const readySessions = computed(() => props.sessions.filter((session) => session.state === 3).length);
 const resources = computed(() => props.summary.resources || {});
 const counters = computed(() => props.summary.counters || {});
+const endpoints = computed(() => fastestEndpointValues(fastest.value));
 </script>
 
 <template>
@@ -28,7 +30,8 @@ const counters = computed(() => props.summary.counters || {});
         <strong class="fastest-name">{{ fastest.interface || fastest.principal || 'listener' }}</strong>
         <strong class="fastest-rtt">{{ formatMicros(fastest.quality?.smoothed_rtt_micros) }}</strong>
         <p class="fastest-meta">
-          <span>{{ fastest.local_address || fastest.local_endpoint || '--' }}</span>
+          <span class="mono">{{ t('focus.localEndpoint', { value: endpoints.local }) }}</span>
+          <span class="mono">{{ t('focus.remoteEndpoint', { value: endpoints.remote }) }}</span>
           <span>{{ fastest.transport || '--' }}</span>
           <span>{{ t('focus.retry', { value: formatMicros(fastest.quality?.retry_micros) }) }}</span>
         </p>

@@ -7,7 +7,15 @@ test('overview active flow count follows the filtered flow response', async () =
   const app = await readFile(new URL('../src/App.vue', import.meta.url), 'utf8');
   assert.ok(component.includes('activeFlows: { type: Number, required: true }'));
   assert.ok(component.includes('String(props.activeFlows)'));
+  assert.ok(component.includes('counters.data_payload_bytes_sent'));
+  assert.ok(component.includes('counters.data_payload_bytes_received'));
+  assert.ok(component.includes('formatCounter(counters.data_payload_bytes_sent)'));
+  assert.ok(component.includes('formatCounter(counters.data_payload_bytes_received)'));
+  assert.ok(!component.includes('formatBytes(counters.bytes_sent)'));
+  assert.ok(!component.includes('formatBytes(counters.bytes_received)'));
   assert.ok(app.includes(':active-flows="controller.snapshot.value.flowTotal"'));
   assert.ok(app.includes('const trendTotal = computed(() => normalizedQuery.value || onlyAnomalies.value'));
   assert.ok(app.includes(':total="trendTotal"'));
+  assert.ok(app.includes('controller.snapshot.value.interfaces.filter(isInterfaceAbnormal).length'));
+  assert.ok(!app.includes('controller.snapshot.value.interfaces.filter((item) => item.reason !== 1).length'));
 });

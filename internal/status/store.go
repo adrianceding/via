@@ -38,6 +38,8 @@ const (
 	CounterBytesReceived
 	CounterRetransmittedBytes
 	CounterRedundantBytes
+	CounterDataPayloadBytesSent
+	CounterDataPayloadBytesReceived
 )
 
 type EventKind uint8
@@ -70,13 +72,15 @@ type Event struct {
 }
 
 type metricCounters struct {
-	framesSent          atomic.Uint64
-	framesReceived      atomic.Uint64
-	bytesSent           atomic.Uint64
-	bytesReceived       atomic.Uint64
-	retransmittedBytes  atomic.Uint64
-	redundantBytes      atomic.Uint64
-	droppedStatusEvents atomic.Uint64
+	framesSent               atomic.Uint64
+	framesReceived           atomic.Uint64
+	bytesSent                atomic.Uint64
+	bytesReceived            atomic.Uint64
+	dataPayloadBytesSent     atomic.Uint64
+	dataPayloadBytesReceived atomic.Uint64
+	retransmittedBytes       atomic.Uint64
+	redundantBytes           atomic.Uint64
+	droppedStatusEvents      atomic.Uint64
 }
 
 type repositoryState struct {
@@ -173,6 +177,10 @@ func (repository *Repository) AddCounter(kind CounterKind, delta uint64) bool {
 		counter = &repository.metrics.bytesSent
 	case CounterBytesReceived:
 		counter = &repository.metrics.bytesReceived
+	case CounterDataPayloadBytesSent:
+		counter = &repository.metrics.dataPayloadBytesSent
+	case CounterDataPayloadBytesReceived:
+		counter = &repository.metrics.dataPayloadBytesReceived
 	case CounterRetransmittedBytes:
 		counter = &repository.metrics.retransmittedBytes
 	case CounterRedundantBytes:
@@ -460,10 +468,15 @@ func (repository *Repository) publish(now time.Time) {
 
 func (repository *Repository) counters() Counters {
 	return Counters{
-		FramesSent: repository.metrics.framesSent.Load(), FramesReceived: repository.metrics.framesReceived.Load(),
-		BytesSent: repository.metrics.bytesSent.Load(), BytesReceived: repository.metrics.bytesReceived.Load(),
-		RetransmittedBytes: repository.metrics.retransmittedBytes.Load(), RedundantBytes: repository.metrics.redundantBytes.Load(),
-		DroppedStatusEvents: repository.metrics.droppedStatusEvents.Load(),
+		FramesSent:               repository.metrics.framesSent.Load(),
+		FramesReceived:           repository.metrics.framesReceived.Load(),
+		BytesSent:                repository.metrics.bytesSent.Load(),
+		BytesReceived:            repository.metrics.bytesReceived.Load(),
+		DataPayloadBytesSent:     repository.metrics.dataPayloadBytesSent.Load(),
+		DataPayloadBytesReceived: repository.metrics.dataPayloadBytesReceived.Load(),
+		RetransmittedBytes:       repository.metrics.retransmittedBytes.Load(),
+		RedundantBytes:           repository.metrics.redundantBytes.Load(),
+		DroppedStatusEvents:      repository.metrics.droppedStatusEvents.Load(),
 	}
 }
 

@@ -119,6 +119,9 @@ func TestRuntimeStatusAccumulatesReceivedDataPayload(t *testing.T) {
 	if got := observer.sessions[id].Quality.ReceivedDataPayloadBytes; got != 350 {
 		t.Fatalf("received payload = %d, want 350", got)
 	}
+	if got := repository.Snapshot().Counters.DataPayloadBytesReceived; got != 350 {
+		t.Fatalf("summary received payload = %d, want 350", got)
+	}
 
 	// 未注册的代次与零载荷必须安全忽略。
 	before := observer.sessions[id].Quality.ReceivedDataPayloadBytes
@@ -134,6 +137,37 @@ func TestRuntimeStatusAccumulatesReceivedDataPayload(t *testing.T) {
 	if _, exists := observer.sessions[id]; exists {
 		t.Fatal("removed session was recreated by late receive observation")
 	}
+	if got := repository.Snapshot().Counters.DataPayloadBytesReceived; got != 350 {
+		t.Fatalf("summary late received payload = %d, want 350", got)
+	}
+}
+
+func TestRuntimeStatusAccumulatesSentDataPayloadWithoutControlFrames(t *testing.T) {
+	repository, err := statusapi.NewRepository(statusapi.Limits{Interfaces: 1, Sessions: 1, Flows: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var statusKey [32]byte
+	statusKey[0] = 9
+	observer, err := newRuntimeStatusWithKey(repository, 1, 1, statusKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	observer.observeDataPayloadSent(512)
+	observer.observeDataPayloadSent(256)
+	if got := repository.Snapshot().Counters.DataPayloadBytesSent; got != 768 {
+		t.Fatalf("summary sent payload = %d, want 768", got)
+	}
+	observer.frameSent(64)
+	if got := repository.Snapshot().Counters.DataPayloadBytesSent; got != 768 {
+		t.Fatalf("control frame changed sent DATA payload = %d", got)
+	}
+	observer.observeDataPayloadSent(0)
+	if got := repository.Snapshot().Counters.DataPayloadBytesSent; got != 768 {
+		t.Fatalf("invalid DATA observation changed sent payload = %d", got)
+	}
+	var nilObserver *runtimeStatus
+	nilObserver.observeDataPayloadSent(100)
 }
 
 func TestRuntimeStatusPublishesPeerSendCapacityTimes(t *testing.T) {

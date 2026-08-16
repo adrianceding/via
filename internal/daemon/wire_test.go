@@ -282,6 +282,9 @@ func TestWireReadCountsReceivedDataPayload(t *testing.T) {
 	if got := observer.sessions[id].Quality.ReceivedDataPayloadBytes; got != 512 {
 		t.Fatalf("received payload = %d, want 512", got)
 	}
+	if got := repository.Snapshot().Counters.DataPayloadBytesReceived; got != 512 {
+		t.Fatalf("summary received payload = %d, want 512", got)
+	}
 
 	// 非 DATA 帧（例如 Probe）不得计入接收字节。
 	probe, err := protocol.EncodeMessage(protocol.Probe{Token: 1})
@@ -298,6 +301,81 @@ func TestWireReadCountsReceivedDataPayload(t *testing.T) {
 	}
 	if got := observer.sessions[id].Quality.ReceivedDataPayloadBytes; got != 512 {
 		t.Fatalf("probe changed received payload to %d, want 512", got)
+	}
+	if got := repository.Snapshot().Counters.DataPayloadBytesReceived; got != 512 {
+		t.Fatalf("probe changed summary received payload to %d, want 512", got)
+	}
+}
+
+func TestWireWriteCountsSuccessfulDataPayloadOnly(t *testing.T) {
+	repository, err := statusapi.NewRepository(statusapi.Limits{Interfaces: 1, Sessions: 1, Flows: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var statusKey [32]byte
+	statusKey[0] = 10
+	observer, err := newRuntimeStatusWithKey(repository, 1, 1, statusKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	observer.upsertSession(1, "tcp", "eth0", netip.MustParseAddr("192.0.2.1"), statusapi.SessionReady, statusapi.ReasonPathAdded)
+	left, right := newFramedConnectionPair()
+	session, err := newWireSession(context.Background(), 1, left)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.close()
+	session.status = observer
+	encoded, err := protocol.EncodeMessage(protocol.Data{FlowID: protocol.FlowID{1}, Offset: 0, Bytes: make([]byte, 384)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := session.sendEncodedContextWithCompletion(context.Background(), transport.FrameData, encoded, protocol.FlowID{1}, 1, 1, 384); err != nil {
+		t.Fatalf("successful DATA write = %v", err)
+	}
+	if got := repository.Snapshot().Counters.DataPayloadBytesSent; got != 384 {
+		t.Fatalf("summary sent payload = %d, want 384", got)
+	}
+	if err := session.send(protocol.Probe{Token: 1}); err != nil {
+		t.Fatalf("control write = %v", err)
+	}
+	if got := repository.Snapshot().Counters.DataPayloadBytesSent; got != 384 {
+		t.Fatalf("control write changed summary sent payload to %d", got)
+	}
+	select {
+	case <-right.inbound:
+	case <-time.After(time.Second):
+		t.Fatal("successful DATA frame was not written")
+	}
+}
+
+func TestWireWriteDoesNotCountFailedDataPayload(t *testing.T) {
+	repository, err := statusapi.NewRepository(statusapi.Limits{Interfaces: 1, Sessions: 1, Flows: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var statusKey [32]byte
+	statusKey[0] = 11
+	observer, err := newRuntimeStatusWithKey(repository, 1, 1, statusKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	observer.upsertSession(1, "tcp", "eth0", netip.MustParseAddr("192.0.2.1"), statusapi.SessionReady, statusapi.ReasonPathAdded)
+	session, err := newWireSession(context.Background(), 1, failingWireConnection{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.close()
+	session.status = observer
+	encoded, err := protocol.EncodeMessage(protocol.Data{FlowID: protocol.FlowID{1}, Offset: 0, Bytes: make([]byte, 128)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := session.sendEncodedContextWithCompletion(context.Background(), transport.FrameData, encoded, protocol.FlowID{1}, 1, 1, 128); err == nil {
+		t.Fatal("failed DATA write unexpectedly succeeded")
+	}
+	if got := repository.Snapshot().Counters.DataPayloadBytesSent; got != 0 {
+		t.Fatalf("failed DATA write changed summary sent payload to %d", got)
 	}
 }
 
@@ -424,6 +502,23 @@ func TestWirePeerSendCapacityFollowsMatchingProbeACK(t *testing.T) {
 }
 
 type blockingWireConnection struct{}
+
+type failingWireConnection struct{}
+
+func (failingWireConnection) Capabilities() transport.Capabilities {
+	return blockingWireConnection{}.Capabilities()
+}
+func (failingWireConnection) QueueLimits() transport.QueueLimits { return transport.V1QueueLimits() }
+func (failingWireConnection) LocalEndpoint() string              { return "127.0.0.1:1" }
+func (failingWireConnection) RemoteEndpoint() string             { return "127.0.0.1:2" }
+func (failingWireConnection) ReadFrame(context.Context) ([]byte, error) {
+	return nil, net.ErrClosed
+}
+func (failingWireConnection) WriteFrame(context.Context, transport.WriteRequest) error {
+	return errors.New("write failed")
+}
+func (failingWireConnection) CloseWrite() error { return nil }
+func (failingWireConnection) Close() error      { return nil }
 
 func (blockingWireConnection) Capabilities() transport.Capabilities {
 	capabilities, err := transport.NewCapabilities(transport.CapabilitySpec{MaxEncodedFrame: protocol.MaxFrameSize})

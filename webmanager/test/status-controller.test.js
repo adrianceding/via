@@ -61,8 +61,8 @@ test('status controller preserves the last snapshot after a refresh failure', as
 test('status controller derives rates and current dropped-event degradation', async () => {
   let refresh = 0;
   const snapshots = [
-    { generated_at: '2026-08-01T10:00:00Z', healthy: true, counters: { bytes_sent: 1000, bytes_received: 2000, dropped_status_events: 4 } },
-    { generated_at: '2026-08-01T10:00:02Z', healthy: true, counters: { bytes_sent: 5000, bytes_received: 5000, dropped_status_events: 5 } },
+    { generated_at: '2026-08-01T10:00:00Z', healthy: true, counters: { bytes_sent: 1000, bytes_received: 2000, data_payload_bytes_sent: 1000, data_payload_bytes_received: 2000, dropped_status_events: 4 } },
+    { generated_at: '2026-08-01T10:00:02Z', healthy: true, counters: { bytes_sent: 5000, bytes_received: 5000, data_payload_bytes_sent: 5000, data_payload_bytes_received: 5000, dropped_status_events: 5 } },
   ];
   const controller = createStatusController({
     fetchSnapshot: async () => ({

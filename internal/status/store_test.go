@@ -109,6 +109,12 @@ func TestRepositoryCountersSaturateInsteadOfWrapping(t *testing.T) {
 	if got := repository.Snapshot().Counters.BytesSent; got != math.MaxUint64 {
 		t.Fatalf("saturated counter = %d", got)
 	}
+	if !repository.AddCounter(CounterDataPayloadBytesSent, math.MaxUint64-1) || !repository.AddCounter(CounterDataPayloadBytesSent, 10) {
+		t.Fatal("valid DATA payload counter increment rejected")
+	}
+	if got := repository.Snapshot().Counters.DataPayloadBytesSent; got != math.MaxUint64 {
+		t.Fatalf("saturated DATA payload counter = %d", got)
+	}
 	if repository.AddCounter(0, 1) || repository.AddCounter(CounterBytesSent, 0) {
 		t.Fatal("invalid counter increment accepted")
 	}

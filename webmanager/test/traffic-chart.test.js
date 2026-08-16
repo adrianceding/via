@@ -102,7 +102,10 @@ test('traffic charts use localized headings and do not render an empty share can
   assert.ok(component.includes("buildThroughputOption('uplink')"));
   assert.ok(component.includes("buildThroughputOption('downlink')"));
   assert.ok(component.includes('values.capacity > 0 ? values.capacity : values.lastCapacity'));
-  assert.ok(component.includes("t('charts.shareEmpty')"));
+  assert.ok(component.includes('charts.${direction}ShareSummary'));
+  assert.ok(component.includes('charts.${direction}ShareEmpty'));
+  assert.ok(component.includes("t('charts.uplinkShareLoading')"));
+  assert.ok(component.includes("t('charts.downlinkShareLoading')"));
   assert.ok(component.includes('disposeDirectionChart(\'uplink\')'));
   assert.ok(component.includes('disposeDirectionChart(\'downlink\')'));
   assert.ok(component.includes("disposeShareChart('uplink')"));

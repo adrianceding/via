@@ -112,7 +112,8 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 			GeneratedAt: snapshot.GeneratedAt, Healthy: snapshot.Healthy, Role: snapshot.Role,
 			Resources: snapshot.Resources, Rejected: snapshot.Rejected, Counters: snapshot.Counters,
 			Interfaces: len(snapshot.Interfaces), Sessions: len(snapshot.Sessions),
-			Flows: activeFlowCount(snapshot.Flows), Terminals: len(snapshot.Terminals),
+			ReadySessions: readySessionCount(snapshot.Sessions),
+			Flows:         activeFlowCount(snapshot.Flows), Terminals: len(snapshot.Terminals),
 		})
 	case "/api/v1/interfaces":
 		encoded, err = encodeBoundedList(snapshot.GeneratedAt, snapshot.Interfaces)
@@ -154,16 +155,17 @@ type healthResponse struct {
 }
 
 type summaryResponse struct {
-	GeneratedAt time.Time `json:"generated_at"`
-	Healthy     bool      `json:"healthy"`
-	Role        Role      `json:"role,omitempty"`
-	Resources   Resources `json:"resources"`
-	Rejected    Rejected  `json:"rejected"`
-	Counters    Counters  `json:"counters"`
-	Interfaces  int       `json:"interfaces"`
-	Sessions    int       `json:"sessions"`
-	Flows       int       `json:"flows"`
-	Terminals   int       `json:"terminals"`
+	GeneratedAt   time.Time `json:"generated_at"`
+	Healthy       bool      `json:"healthy"`
+	Role          Role      `json:"role,omitempty"`
+	Resources     Resources `json:"resources"`
+	Rejected      Rejected  `json:"rejected"`
+	Counters      Counters  `json:"counters"`
+	Interfaces    int       `json:"interfaces"`
+	Sessions      int       `json:"sessions"`
+	ReadySessions int       `json:"ready_sessions"`
+	Flows         int       `json:"flows"`
+	Terminals     int       `json:"terminals"`
 }
 
 type listResponse[T any] struct {
@@ -224,6 +226,16 @@ func activeFlowCount(flows []Flow) int {
 	count := 0
 	for _, flow := range flows {
 		if flow.State != FlowClosing {
+			count++
+		}
+	}
+	return count
+}
+
+func readySessionCount(sessions []Session) int {
+	count := 0
+	for _, session := range sessions {
+		if session.State == SessionReady {
 			count++
 		}
 	}

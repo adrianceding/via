@@ -5,6 +5,7 @@ import {
   flowMatchesFilter,
   interfaceMatchesFilter,
   isFlowAbnormal,
+  isInterfaceAbnormal,
   isSessionAbnormal,
   isTerminalAbnormal,
   sessionMatchesFilter,
@@ -51,10 +52,23 @@ test('terminal filter only treats reset as abnormal', () => {
   assert.equal(isTerminalAbnormal({ ...closed, state: 8 }), true);
 });
 
-test('interface filter includes matching names and abnormal discovery results', () => {
+test('interface abnormality follows reason semantics and treats unknown values conservatively', () => {
+  for (const reason of [1, 2, 3]) assert.equal(isInterfaceAbnormal({ reason }), false, `reason ${reason}`);
+  for (const reason of [4, 5, 6]) assert.equal(isInterfaceAbnormal({ reason }), true, `reason ${reason}`);
+  for (const reason of [undefined, null, 0, 7, 2.5, '4']) {
+    assert.equal(isInterfaceAbnormal({ reason }), true, `unknown reason ${String(reason)}`);
+  }
+});
+
+test('interface filter keeps strategy exclusions searchable unless anomaly-only is enabled', () => {
   const item = { name: 'eth0', addresses: ['192.0.2.10'], reason: 1 };
   assert.equal(interfaceMatchesFilter(item, 'eth0', false), true);
   assert.equal(interfaceMatchesFilter(item, '192.0.2', false), true);
   assert.equal(interfaceMatchesFilter(item, '', true), false);
-  assert.equal(interfaceMatchesFilter({ ...item, reason: 3 }, '', true), true);
+  const excluded = { name: 'lo', addresses: ['127.0.0.1'], reason: 3 };
+  assert.equal(interfaceMatchesFilter(excluded, 'lo', false), true);
+  assert.equal(interfaceMatchesFilter(excluded, '', true), false);
+  assert.equal(interfaceMatchesFilter(excluded, 'lo', true), false);
+  assert.equal(interfaceMatchesFilter({ ...item, reason: 4 }, 'eth0', true), true);
+  assert.equal(interfaceMatchesFilter({ ...item, reason: 4 }, 'missing', true), false);
 });

@@ -247,6 +247,7 @@ h2 { margin: 0; font-size: 16px; font-weight: 700; letter-spacing: 0.01em; }
 .fastest-name { overflow-wrap: anywhere; font-size: 28px; }
 .fastest-rtt { color: var(--good); font-size: 32px; font-variant-numeric: tabular-nums; }
 .fastest-meta { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 8px 18px; margin: 12px 0 0; color: var(--text-muted); font-size: 13px; }
+.fastest-meta > .mono { min-width: 0; overflow-wrap: anywhere; }
 
 .quality-summary { margin: 22px 0 0; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .quality-summary div { padding: 0 14px; border-right: 1px solid var(--border); }

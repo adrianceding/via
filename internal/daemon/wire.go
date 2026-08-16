@@ -397,6 +397,9 @@ func (pending *pendingSessionWrite) wait() (time.Time, bool, error) {
 	completedAt, err := pending.session.runtime.waitCompletion(pending.ctx, pending.request)
 	if err == nil && pending.session.status != nil {
 		pending.session.status.frameSent(pending.encoded)
+		if pending.request.class == transport.FrameData {
+			pending.session.status.observeDataPayloadSent(pending.request.dataPayload)
+		}
 	}
 	return completedAt, pending.request.capacityEligible, err
 }

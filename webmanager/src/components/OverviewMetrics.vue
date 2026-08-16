@@ -2,7 +2,7 @@
 import { computed } from 'vue';
 import { useI18n } from 'vue-i18n';
 
-import { formatBytes, formatPercent, formatRate } from '../format.js';
+import { formatBytes, formatCounter, formatPercent, formatRate } from '../format.js';
 
 const props = defineProps({
   activeFlows: { type: Number, required: true },
@@ -19,8 +19,8 @@ const metrics = computed(() => {
     [t('metrics.sessions'), String(resources.sessions ?? props.sessions.length), t('common.currentResources')],
     [t('metrics.flows'), String(props.activeFlows), t('common.currentResources')],
     [t('metrics.applicationConnections'), String(resources.socks_connections ?? 0), t('common.currentResources')],
-    [t('metrics.sendRate'), formatRate(props.rates.sent), t('common.total', { value: formatBytes(counters.bytes_sent) })],
-    [t('metrics.receiveRate'), formatRate(props.rates.received), t('common.total', { value: formatBytes(counters.bytes_received) })],
+    [t('metrics.sendRate'), formatRate(props.rates.sent), t('common.total', { value: formatCounter(counters.data_payload_bytes_sent) })],
+    [t('metrics.receiveRate'), formatRate(props.rates.received), t('common.total', { value: formatCounter(counters.data_payload_bytes_received) })],
     [
       t('metrics.overhead'),
       `${formatBytes(counters.retransmitted_bytes)} / ${formatBytes(counters.redundant_bytes)}`,

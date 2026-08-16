@@ -31,6 +31,22 @@ func TestQualityDataSampleAgePreservesNullAndZero(t *testing.T) {
 	}
 }
 
+func TestCountersExposeDistinctDataPayloadJSONFields(t *testing.T) {
+	encoded, err := json.Marshal(Counters{
+		BytesSent: 11, BytesReceived: 13,
+		DataPayloadBytesSent: 17, DataPayloadBytesReceived: 19,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(encoded)
+	for _, field := range []string{`"bytes_sent":11`, `"bytes_received":13`, `"data_payload_bytes_sent":17`, `"data_payload_bytes_received":19`} {
+		if !strings.Contains(text, field) {
+			t.Fatalf("missing counter field %q in %s", field, text)
+		}
+	}
+}
+
 func TestHasherIsDeterministicDomainSeparatedAndOpaque(t *testing.T) {
 	key := [32]byte{1, 2, 3}
 	hasher, err := NewHasher(key)

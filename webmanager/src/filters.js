@@ -26,6 +26,12 @@ export function isTerminalAbnormal(flow) {
   return flow.state === 8;
 }
 
+export function isInterfaceAbnormal(item) {
+  const reason = item?.reason;
+  if (!Number.isInteger(reason) || reason < 1 || reason > 6) return true;
+  return reason >= 4;
+}
+
 export function sessionMatchesFilter(session, query, onlyAnomalies) {
   if (onlyAnomalies && !isSessionAbnormal(session)) return false;
   if (!query) return true;
@@ -65,7 +71,7 @@ export function terminalMatchesFilter(flow, query, onlyAnomalies) {
 }
 
 export function interfaceMatchesFilter(item, query, onlyAnomalies) {
-  if (onlyAnomalies && item.reason === 1) return false;
+  if (onlyAnomalies && !isInterfaceAbnormal(item)) return false;
   if (!query) return true;
   return includesQuery([item.name, ...(item.addresses || [])], query);
 }

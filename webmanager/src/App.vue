@@ -18,6 +18,7 @@ import {
   flowMatchesFilter,
   interfaceMatchesFilter,
   isFlowAbnormal,
+  isInterfaceAbnormal,
   isSessionAbnormal,
   isTerminalAbnormal,
   sessionMatchesFilter,
@@ -26,7 +27,7 @@ import {
 import { aggregationGroupIdentity } from './aggregation.js';
 import { statusErrorCode } from './api.js';
 import { persistLocale } from './i18n.js';
-import { describeFreshness } from './observability.js';
+import { describeFreshness, resolveStatusPresentation } from './observability.js';
 import { createPoller } from './poller.js';
 import { createStatusController } from './status-controller.js';
 import { roles } from './status.js';
@@ -67,7 +68,7 @@ const trendTotal = computed(() => normalizedQuery.value || onlyAnomalies.value
 const anomalyCount = computed(() => controller.snapshot.value.sessions.filter(isSessionAbnormal).length
   + controller.snapshot.value.flows.filter(isFlowAbnormal).length
   + controller.snapshot.value.terminals.filter(isTerminalAbnormal).length
-  + controller.snapshot.value.interfaces.filter((item) => item.reason !== 1).length);
+  + controller.snapshot.value.interfaces.filter(isInterfaceAbnormal).length);
 const currentViewURL = computed(() => buildViewURL(window.location.href, {
   query: query.value,
   onlyAnomalies: onlyAnomalies.value,
@@ -76,17 +77,15 @@ const currentViewURL = computed(() => buildViewURL(window.location.href, {
 }));
 const healthReasons = computed(() => controller.health.value.reasons.map((reason) => t(`health.${reason.code}`, { count: reason.count })));
 const statusPresentation = computed(() => {
-  if (controller.error.value) {
+  const presentation = resolveStatusPresentation({
+    error: controller.error.value,
+    freshnessState: freshness.value.state,
+    health: controller.health.value,
+  });
+  if (presentation.level === 'error') {
     return { level: 'error', label: t(`errors.${statusErrorCode(controller.error.value)}`) };
   }
-  if (freshness.value.state === 'unavailable') {
-    return { level: 'connecting', label: t('status.connecting') };
-  }
-  if (freshness.value.state === 'stale') {
-    return { level: 'unhealthy', label: t('status.stale') };
-  }
-  const level = controller.health.value.level;
-  return { level, label: t(`status.${level}`) };
+  return { level: presentation.level, label: t(`status.${presentation.key}`) };
 });
 const healthLevel = computed(() => statusPresentation.value.level);
 const connectionLabel = computed(() => statusPresentation.value.label);

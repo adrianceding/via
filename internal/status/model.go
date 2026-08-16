@@ -136,13 +136,15 @@ type Rejected struct {
 }
 
 type Counters struct {
-	FramesSent          uint64 `json:"frames_sent"`
-	FramesReceived      uint64 `json:"frames_received"`
-	BytesSent           uint64 `json:"bytes_sent"`
-	BytesReceived       uint64 `json:"bytes_received"`
-	RetransmittedBytes  uint64 `json:"retransmitted_bytes"`
-	RedundantBytes      uint64 `json:"redundant_bytes"`
-	DroppedStatusEvents uint64 `json:"dropped_status_events"`
+	FramesSent               uint64 `json:"frames_sent"`
+	FramesReceived           uint64 `json:"frames_received"`
+	BytesSent                uint64 `json:"bytes_sent"`
+	BytesReceived            uint64 `json:"bytes_received"`
+	DataPayloadBytesSent     uint64 `json:"data_payload_bytes_sent"`
+	DataPayloadBytesReceived uint64 `json:"data_payload_bytes_received"`
+	RetransmittedBytes       uint64 `json:"retransmitted_bytes"`
+	RedundantBytes           uint64 `json:"redundant_bytes"`
+	DroppedStatusEvents      uint64 `json:"dropped_status_events"`
 }
 
 type Interface struct {
