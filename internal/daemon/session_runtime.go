@@ -455,6 +455,10 @@ func (runtime *sessionRuntime) completeWrite(request *sessionRuntimeRequest, err
 		runtime.mu.Unlock()
 		return
 	}
+	wasClosed := runtime.closed
+	if wasClosed {
+		err = runtime.closeErrorLocked()
+	}
 	runtime.selected = nil
 	runtime.inFlightFrames--
 	runtime.inFlightBytes -= minUint64(runtime.inFlightBytes, uint64(len(request.encoded)))
@@ -477,7 +481,7 @@ func (runtime *sessionRuntime) completeWrite(request *sessionRuntimeRequest, err
 	if notify {
 		runtime.notifySnapshot(snapshot)
 	}
-	if err != nil {
+	if err != nil && !wasClosed {
 		runtime.close(err)
 		if runtime.onFailure != nil {
 			runtime.onFailure(err)
@@ -601,21 +605,29 @@ func (runtime *sessionRuntime) close(err error) {
 		runtime.closed = true
 		runtime.closeErr = err
 		for _, request := range runtime.requests {
-			if request.state == sessionRuntimeQueued || request.state == sessionRuntimeSelected {
+			if request.state == sessionRuntimeQueued {
 				runtime.finishLocked(request, err)
 			}
 		}
 		runtime.controlQueue = nil
 		runtime.dataScheduler = mustNewRuntimeScheduler()
-		runtime.requests = make(map[uint64]*sessionRuntimeRequest, int(runtime.queueLimits.MaxFrames))
-		runtime.selected = nil
 		runtime.queuedFrames = 0
 		runtime.queuedBytes = 0
-		runtime.inFlightFrames = 0
-		runtime.inFlightBytes = 0
 		runtime.queuedData = 0
-		runtime.inFlightData = 0
 		runtime.unacknowledgedData = make(map[protocol.FlowID]uint64, transport.MaxSessionAttachments)
+		if runtime.selected == nil {
+			runtime.inFlightFrames = 0
+			runtime.inFlightBytes = 0
+			runtime.inFlightData = 0
+		} else {
+			runtime.inFlightFrames = 1
+			runtime.inFlightBytes = uint64(len(runtime.selected.encoded))
+			runtime.inFlightData = 0
+			if runtime.selected.class == transport.FrameData {
+				runtime.inFlightData = runtime.selected.dataPayload
+				runtime.unacknowledgedData[runtime.selected.flowID] = runtime.selected.dataPayload
+			}
+		}
 		runtime.updateQualityLoadLocked()
 		runtime.signalSpaceLocked()
 		close(runtime.done)

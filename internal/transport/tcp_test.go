@@ -408,6 +408,55 @@ func TestTCPCloseUnblocksReadAndWrite(t *testing.T) {
 	}
 }
 
+func TestTCPSelectedCloseWriteWaitsForWriterDuringClose(t *testing.T) {
+	underlying := newControlledWriteConn()
+	defer underlying.releaseAll()
+	connection := newTCPConnection(underlying, DefaultTCPConfig(), testCapabilities(t), V1QueueLimits(), time.Now)
+
+	closeWriteResult := make(chan error, 1)
+	go func() { closeWriteResult <- connection.CloseWrite() }()
+	waitSignal(t, underlying.closeWriteStarted)
+	closeResult := make(chan error, 1)
+	go func() { closeResult <- connection.Close() }()
+	waitSignal(t, underlying.closeCalled)
+	assertNoResult(t, closeWriteResult, "selected CloseWrite")
+
+	underlying.releaseCloseWrite()
+	if err := waitResult(t, closeWriteResult); !errors.Is(err, errControlledCloseWrite) {
+		t.Fatalf("selected CloseWrite error = %v", err)
+	}
+	if err := waitResult(t, closeResult); err != nil {
+		t.Fatalf("Close error = %v", err)
+	}
+}
+
+func TestTCPQueuedCloseWriteWaitsForWriterDuringClose(t *testing.T) {
+	underlying := newControlledWriteConn()
+	defer underlying.releaseAll()
+	connection := newTCPConnection(underlying, DefaultTCPConfig(), testCapabilities(t), V1QueueLimits(), time.Now)
+
+	writeResult := asyncWrite(connection, FrameControl)
+	waitSignal(t, underlying.writeStarted)
+	closeWriteResult := make(chan error, 1)
+	go func() { closeWriteResult <- connection.CloseWrite() }()
+	waitQueueFrames(t, connection, 2)
+	closeResult := make(chan error, 1)
+	go func() { closeResult <- connection.Close() }()
+	waitSignal(t, underlying.closeCalled)
+	assertNoResult(t, closeWriteResult, "queued CloseWrite")
+
+	underlying.releaseWrite()
+	if err := waitResult(t, writeResult); !errors.Is(err, errControlledWrite) {
+		t.Fatalf("selected write error = %v", err)
+	}
+	if err := waitResult(t, closeWriteResult); !errors.Is(err, errControlledWrite) {
+		t.Fatalf("queued CloseWrite error = %v", err)
+	}
+	if err := waitResult(t, closeResult); err != nil {
+		t.Fatalf("Close error = %v", err)
+	}
+}
+
 func newTestTCPConnection(t *testing.T, conn net.Conn) *tcpConnection {
 	t.Helper()
 	return newTCPConnection(conn, DefaultTCPConfig(), testCapabilities(t), V1QueueLimits(), time.Now)
@@ -468,6 +517,15 @@ func waitSignal(t *testing.T, signal <-chan struct{}) {
 	case <-signal:
 	case <-time.After(2 * time.Second):
 		t.Fatal("operation did not start")
+	}
+}
+
+func assertNoResult(t *testing.T, result <-chan error, description string) {
+	t.Helper()
+	select {
+	case err := <-result:
+		t.Fatalf("%s returned before its writer stopped: %v", description, err)
+	case <-time.After(20 * time.Millisecond):
 	}
 }
 
@@ -560,6 +618,72 @@ type blockingConn struct {
 	releaseWrites chan struct{}
 	closeOnce     sync.Once
 	closed        chan struct{}
+}
+
+var (
+	errControlledWrite      = errors.New("controlled write stopped")
+	errControlledCloseWrite = errors.New("controlled close write stopped")
+)
+
+type controlledWriteConn struct {
+	writeStarted          chan struct{}
+	closeWriteStarted     chan struct{}
+	closeCalled           chan struct{}
+	releaseWrites         chan struct{}
+	releaseCloseWrites    chan struct{}
+	writeStartedOnce      sync.Once
+	closeWriteStartedOnce sync.Once
+	closeCalledOnce       sync.Once
+	releaseWriteOnce      sync.Once
+	releaseCloseWriteOnce sync.Once
+}
+
+func newControlledWriteConn() *controlledWriteConn {
+	return &controlledWriteConn{
+		writeStarted:       make(chan struct{}),
+		closeWriteStarted:  make(chan struct{}),
+		closeCalled:        make(chan struct{}),
+		releaseWrites:      make(chan struct{}),
+		releaseCloseWrites: make(chan struct{}),
+	}
+}
+
+func (connection *controlledWriteConn) Read([]byte) (int, error) {
+	<-connection.closeCalled
+	return 0, net.ErrClosed
+}
+
+func (connection *controlledWriteConn) Write([]byte) (int, error) {
+	connection.writeStartedOnce.Do(func() { close(connection.writeStarted) })
+	<-connection.releaseWrites
+	return 0, errControlledWrite
+}
+
+func (connection *controlledWriteConn) CloseWrite() error {
+	connection.closeWriteStartedOnce.Do(func() { close(connection.closeWriteStarted) })
+	<-connection.releaseCloseWrites
+	return errControlledCloseWrite
+}
+
+func (connection *controlledWriteConn) Close() error {
+	connection.closeCalledOnce.Do(func() { close(connection.closeCalled) })
+	return nil
+}
+
+func (*controlledWriteConn) LocalAddr() net.Addr              { return dummyAddr("local") }
+func (*controlledWriteConn) RemoteAddr() net.Addr             { return dummyAddr("remote") }
+func (*controlledWriteConn) SetDeadline(time.Time) error      { return nil }
+func (*controlledWriteConn) SetReadDeadline(time.Time) error  { return nil }
+func (*controlledWriteConn) SetWriteDeadline(time.Time) error { return nil }
+func (connection *controlledWriteConn) releaseWrite() {
+	connection.releaseWriteOnce.Do(func() { close(connection.releaseWrites) })
+}
+func (connection *controlledWriteConn) releaseCloseWrite() {
+	connection.releaseCloseWriteOnce.Do(func() { close(connection.releaseCloseWrites) })
+}
+func (connection *controlledWriteConn) releaseAll() {
+	connection.releaseWrite()
+	connection.releaseCloseWrite()
 }
 
 func newBlockingConn() *blockingConn {

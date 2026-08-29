@@ -513,11 +513,14 @@ func (session *wireSession) close() {
 		return
 	}
 	session.closeOnce.Do(func() {
-		session.cancel()
 		if session.runtime != nil {
 			session.runtime.close(transport.ErrClosed)
 		}
+		session.cancel()
 		_ = session.connection.Close()
+		if session.runtime != nil {
+			<-session.runtime.workerDone
+		}
 	})
 }
 

@@ -43,16 +43,19 @@ type runtimeStatus struct {
 	maxFlows   int
 	now        func() time.Time
 
-	mu          sync.Mutex
-	resources   statusapi.Resources
-	rejections  statusapi.Rejected
-	flows       map[protocol.FlowID]runtimeFlowStatus
-	flowTraffic map[protocol.FlowID]runtimeFlowTraffic
-	sessions    map[string]statusapi.Session
-	fastestID   string
-	runtime     map[uint64]sessionRuntimeSnapshot
-	connections map[uint64]string
-	interfaces  map[int]struct{}
+	mu           sync.Mutex
+	resources    statusapi.Resources
+	rejections   statusapi.Rejected
+	flows        map[protocol.FlowID]runtimeFlowStatus
+	flowTraffic  map[protocol.FlowID]runtimeFlowTraffic
+	sessions     map[string]statusapi.Session
+	fastestID    string
+	runtime      map[uint64]sessionRuntimeSnapshot
+	connections  map[uint64]string
+	interfaces   map[int]struct{}
+	terminals    []statusapi.Terminal
+	terminalAt   map[string]int
+	terminalNext int
 }
 
 type runtimeFlowStatus struct {
@@ -129,6 +132,8 @@ func newRuntimeStatusWithClock(repository *statusapi.Repository, maxFlows int, r
 		runtime:     make(map[uint64]sessionRuntimeSnapshot, statusapi.MaxSessions),
 		connections: make(map[uint64]string, statusapi.MaxSessions),
 		interfaces:  make(map[int]struct{}, statusapi.MaxInterfaces),
+		terminals:   make([]statusapi.Terminal, 0, statusapi.MaxTerminalSummaries),
+		terminalAt:  make(map[string]int, statusapi.MaxTerminalSummaries),
 	}
 	observer.resources.ReservedBytes = reservedBytes
 	observer.publishResourcesLocked()
@@ -842,16 +847,119 @@ func (observer *runtimeStatus) terminalFlow(flowID protocol.FlowID, state status
 		}
 		observer.publishResourcesLocked()
 	}
-	observer.mu.Unlock()
 	if id == "" {
 		id = observer.hasher.FlowID(flowID)
 	}
-	observer.repository.TryRecord(statusapi.Event{Kind: statusapi.EventFlowTerminal, Terminal: statusapi.Terminal{
+	terminal := statusapi.Terminal{
 		IDHash: id, FlowID: previous.entry.FlowID, State: state, Reason: reason,
 		DeliveryMode: previous.entry.DeliveryMode, PathSelection: previous.entry.PathSelection,
 		StartedAt: previous.entry.StartedAt, FinishedAt: observer.now(),
 		RecoveryCount: previous.recoveryCount, RecoveryMicros: previous.recoveryMicros,
-	}})
+	}
+	observer.rememberTerminalLocked(terminal)
+	observer.mu.Unlock()
+	observer.repository.TryRecord(statusapi.Event{Kind: statusapi.EventFlowTerminal, Terminal: terminal})
+}
+
+// reconcileRepository retries lifecycle convergence from the bounded runtime
+// authority. Sampling updates may be dropped, but a removed runtime object must
+// not remain in a published Repository snapshot indefinitely.
+func (observer *runtimeStatus) reconcileRepository() {
+	if observer == nil {
+		return
+	}
+	published := observer.repository.Snapshot()
+	now := observer.now()
+
+	observer.mu.Lock()
+	observer.pruneTerminalsLocked(now)
+	interfaces := make(map[int]struct{}, len(observer.interfaces))
+	for index := range observer.interfaces {
+		interfaces[index] = struct{}{}
+	}
+	sessions := make(map[string]struct{}, len(observer.sessions))
+	for id := range observer.sessions {
+		sessions[id] = struct{}{}
+	}
+	flows := make(map[string]struct{}, len(observer.flows))
+	for _, flowStatus := range observer.flows {
+		flows[flowStatus.entry.IDHash] = struct{}{}
+	}
+	terminals := make(map[string]statusapi.Terminal, len(observer.terminals))
+	for _, terminal := range observer.terminals {
+		terminals[terminal.IDHash] = terminal
+	}
+	observer.mu.Unlock()
+
+	for _, networkInterface := range published.Interfaces {
+		if _, exists := interfaces[networkInterface.Index]; !exists {
+			observer.repository.TryRecord(statusapi.Event{Kind: statusapi.EventRemoveInterface, InterfaceIndex: networkInterface.Index})
+		}
+	}
+	for _, session := range published.Sessions {
+		if _, exists := sessions[session.IDHash]; !exists {
+			observer.repository.TryRecord(statusapi.Event{Kind: statusapi.EventRemoveSession, SessionID: session.IDHash})
+		}
+	}
+	publishedTerminals := make(map[string]struct{}, len(published.Terminals))
+	for _, terminal := range published.Terminals {
+		publishedTerminals[terminal.IDHash] = struct{}{}
+	}
+	terminalEvents := make(map[string]statusapi.Terminal, len(terminals))
+	for id, terminal := range terminals {
+		if _, exists := publishedTerminals[id]; !exists {
+			terminalEvents[id] = terminal
+		}
+	}
+	for _, flowStatus := range published.Flows {
+		if _, exists := flows[flowStatus.IDHash]; exists {
+			continue
+		}
+		if terminal, exists := terminals[flowStatus.IDHash]; exists {
+			terminalEvents[flowStatus.IDHash] = terminal
+			continue
+		}
+		observer.repository.TryRecord(statusapi.Event{Kind: statusapi.EventRemoveFlow, FlowID: flowStatus.IDHash})
+	}
+	for _, terminal := range terminalEvents {
+		observer.repository.TryRecord(statusapi.Event{Kind: statusapi.EventFlowTerminal, Terminal: terminal})
+	}
+}
+
+func (observer *runtimeStatus) rememberTerminalLocked(terminal statusapi.Terminal) {
+	if index, exists := observer.terminalAt[terminal.IDHash]; exists {
+		observer.terminals[index] = terminal
+		return
+	}
+	if len(observer.terminals) < statusapi.MaxTerminalSummaries {
+		observer.terminalAt[terminal.IDHash] = len(observer.terminals)
+		observer.terminals = append(observer.terminals, terminal)
+		return
+	}
+	index := observer.terminalNext
+	delete(observer.terminalAt, observer.terminals[index].IDHash)
+	observer.terminals[index] = terminal
+	observer.terminalAt[terminal.IDHash] = index
+	observer.terminalNext = (index + 1) % statusapi.MaxTerminalSummaries
+}
+
+func (observer *runtimeStatus) pruneTerminalsLocked(now time.Time) {
+	if now.IsZero() || len(observer.terminals) == 0 {
+		return
+	}
+	cutoff := now.Add(-statusapi.TerminalRetention)
+	kept := observer.terminals[:0]
+	for _, terminal := range observer.terminals {
+		if terminal.FinishedAt.After(cutoff) {
+			kept = append(kept, terminal)
+		}
+	}
+	observer.terminals = kept
+	clear(observer.terminalAt)
+	for index, terminal := range observer.terminals {
+		observer.terminalAt[terminal.IDHash] = index
+	}
+	observer.terminalNext = 0
 }
 
 func (observer *runtimeStatus) addSOCKS(delta int64) {

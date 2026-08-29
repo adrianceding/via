@@ -253,7 +253,7 @@ func (daemon *serverDaemon) run(ctx context.Context) error {
 	daemon.wg.Add(1)
 	go func() {
 		defer daemon.wg.Done()
-		ticks := statusTicks(daemon.runtimeCtx)
+		ticks := statusTicks(daemon.runtimeCtx, daemon.statusObserver.reconcileRepository)
 		_ = daemon.statusRepository.Run(daemon.runtimeCtx, ticks)
 	}()
 	statusError := make(chan error, 1)
@@ -1246,7 +1246,7 @@ func daemonMessageFlowID(message protocol.Message) (protocol.FlowID, bool) {
 	}
 }
 
-func statusTicks(ctx context.Context) <-chan time.Time {
+func statusTicks(ctx context.Context, reconcile func()) <-chan time.Time {
 	output := make(chan time.Time, 1)
 	go func() {
 		defer close(output)
@@ -1257,6 +1257,9 @@ func statusTicks(ctx context.Context) <-chan time.Time {
 			case <-ctx.Done():
 				return
 			case value := <-ticker.C:
+				if reconcile != nil {
+					reconcile()
+				}
 				select {
 				case output <- value:
 				default:

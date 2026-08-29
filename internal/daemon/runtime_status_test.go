@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/netip"
 	"strings"
@@ -476,6 +477,104 @@ func TestRuntimeStatusPublishesHashedBoundedLifecycle(t *testing.T) {
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestRuntimeStatusReconcilesLifecycleEventsDroppedBySaturatedQueue(t *testing.T) {
+	repository, err := statusapi.NewRepository(statusapi.Limits{Interfaces: 1, Sessions: 1, Flows: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var key [32]byte
+	key[0] = 9
+	observer, err := newRuntimeStatusWithKey(repository, 1, 1, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- repository.Run(ctx, nil) }()
+	observer.syncInterfaces(pathcore.Snapshot{Decisions: []pathcore.Decision{{
+		InterfaceIndex: 7, InterfaceName: "wan-a", Reason: pathcore.ReasonEligible,
+	}}})
+	observer.upsertSession(9, "tcp", "wan-a", netip.MustParseAddr("192.0.2.7"), statusapi.SessionReady, statusapi.ReasonPathAdded)
+	flowID := protocol.FlowID{9}
+	observer.upsertFlow(flowID, protocol.Target{Address: netip.MustParseAddr("198.51.100.9"), Port: 443},
+		protocol.DeliveryAdaptive, protocol.PathFastest,
+		flow.FlowSnapshot{Lifecycle: flow.LifecycleSnapshot{State: flow.Relaying}},
+		policy.Snapshot{State: policy.AdaptiveSingle}, statusapi.ReasonStarted)
+	waitFor(t, time.Second, func() bool {
+		snapshot := repository.Snapshot()
+		return len(snapshot.Interfaces) == 1 && len(snapshot.Sessions) == 1 && len(snapshot.Flows) == 1
+	}, "initial status authority")
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+
+	for range statusapi.MaxStatusEvents {
+		if !repository.TryRecord(statusapi.Event{Kind: statusapi.EventSetHealth, Healthy: true}) {
+			t.Fatal("status queue filled before its bound")
+		}
+	}
+	observer.syncInterfaces(pathcore.Snapshot{})
+	observer.removeSession(9)
+	observer.terminalFlow(flowID, statusapi.FlowClosed, statusapi.ReasonCompleted)
+
+	ctx, cancel = context.WithCancel(context.Background())
+	done = make(chan error, 1)
+	go func() { done <- repository.Run(ctx, nil) }()
+	waitFor(t, time.Second, func() bool {
+		return repository.TryRecord(statusapi.Event{Kind: statusapi.EventSetHealth, Healthy: false})
+	}, "queue drain sentinel admission")
+	waitFor(t, time.Second, func() bool {
+		snapshot := repository.Snapshot()
+		return !snapshot.Healthy && len(snapshot.Flows) == 1
+	}, "dropped lifecycle events")
+	observer.reconcileRepository()
+	waitFor(t, time.Second, func() bool {
+		snapshot := repository.Snapshot()
+		return len(snapshot.Interfaces) == 0 && len(snapshot.Sessions) == 0 && len(snapshot.Flows) == 0 &&
+			len(snapshot.Terminals) == 1 && snapshot.Terminals[0].IDHash == observer.hasher.FlowID(flowID)
+	}, "reconciled lifecycle events")
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRuntimeStatusTerminalReconciliationHistoryIsBoundedAndPruned(t *testing.T) {
+	now := time.Unix(20_000, 0).UTC()
+	repository, err := statusapi.NewRepository(statusapi.Limits{Interfaces: 1, Sessions: 1, Flows: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var key [32]byte
+	key[0] = 10
+	observer, err := newRuntimeStatusWithClock(repository, 1, 1, key, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	observer.mu.Lock()
+	for index := 0; index <= statusapi.MaxTerminalSummaries; index++ {
+		observer.rememberTerminalLocked(statusapi.Terminal{
+			IDHash: fmt.Sprintf("%024x", index+1), State: statusapi.FlowClosed,
+			Reason: statusapi.ReasonCompleted, FinishedAt: now.Add(time.Duration(index)),
+		})
+	}
+	if len(observer.terminals) != statusapi.MaxTerminalSummaries || len(observer.terminalAt) != statusapi.MaxTerminalSummaries {
+		t.Fatalf("terminal reconciliation history = %d entries, %d indexes", len(observer.terminals), len(observer.terminalAt))
+	}
+	if _, exists := observer.terminalAt[fmt.Sprintf("%024x", 1)]; exists {
+		t.Fatal("terminal reconciliation history retained overwritten oldest entry")
+	}
+	now = now.Add(statusapi.TerminalRetention + time.Second)
+	observer.pruneTerminalsLocked(now)
+	if len(observer.terminals) != 0 || len(observer.terminalAt) != 0 {
+		t.Fatalf("expired terminal reconciliation history = %d entries, %d indexes", len(observer.terminals), len(observer.terminalAt))
+	}
+	observer.mu.Unlock()
 }
 
 func TestRuntimeStatusMovesFastestSessionMarker(t *testing.T) {

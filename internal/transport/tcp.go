@@ -431,7 +431,7 @@ func (connection *tcpConnection) CloseWrite() error {
 	case err := <-entry.result:
 		return err
 	case <-connection.done:
-		return ErrClosed
+		return <-entry.result
 	}
 }
 

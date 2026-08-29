@@ -176,6 +176,62 @@ func TestWireControlSendWaitsForQueueCapacity(t *testing.T) {
 	}
 }
 
+func TestWireCloseKeepsSelectedEncodedBorrowedUntilWriteReturns(t *testing.T) {
+	connection := newBorrowedWriteConnection()
+	defer connection.release()
+	session, err := newWireSession(context.Background(), 1, connection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded := []byte{7, 8, 9}
+	pending, err := session.admitEncodedContextMetadata(context.Background(), transport.FrameData, encoded, protocol.FlowID{1}, 1, 1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitWireSignal(t, connection.writeStarted, "selected WriteFrame start")
+
+	type writeResult struct {
+		completedAt time.Time
+		err         error
+	}
+	result := make(chan writeResult, 1)
+	go func() {
+		completedAt, _, waitErr := pending.wait()
+		result <- writeResult{completedAt: completedAt, err: waitErr}
+	}()
+	closed := make(chan struct{})
+	go func() {
+		session.close()
+		close(closed)
+	}()
+	waitWireSignal(t, connection.closeCalled, "transport Close")
+	select {
+	case got := <-result:
+		t.Fatalf("selected request completed before WriteFrame returned: %#v", got)
+	case <-time.After(20 * time.Millisecond):
+	}
+	if snapshot := session.runtime.snapshot(); snapshot.InFlightFrames != 1 || snapshot.InFlightEncoded != uint64(len(encoded)) {
+		t.Fatalf("closing selected request accounting = %#v", snapshot)
+	}
+
+	connection.release()
+	var got writeResult
+	select {
+	case got = <-result:
+	case <-time.After(time.Second):
+		t.Fatal("selected request did not complete after WriteFrame returned")
+	}
+	encoded[0] = 99
+	if !errors.Is(got.err, transport.ErrClosed) || !got.completedAt.IsZero() {
+		t.Fatalf("selected close result = %#v", got)
+	}
+	waitWireSignal(t, connection.writeReturned, "selected WriteFrame return")
+	waitWireSignal(t, closed, "wire session close")
+	if marker := <-connection.observedMarker; marker != 7 {
+		t.Fatalf("transport observed encoded marker %d, want 7", marker)
+	}
+}
+
 func TestWireProbeRateAndGenerationAreBounded(t *testing.T) {
 	session, err := newWireSession(context.Background(), 1, blockingWireConnection{})
 	if err != nil {
@@ -502,6 +558,63 @@ func TestWirePeerSendCapacityFollowsMatchingProbeACK(t *testing.T) {
 }
 
 type blockingWireConnection struct{}
+
+type borrowedWriteConnection struct {
+	writeStarted   chan struct{}
+	writeReturned  chan struct{}
+	closeCalled    chan struct{}
+	releaseWrite   chan struct{}
+	observedMarker chan byte
+	writeOnce      sync.Once
+	closeOnce      sync.Once
+	releaseOnce    sync.Once
+}
+
+func newBorrowedWriteConnection() *borrowedWriteConnection {
+	return &borrowedWriteConnection{
+		writeStarted:   make(chan struct{}),
+		writeReturned:  make(chan struct{}),
+		closeCalled:    make(chan struct{}),
+		releaseWrite:   make(chan struct{}),
+		observedMarker: make(chan byte, 1),
+	}
+}
+
+func (connection *borrowedWriteConnection) Capabilities() transport.Capabilities {
+	return blockingWireConnection{}.Capabilities()
+}
+func (*borrowedWriteConnection) QueueLimits() transport.QueueLimits {
+	return transport.V1QueueLimits()
+}
+func (*borrowedWriteConnection) LocalEndpoint() string  { return "127.0.0.1:1" }
+func (*borrowedWriteConnection) RemoteEndpoint() string { return "127.0.0.1:2" }
+func (*borrowedWriteConnection) ReadFrame(context.Context) ([]byte, error) {
+	return nil, net.ErrClosed
+}
+func (connection *borrowedWriteConnection) WriteFrame(_ context.Context, request transport.WriteRequest) error {
+	connection.writeOnce.Do(func() { close(connection.writeStarted) })
+	<-connection.releaseWrite
+	connection.observedMarker <- request.Encoded[0]
+	close(connection.writeReturned)
+	return transport.ErrClosed
+}
+func (*borrowedWriteConnection) CloseWrite() error { return nil }
+func (connection *borrowedWriteConnection) Close() error {
+	connection.closeOnce.Do(func() { close(connection.closeCalled) })
+	return nil
+}
+func (connection *borrowedWriteConnection) release() {
+	connection.releaseOnce.Do(func() { close(connection.releaseWrite) })
+}
+
+func waitWireSignal(t *testing.T, signal <-chan struct{}, description string) {
+	t.Helper()
+	select {
+	case <-signal:
+	case <-time.After(time.Second):
+		t.Fatalf("timed out waiting for %s", description)
+	}
+}
 
 type failingWireConnection struct{}
 

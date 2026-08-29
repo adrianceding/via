@@ -255,7 +255,7 @@ func (daemon *clientDaemon) run(ctx context.Context) error {
 	daemon.wg.Add(1)
 	go func() {
 		defer daemon.wg.Done()
-		_ = daemon.statusRepository.Run(daemon.runtimeCtx, statusTicks(daemon.runtimeCtx))
+		_ = daemon.statusRepository.Run(daemon.runtimeCtx, statusTicks(daemon.runtimeCtx, daemon.statusObserver.reconcileRepository))
 	}()
 	statusError := make(chan error, 1)
 	if daemon.statusServer != nil {
