@@ -861,8 +861,8 @@ func (instance *clientFlow) publishStatus(reason statusapi.TransitionReason) {
 			correlationID: instance.correlationID, lifecycleState: flowStatus.LifecycleState,
 			adaptiveState: policyStatus.State, adaptiveTransition: policyStatus.Transition,
 			publishedAttachments: flowStatus.PublishedAttachments, policyAttachments: policyStatus.Attachments,
-			preferredAttachment: policyStatus.Preferred, hasPreferred: policyStatus.HasPreferred,
-			txAllocatedOffset: flowStatus.TxAllocatedOffset, txAcknowledged: flowStatus.TxAcknowledged,
+			preferredConnectionID: preferredConnectionID(policyStatus.Preferred, policyStatus.HasPreferred, instance.host.session),
+			txAllocatedOffset:     flowStatus.TxAllocatedOffset, txAcknowledged: flowStatus.TxAcknowledged,
 			rxWrittenOffset: flowStatus.RxWrittenOffset,
 		}, reason,
 	)

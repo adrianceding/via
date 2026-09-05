@@ -769,6 +769,64 @@ func TestSimulatedFullChainSinglePathUsesMultipleLanesAndSurvivesOneLaneLoss(t *
 	}
 }
 
+func TestSimulatedFullChainPreferredConnectionSurvivesFirstLaneLoss(t *testing.T) {
+	for _, role := range []string{"client", "server"} {
+		t.Run(role, func(t *testing.T) {
+			harness := newSimulationHarnessConfiguredWithPaths(
+				t, protocol.DeliveryAdaptive, protocol.PathFastest, nil, true, 2, 2,
+				simulatedInterface(1, "sim-a", simulationAddressA),
+			)
+			defer harness.close()
+			application := harness.openApplication()
+			defer application.Close()
+			payload := bytes.Repeat([]byte("lane-status|"), 1024)
+			harness.assertTransfer(application, payload, uint64(len(payload)))
+			assertPreferred := func(name string, snapshot statusapi.Snapshot) {
+				t.Helper()
+				if len(snapshot.Flows) != 1 || snapshot.Flows[0].PublishedAttachments != 1 {
+					t.Fatalf("%s logical Flow attachments = %#v", name, snapshot.Flows)
+				}
+				preferred := snapshot.Flows[0].PreferredConnectionID
+				for _, session := range snapshot.Sessions {
+					if preferred != "" && session.ConnectionID == preferred && session.State == statusapi.SessionReady {
+						return
+					}
+				}
+				t.Fatalf("%s preferred connection %q does not identify a ready lane", name, preferred)
+			}
+			assertPreferred("client before loss", harness.client.statusRepository.Snapshot())
+			assertPreferred("server before loss", harness.server.statusRepository.Snapshot())
+
+			generation := harness.client.readyPathGroups()[0].generation
+			physicalSession := harness.client.physicalSession
+			groupSession := harness.client.session
+			if role == "server" {
+				harness.server.sessionsMu.RLock()
+				for _, group := range harness.server.pathGroups {
+					generation = group.generation
+				}
+				harness.server.sessionsMu.RUnlock()
+				physicalSession = harness.server.physicalSession
+				groupSession = harness.server.session
+			}
+			first := physicalSession(generation)
+			if first == nil {
+				t.Fatal("initial path-group lane is missing")
+			}
+			first.close()
+			waitFor(t, 5*time.Second, func() bool {
+				return physicalSession(generation) == nil && groupSession(generation) != nil
+			}, "first physical lane removed while logical path group remains ready")
+			harness.assertTransfer(application, payload, 2*uint64(len(payload)))
+			assertPreferred("client after loss", harness.client.statusRepository.Snapshot())
+			assertPreferred("server after loss", harness.server.statusRepository.Snapshot())
+			if harness.targetTotal.Load() != 1 {
+				t.Fatalf("target connections = %d, want 1", harness.targetTotal.Load())
+			}
+		})
+	}
+}
+
 func TestSimulatedFullChainWithoutSOCKSAuthentication(t *testing.T) {
 	harness := newSimulationHarnessConfigured(t, protocol.DeliveryAdaptive, protocol.PathFastest, nil, false)
 	defer harness.close()

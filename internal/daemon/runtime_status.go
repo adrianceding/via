@@ -51,7 +51,6 @@ type runtimeStatus struct {
 	sessions     map[string]statusapi.Session
 	fastestID    string
 	runtime      map[uint64]sessionRuntimeSnapshot
-	connections  map[uint64]string
 	interfaces   map[int]struct{}
 	terminals    []statusapi.Terminal
 	terminalAt   map[string]int
@@ -77,17 +76,16 @@ type runtimeFlowTraffic struct {
 }
 
 type runtimeFlowObservation struct {
-	correlationID        string
-	lifecycleState       flow.LifecycleState
-	adaptiveState        policy.AdaptiveState
-	adaptiveTransition   policy.Transition
-	publishedAttachments int
-	policyAttachments    int
-	preferredAttachment  flow.AttachmentKey
-	hasPreferred         bool
-	txAllocatedOffset    uint64
-	txAcknowledged       uint64
-	rxWrittenOffset      uint64
+	correlationID         string
+	lifecycleState        flow.LifecycleState
+	adaptiveState         policy.AdaptiveState
+	adaptiveTransition    policy.Transition
+	publishedAttachments  int
+	policyAttachments     int
+	preferredConnectionID string
+	txAllocatedOffset     uint64
+	txAcknowledged        uint64
+	rxWrittenOffset       uint64
 }
 
 type runtimeSessionObservation struct {
@@ -135,7 +133,6 @@ func newRuntimeStatusWithClock(repository *statusapi.Repository, maxFlows int, r
 		flowTraffic: make(map[runtimeFlowKey]runtimeFlowTraffic, maxFlows),
 		sessions:    make(map[string]statusapi.Session, statusapi.MaxSessions),
 		runtime:     make(map[uint64]sessionRuntimeSnapshot, statusapi.MaxSessions),
-		connections: make(map[uint64]string, statusapi.MaxSessions),
 		interfaces:  make(map[int]struct{}, statusapi.MaxInterfaces),
 		terminals:   make([]statusapi.Terminal, 0, statusapi.MaxTerminalSummaries),
 		terminalAt:  make(map[string]int, statusapi.MaxTerminalSummaries),
@@ -308,7 +305,6 @@ func (observer *runtimeStatus) mergeSessionObservationLocked(observation runtime
 	}
 	if observation.connectionID != "" {
 		entry.ConnectionID = observation.connectionID
-		observer.connections[observation.generation] = observation.connectionID
 	}
 	if observation.principalID != "" {
 		entry.PrincipalHash = observer.hasher.Principal(observation.principalID)
@@ -544,7 +540,6 @@ func (observer *runtimeStatus) removeSession(generation uint64) {
 		observer.publishResourcesLocked()
 	}
 	delete(observer.runtime, generation)
-	delete(observer.connections, generation)
 	updates := observer.recomputeFastestLocked()
 	observer.mu.Unlock()
 	observer.repository.TryRecord(statusapi.Event{Kind: statusapi.EventRemoveSession, SessionID: id})
@@ -595,11 +590,6 @@ func (observer *runtimeStatus) syncClientSessions(transportName, principalID str
 			if observer.resources.Sessions != 0 {
 				observer.resources.Sessions--
 			}
-		}
-	}
-	for generation := range observer.connections {
-		if _, exists := next[observer.hasher.SessionID(generation)]; !exists {
-			delete(observer.connections, generation)
 		}
 	}
 	for generation := range observer.runtime {
@@ -738,12 +728,23 @@ func (observer *runtimeStatus) upsertFlow(flowID protocol.FlowID, target protoco
 		adaptiveTransition:   policySnapshot.Transition,
 		publishedAttachments: len(snapshot.Lifecycle.Published),
 		policyAttachments:    len(policySnapshot.Attachments),
-		preferredAttachment:  policySnapshot.Preferred,
-		hasPreferred:         policySnapshot.HasPreferred,
 		txAllocatedOffset:    snapshot.TxAllocatedOffset,
 		txAcknowledged:       snapshot.TxAcknowledgedOffset,
 		rxWrittenOffset:      snapshot.Rx.WrittenOffset,
 	}, reason)
+}
+
+// Resolve the logical group's current representative without retaining retired
+// physical generations or invoking the daemon lookup under the status lock.
+func preferredConnectionID(attachment flow.AttachmentKey, hasPreferred bool, lookup func(uint64) *wireSession) string {
+	if !hasPreferred {
+		return ""
+	}
+	session := lookup(attachment.SessionGeneration)
+	if session == nil {
+		return ""
+	}
+	return session.connectionID.String()
 }
 
 func (observer *runtimeStatus) upsertFlowObservation(key runtimeFlowKey, target protocol.Target, mode protocol.DeliveryMode, selection protocol.PathSelection, observation runtimeFlowObservation, reason statusapi.TransitionReason) {
@@ -765,10 +766,6 @@ func (observer *runtimeStatus) upsertFlowObservation(key runtimeFlowKey, target 
 	}
 	if !exists || previous.entry.State != state || stateSince.IsZero() {
 		stateSince = now
-	}
-	preferredConnectionID := ""
-	if observation.hasPreferred {
-		preferredConnectionID = observer.connections[observation.preferredAttachment.SessionGeneration]
 	}
 	unacknowledged := uint64(0)
 	if observation.txAllocatedOffset >= observation.txAcknowledged {
@@ -796,7 +793,7 @@ func (observer *runtimeStatus) upsertFlowObservation(key runtimeFlowKey, target 
 		AdaptiveTransition: statusAdaptiveTransition(observation.adaptiveTransition),
 		State:              state, Reason: reason, StartedAt: startedAt, StateSince: stateSince,
 		PublishedAttachments: uint32(observation.publishedAttachments), PolicyAttachments: uint32(observation.policyAttachments),
-		PreferredConnectionID: preferredConnectionID, UnacknowledgedBytes: unacknowledged,
+		PreferredConnectionID: observation.preferredConnectionID, UnacknowledgedBytes: unacknowledged,
 		TxAllocatedOffset: observation.txAllocatedOffset, TxAcknowledged: observation.txAcknowledged,
 		RxWrittenOffset: observation.rxWrittenOffset, RetransmittedBytes: traffic.retransmitted, RedundantBytes: traffic.redundant,
 		RecoveryCount: recoveryCount, RecoveryMicros: recoveryMicros,

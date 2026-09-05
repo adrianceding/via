@@ -335,6 +335,64 @@ func TestRuntimeStatusPublishesResourceLimitsAndRejections(t *testing.T) {
 	}
 }
 
+func TestPreferredConnectionIDTracksLivePathGroup(t *testing.T) {
+	group, err := newWirePathGroup(1, "edge-1", protocol.PathGroupID{1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	addLane := func(generation uint64) *wireSession {
+		t.Helper()
+		session, err := newWireSession(context.Background(), generation, &clientTestTransportConnection{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(session.close)
+		session.principal, session.pathGroupID = group.principal, group.id
+		session.connectionID = auth.CorrelationID{byte(generation)}
+		if _, err := group.add(session); err != nil {
+			t.Fatal(err)
+		}
+		return session
+	}
+	first, second := addLane(1), addLane(2)
+	lookup := func(generation uint64) *wireSession {
+		if generation != group.generation {
+			return nil
+		}
+		return group.session()
+	}
+	attachment := flow.AttachmentKey{SessionGeneration: 1, AttachmentGeneration: 10}
+	if got := preferredConnectionID(attachment, true, lookup); got != first.connectionID.String() {
+		t.Fatalf("initial preferred connection = %q", got)
+	}
+	group.remove(first.generation)
+	if got := preferredConnectionID(attachment, true, lookup); got != second.connectionID.String() {
+		t.Fatalf("remaining lane preferred connection = %q", got)
+	}
+	group.remove(second.generation)
+	if got := preferredConnectionID(attachment, true, lookup); got != "" {
+		t.Fatalf("empty group retained preferred connection %q", got)
+	}
+	group, err = newWirePathGroup(3, "edge-1", protocol.PathGroupID{1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement := addLane(3)
+	if got := preferredConnectionID(attachment, true, lookup); got != "" {
+		t.Fatalf("retired group resolved to replacement connection %q", got)
+	}
+	attachment.SessionGeneration = group.generation
+	if got := preferredConnectionID(attachment, true, lookup); got != replacement.connectionID.String() {
+		t.Fatalf("replacement group preferred connection = %q", got)
+	}
+	if got := preferredConnectionID(attachment, false, func(uint64) *wireSession {
+		t.Fatal("no-preference state must not perform a session lookup")
+		return nil
+	}); got != "" {
+		t.Fatalf("no-preference state returned connection %q", got)
+	}
+}
+
 func TestRuntimeStatusPublishesAuthoritativeFlowObservationAndTerminal(t *testing.T) {
 	now := time.Unix(2_000, 0).UTC()
 	repository, err := statusapi.NewRepository(statusapi.Limits{Interfaces: 1, Sessions: 1, Flows: 1})
@@ -359,8 +417,8 @@ func TestRuntimeStatusPublishesAuthoritativeFlowObservationAndTerminal(t *testin
 		correlationID: correlationID, lifecycleState: flow.Relaying,
 		adaptiveState: policy.AdaptiveTargeted, adaptiveTransition: policy.TransitionAcknowledgementGap,
 		publishedAttachments: 2, policyAttachments: 1,
-		preferredAttachment: flow.AttachmentKey{SessionGeneration: 7, AttachmentGeneration: 1}, hasPreferred: true,
-		txAllocatedOffset: 100, txAcknowledged: 40, rxWrittenOffset: 80,
+		preferredConnectionID: connectionID,
+		txAllocatedOffset:     100, txAcknowledged: 40, rxWrittenOffset: 80,
 	}, statusapi.ReasonStarted)
 	entry := observer.flows[runtimeFlowKey{id: flowID}].entry
 	if entry.FlowID != correlationID || entry.PublishedAttachments != 2 || entry.PolicyAttachments != 1 ||
@@ -374,8 +432,8 @@ func TestRuntimeStatusPublishesAuthoritativeFlowObservationAndTerminal(t *testin
 		correlationID: correlationID, lifecycleState: flow.Relaying,
 		adaptiveState: policy.AdaptiveTargeted, adaptiveTransition: policy.TransitionAcknowledgementGap,
 		publishedAttachments: 2, policyAttachments: 1,
-		preferredAttachment: flow.AttachmentKey{SessionGeneration: 7, AttachmentGeneration: 1}, hasPreferred: true,
-		txAllocatedOffset: 120, txAcknowledged: 60, rxWrittenOffset: 80,
+		preferredConnectionID: connectionID,
+		txAllocatedOffset:     120, txAcknowledged: 60, rxWrittenOffset: 80,
 	}, statusapi.ReasonStarted)
 	if got := observer.flows[runtimeFlowKey{id: flowID}].entry.StateSince; got != entry.StateSince {
 		t.Fatalf("unchanged state since = %v, want %v", got, entry.StateSince)
@@ -551,7 +609,7 @@ func TestRuntimeStatusReconcilesLifecycleEventsDroppedBySaturatedQueue(t *testin
 	}
 }
 
-func TestRuntimeStatusSessionChurnReclaimsConnectionHistory(t *testing.T) {
+func TestRuntimeStatusSessionChurnReclaimsState(t *testing.T) {
 	repository, err := statusapi.NewRepository(statusapi.Limits{Interfaces: 1, Sessions: 1, Flows: 1})
 	if err != nil {
 		t.Fatal(err)
@@ -568,8 +626,9 @@ func TestRuntimeStatusSessionChurnReclaimsConnectionHistory(t *testing.T) {
 		})
 		observer.removeSession(generation)
 	}
-	if len(observer.connections) != 0 {
-		t.Fatalf("closed sessions retained %d connection identifiers", len(observer.connections))
+	if len(observer.sessions) != 0 || len(observer.runtime) != 0 || observer.resources.Sessions != 0 {
+		t.Fatalf("closed sessions retained state: sessions=%d runtime=%d resources=%d",
+			len(observer.sessions), len(observer.runtime), observer.resources.Sessions)
 	}
 }
 
