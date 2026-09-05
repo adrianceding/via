@@ -270,6 +270,17 @@ func (hasher *Hasher) FlowID(flowID protocol.FlowID) string {
 	return hasher.sum("via status flow v1\x00", flowID[:])
 }
 
+func (hasher *Hasher) ScopedFlowID(principal string, flowID protocol.FlowID) string {
+	if hasher == nil {
+		return ""
+	}
+	// The fixed-width FlowID makes the two fields unambiguous without a delimiter.
+	identity := make([]byte, 0, len(flowID)+len(principal))
+	identity = append(identity, flowID[:]...)
+	identity = append(identity, principal...)
+	return hasher.sum("via status scoped flow v1\x00", identity)
+}
+
 func (hasher *Hasher) SessionID(generation uint64) string {
 	if hasher == nil || generation == 0 {
 		return ""

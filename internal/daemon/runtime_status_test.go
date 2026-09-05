@@ -236,7 +236,7 @@ func TestRuntimeStatusAccumulatesFlowRecoveryCountAndDuration(t *testing.T) {
 	correlationID := auth.CorrelationID{9}.String()
 	target := protocol.Target{DNSName: "target.example", Port: 443}
 	observe := func(state flow.LifecycleState, reason statusapi.TransitionReason) {
-		observer.upsertFlowObservation(flowID, target, protocol.DeliveryAdaptive, protocol.PathFastest, runtimeFlowObservation{
+		observer.upsertFlowObservation(runtimeFlowKey{id: flowID}, target, protocol.DeliveryAdaptive, protocol.PathFastest, runtimeFlowObservation{
 			correlationID:     correlationID,
 			lifecycleState:    state,
 			adaptiveState:     policy.AdaptiveFull,
@@ -246,7 +246,7 @@ func TestRuntimeStatusAccumulatesFlowRecoveryCountAndDuration(t *testing.T) {
 
 	// Relaying 中不产生恢复计数。
 	observe(flow.Relaying, statusapi.ReasonStarted)
-	if got := observer.flows[flowID].entry.RecoveryCount; got != 0 {
+	if got := observer.flows[runtimeFlowKey{id: flowID}].entry.RecoveryCount; got != 0 {
 		t.Fatalf("initial recovery count = %d, want 0", got)
 	}
 
@@ -259,7 +259,7 @@ func TestRuntimeStatusAccumulatesFlowRecoveryCountAndDuration(t *testing.T) {
 	// 离开 Recovering 完成一次恢复并累计耗时 8s（3001s -> 3009s）。
 	now = now.Add(5 * time.Second)
 	observe(flow.Relaying, statusapi.ReasonPathAdded)
-	entry := observer.flows[flowID].entry
+	entry := observer.flows[runtimeFlowKey{id: flowID}].entry
 	if entry.RecoveryCount != 1 || entry.RecoveryMicros != 8_000_000 {
 		t.Fatalf("recovery after first cycle = count %d, micros %d", entry.RecoveryCount, entry.RecoveryMicros)
 	}
@@ -269,7 +269,7 @@ func TestRuntimeStatusAccumulatesFlowRecoveryCountAndDuration(t *testing.T) {
 	observe(flow.Recovering, statusapi.ReasonPathRemoved)
 	now = now.Add(500 * time.Millisecond)
 	observe(flow.Relaying, statusapi.ReasonPathAdded)
-	entry = observer.flows[flowID].entry
+	entry = observer.flows[runtimeFlowKey{id: flowID}].entry
 	if entry.RecoveryCount != 2 || entry.RecoveryMicros != 8_500_000 {
 		t.Fatalf("recovery after second cycle = count %d, micros %d", entry.RecoveryCount, entry.RecoveryMicros)
 	}
@@ -279,7 +279,7 @@ func TestRuntimeStatusAccumulatesFlowRecoveryCountAndDuration(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- repository.Run(ctx, nil) }()
 	now = now.Add(time.Second)
-	observer.terminalFlow(flowID, statusapi.FlowClosed, statusapi.ReasonCompleted)
+	observer.terminalFlow(runtimeFlowKey{id: flowID}, statusapi.FlowClosed, statusapi.ReasonCompleted)
 	waitFor(t, time.Second, func() bool { return len(repository.Snapshot().Terminals) == 1 }, "flow terminal")
 	terminal := repository.Snapshot().Terminals[0]
 	if terminal.RecoveryCount != 2 || terminal.RecoveryMicros != 8_500_000 {
@@ -355,14 +355,14 @@ func TestRuntimeStatusPublishesAuthoritativeFlowObservationAndTerminal(t *testin
 	flowID := protocol.FlowID{1}
 	correlationID := auth.CorrelationID{2}.String()
 	target := protocol.Target{DNSName: "target.example", Port: 443}
-	observer.upsertFlowObservation(flowID, target, protocol.DeliveryAdaptive, protocol.PathFastest, runtimeFlowObservation{
+	observer.upsertFlowObservation(runtimeFlowKey{id: flowID}, target, protocol.DeliveryAdaptive, protocol.PathFastest, runtimeFlowObservation{
 		correlationID: correlationID, lifecycleState: flow.Relaying,
 		adaptiveState: policy.AdaptiveTargeted, adaptiveTransition: policy.TransitionAcknowledgementGap,
 		publishedAttachments: 2, policyAttachments: 1,
 		preferredAttachment: flow.AttachmentKey{SessionGeneration: 7, AttachmentGeneration: 1}, hasPreferred: true,
 		txAllocatedOffset: 100, txAcknowledged: 40, rxWrittenOffset: 80,
 	}, statusapi.ReasonStarted)
-	entry := observer.flows[flowID].entry
+	entry := observer.flows[runtimeFlowKey{id: flowID}].entry
 	if entry.FlowID != correlationID || entry.PublishedAttachments != 2 || entry.PolicyAttachments != 1 ||
 		entry.PreferredConnectionID != connectionID || entry.UnacknowledgedBytes != 60 ||
 		entry.AdaptiveTransition != statusapi.AdaptiveTransitionAcknowledgementGap || entry.StartedAt != now || entry.StateSince != now {
@@ -370,19 +370,19 @@ func TestRuntimeStatusPublishesAuthoritativeFlowObservationAndTerminal(t *testin
 	}
 
 	now = now.Add(time.Second)
-	observer.upsertFlowObservation(flowID, target, protocol.DeliveryAdaptive, protocol.PathFastest, runtimeFlowObservation{
+	observer.upsertFlowObservation(runtimeFlowKey{id: flowID}, target, protocol.DeliveryAdaptive, protocol.PathFastest, runtimeFlowObservation{
 		correlationID: correlationID, lifecycleState: flow.Relaying,
 		adaptiveState: policy.AdaptiveTargeted, adaptiveTransition: policy.TransitionAcknowledgementGap,
 		publishedAttachments: 2, policyAttachments: 1,
 		preferredAttachment: flow.AttachmentKey{SessionGeneration: 7, AttachmentGeneration: 1}, hasPreferred: true,
 		txAllocatedOffset: 120, txAcknowledged: 60, rxWrittenOffset: 80,
 	}, statusapi.ReasonStarted)
-	if got := observer.flows[flowID].entry.StateSince; got != entry.StateSince {
+	if got := observer.flows[runtimeFlowKey{id: flowID}].entry.StateSince; got != entry.StateSince {
 		t.Fatalf("unchanged state since = %v, want %v", got, entry.StateSince)
 	}
 
 	now = now.Add(time.Second)
-	observer.terminalFlow(flowID, statusapi.FlowClosed, statusapi.ReasonCompleted)
+	observer.terminalFlow(runtimeFlowKey{id: flowID}, statusapi.FlowClosed, statusapi.ReasonCompleted)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- repository.Run(ctx, nil) }()
@@ -429,7 +429,7 @@ func TestRuntimeStatusPublishesHashedBoundedLifecycle(t *testing.T) {
 	}, policy.Snapshot{State: policy.AdaptiveFull}, statusapi.ReasonPathRemoved)
 	observer.frameSent(101)
 	observer.frameReceived(102)
-	observer.recordFlowTraffic(flowID, 11, 12)
+	observer.recordFlowTraffic(runtimeFlowKey{id: flowID}, 11, 12)
 	observer.upsertFlow(flowID, target, protocol.DeliveryAdaptive, protocol.PathFastest, flow.FlowSnapshot{
 		Lifecycle:         flow.LifecycleSnapshot{State: flow.Recovering},
 		TxAllocatedOffset: 100, TxAcknowledgedOffset: 40,
@@ -464,7 +464,7 @@ func TestRuntimeStatusPublishesHashedBoundedLifecycle(t *testing.T) {
 		}
 	}
 
-	observer.terminalFlow(flowID, statusapi.FlowReset, statusapi.ReasonDeadlineExceeded)
+	observer.terminalFlow(runtimeFlowKey{id: flowID}, statusapi.FlowReset, statusapi.ReasonDeadlineExceeded)
 	observer.removeSession(9)
 	observer.syncInterfaces(pathcore.Snapshot{})
 	waitFor(t, time.Second, func() bool {
@@ -519,7 +519,8 @@ func TestRuntimeStatusReconcilesLifecycleEventsDroppedBySaturatedQueue(t *testin
 	}
 	observer.syncInterfaces(pathcore.Snapshot{})
 	observer.removeSession(9)
-	observer.terminalFlow(flowID, statusapi.FlowClosed, statusapi.ReasonCompleted)
+	observer.terminalFlow(runtimeFlowKey{id: flowID}, statusapi.FlowClosed, statusapi.ReasonCompleted)
+	observer.rejectFlow(flowRejectionRateLimited)
 
 	ctx, cancel = context.WithCancel(context.Background())
 	done = make(chan error, 1)
@@ -535,11 +536,40 @@ func TestRuntimeStatusReconcilesLifecycleEventsDroppedBySaturatedQueue(t *testin
 	waitFor(t, time.Second, func() bool {
 		snapshot := repository.Snapshot()
 		return len(snapshot.Interfaces) == 0 && len(snapshot.Sessions) == 0 && len(snapshot.Flows) == 0 &&
-			len(snapshot.Terminals) == 1 && snapshot.Terminals[0].IDHash == observer.hasher.FlowID(flowID)
+			len(snapshot.Terminals) == 1 && snapshot.Terminals[0].IDHash == observer.hasher.ScopedFlowID("", flowID)
 	}, "reconciled lifecycle events")
 	cancel()
 	if err := <-done; err != nil {
 		t.Fatal(err)
+	}
+	reconciled := repository.Snapshot()
+	if resources := reconciled.Resources; resources.Flows != 0 || resources.Sessions != 0 {
+		t.Fatalf("reconciled resources retained removed objects: %#v", resources)
+	}
+	if reconciled.Rejected.Flows != 1 || reconciled.Rejected.FlowRateLimited != 1 {
+		t.Fatalf("reconciled rejections = %#v", reconciled.Rejected)
+	}
+}
+
+func TestRuntimeStatusSessionChurnReclaimsConnectionHistory(t *testing.T) {
+	repository, err := statusapi.NewRepository(statusapi.Limits{Interfaces: 1, Sessions: 1, Flows: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	observer, err := newRuntimeStatusWithKey(repository, 1, 1, [32]byte{1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for generation := uint64(1); generation <= statusapi.MaxSessions+1; generation++ {
+		observer.upsertSessionObservation(runtimeSessionObservation{
+			generation: generation, transportName: "tcp", interfaceName: "wan-a",
+			localAddress: netip.MustParseAddr("192.0.2.7"), connectionID: fmt.Sprintf("%024x", generation),
+			state: statusapi.SessionReady, reason: statusapi.ReasonPathAdded,
+		})
+		observer.removeSession(generation)
+	}
+	if len(observer.connections) != 0 {
+		t.Fatalf("closed sessions retained %d connection identifiers", len(observer.connections))
 	}
 }
 

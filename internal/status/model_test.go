@@ -60,11 +60,16 @@ func TestHasherIsDeterministicDomainSeparatedAndOpaque(t *testing.T) {
 	if flowHash == "" || flowHash != hasher.FlowID(flowID) || len(flowHash) != 2*HashBytes {
 		t.Fatalf("flow hash = %q", flowHash)
 	}
+	scopedFlowHash := hasher.ScopedFlowID("client-a", flowID)
+	if scopedFlowHash == "" || scopedFlowHash != hasher.ScopedFlowID("client-a", flowID) ||
+		scopedFlowHash == hasher.ScopedFlowID("client-b", flowID) || scopedFlowHash == flowHash {
+		t.Fatalf("scoped flow hashes = %q, %q", scopedFlowHash, hasher.ScopedFlowID("client-b", flowID))
+	}
 	pathGroupHash := hasher.PathGroupID(pathGroupID)
 	if pathGroupHash == "" || pathGroupHash != hasher.PathGroupID(pathGroupID) || len(pathGroupHash) != 2*HashBytes {
 		t.Fatalf("path group hash = %q", pathGroupHash)
 	}
-	if flowHash == hasher.SessionID(0x010203) || flowHash == pathGroupHash || flowHash == hasher.Target(target) {
+	if flowHash == hasher.SessionID(0x010203) || flowHash == pathGroupHash || flowHash == hasher.Target(target) || flowHash == scopedFlowHash {
 		t.Fatal("hash domains collided")
 	}
 	if strings.Contains(hasher.Target(target), target.DNSName) {

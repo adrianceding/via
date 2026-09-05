@@ -849,14 +849,14 @@ func (instance *clientFlow) publishStatus(reason statusapi.TransitionReason) {
 		if state == statusapi.FlowClosed && reason == statusapi.ReasonNone {
 			reason = statusapi.ReasonCompleted
 		}
-		instance.host.statusObserver.terminalFlow(instance.flowID, state, reason)
+		instance.host.statusObserver.terminalFlow(runtimeFlowKey{principal: instance.host.configuration.PrincipalID, id: instance.flowID}, state, reason)
 		return
 	}
 	if instance.lastReason != statusapi.ReasonNone {
 		reason = instance.lastReason
 	}
 	instance.host.statusObserver.upsertFlowObservation(
-		instance.flowID, instance.target, instance.host.configuration.Delivery.Mode,
+		runtimeFlowKey{principal: instance.host.configuration.PrincipalID, id: instance.flowID}, instance.target, instance.host.configuration.Delivery.Mode,
 		instance.host.configuration.Delivery.Selection, runtimeFlowObservation{
 			correlationID: instance.correlationID, lifecycleState: flowStatus.LifecycleState,
 			adaptiveState: policyStatus.State, adaptiveTransition: policyStatus.Transition,
@@ -932,7 +932,7 @@ func (instance *clientFlow) recordRelayCounters(actions []clientcore.Application
 		}
 		copies[key]++
 	}
-	instance.host.statusObserver.recordFlowTraffic(instance.flowID, retransmitted, redundant)
+	instance.host.statusObserver.recordFlowTraffic(runtimeFlowKey{principal: instance.host.configuration.PrincipalID, id: instance.flowID}, retransmitted, redundant)
 }
 
 func clientRelayReason(event clientcore.ApplicationRelayEvent) statusapi.TransitionReason {

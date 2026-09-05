@@ -46,8 +46,8 @@ type runtimeStatus struct {
 	mu           sync.Mutex
 	resources    statusapi.Resources
 	rejections   statusapi.Rejected
-	flows        map[protocol.FlowID]runtimeFlowStatus
-	flowTraffic  map[protocol.FlowID]runtimeFlowTraffic
+	flows        map[runtimeFlowKey]runtimeFlowStatus
+	flowTraffic  map[runtimeFlowKey]runtimeFlowTraffic
 	sessions     map[string]statusapi.Session
 	fastestID    string
 	runtime      map[uint64]sessionRuntimeSnapshot
@@ -56,6 +56,11 @@ type runtimeStatus struct {
 	terminals    []statusapi.Terminal
 	terminalAt   map[string]int
 	terminalNext int
+}
+
+type runtimeFlowKey struct {
+	principal string
+	id        protocol.FlowID
 }
 
 type runtimeFlowStatus struct {
@@ -126,8 +131,8 @@ func newRuntimeStatusWithClock(repository *statusapi.Repository, maxFlows int, r
 		hasher:      hasher,
 		maxFlows:    maxFlows,
 		now:         now,
-		flows:       make(map[protocol.FlowID]runtimeFlowStatus, maxFlows),
-		flowTraffic: make(map[protocol.FlowID]runtimeFlowTraffic, maxFlows),
+		flows:       make(map[runtimeFlowKey]runtimeFlowStatus, maxFlows),
+		flowTraffic: make(map[runtimeFlowKey]runtimeFlowTraffic, maxFlows),
 		sessions:    make(map[string]statusapi.Session, statusapi.MaxSessions),
 		runtime:     make(map[uint64]sessionRuntimeSnapshot, statusapi.MaxSessions),
 		connections: make(map[uint64]string, statusapi.MaxSessions),
@@ -178,19 +183,19 @@ func (observer *runtimeStatus) redundant(bytes uint64) {
 	}
 }
 
-func (observer *runtimeStatus) recordFlowTraffic(flowID protocol.FlowID, retransmitted, redundant uint64) {
-	if observer == nil || flowID == (protocol.FlowID{}) || retransmitted == 0 && redundant == 0 {
+func (observer *runtimeStatus) recordFlowTraffic(key runtimeFlowKey, retransmitted, redundant uint64) {
+	if observer == nil || key.id == (protocol.FlowID{}) || retransmitted == 0 && redundant == 0 {
 		return
 	}
 	observer.mu.Lock()
-	if _, exists := observer.flows[flowID]; !exists {
+	if _, exists := observer.flows[key]; !exists {
 		observer.mu.Unlock()
 		return
 	}
-	traffic := observer.flowTraffic[flowID]
+	traffic := observer.flowTraffic[key]
 	traffic.retransmitted = adjustResource(traffic.retransmitted, int64(retransmitted))
 	traffic.redundant = adjustResource(traffic.redundant, int64(redundant))
-	observer.flowTraffic[flowID] = traffic
+	observer.flowTraffic[key] = traffic
 	observer.mu.Unlock()
 	if retransmitted != 0 {
 		observer.retransmitted(retransmitted)
@@ -539,6 +544,7 @@ func (observer *runtimeStatus) removeSession(generation uint64) {
 		observer.publishResourcesLocked()
 	}
 	delete(observer.runtime, generation)
+	delete(observer.connections, generation)
 	updates := observer.recomputeFastestLocked()
 	observer.mu.Unlock()
 	observer.repository.TryRecord(statusapi.Event{Kind: statusapi.EventRemoveSession, SessionID: id})
@@ -589,6 +595,16 @@ func (observer *runtimeStatus) syncClientSessions(transportName, principalID str
 			if observer.resources.Sessions != 0 {
 				observer.resources.Sessions--
 			}
+		}
+	}
+	for generation := range observer.connections {
+		if _, exists := next[observer.hasher.SessionID(generation)]; !exists {
+			delete(observer.connections, generation)
+		}
+	}
+	for generation := range observer.runtime {
+		if _, exists := next[observer.hasher.SessionID(generation)]; !exists {
+			delete(observer.runtime, generation)
 		}
 	}
 	if len(removed) != 0 {
@@ -716,7 +732,7 @@ func statusClientSessionState(state clientcore.ManagedSessionState) (statusapi.S
 }
 
 func (observer *runtimeStatus) upsertFlow(flowID protocol.FlowID, target protocol.Target, mode protocol.DeliveryMode, selection protocol.PathSelection, snapshot flow.FlowSnapshot, policySnapshot policy.Snapshot, reason statusapi.TransitionReason) {
-	observer.upsertFlowObservation(flowID, target, mode, selection, runtimeFlowObservation{
+	observer.upsertFlowObservation(runtimeFlowKey{id: flowID}, target, mode, selection, runtimeFlowObservation{
 		lifecycleState:       snapshot.Lifecycle.State,
 		adaptiveState:        policySnapshot.State,
 		adaptiveTransition:   policySnapshot.Transition,
@@ -730,8 +746,8 @@ func (observer *runtimeStatus) upsertFlow(flowID protocol.FlowID, target protoco
 	}, reason)
 }
 
-func (observer *runtimeStatus) upsertFlowObservation(flowID protocol.FlowID, target protocol.Target, mode protocol.DeliveryMode, selection protocol.PathSelection, observation runtimeFlowObservation, reason statusapi.TransitionReason) {
-	if observer == nil || flowID == (protocol.FlowID{}) {
+func (observer *runtimeStatus) upsertFlowObservation(key runtimeFlowKey, target protocol.Target, mode protocol.DeliveryMode, selection protocol.PathSelection, observation runtimeFlowObservation, reason statusapi.TransitionReason) {
+	if observer == nil || key.id == (protocol.FlowID{}) {
 		return
 	}
 	state := statusFlowState(observation.lifecycleState)
@@ -739,8 +755,8 @@ func (observer *runtimeStatus) upsertFlowObservation(flowID protocol.FlowID, tar
 		return
 	}
 	observer.mu.Lock()
-	previous, exists := observer.flows[flowID]
-	traffic := observer.flowTraffic[flowID]
+	previous, exists := observer.flows[key]
+	traffic := observer.flowTraffic[key]
 	now := observer.now()
 	startedAt := previous.entry.StartedAt
 	stateSince := previous.entry.StateSince
@@ -799,7 +815,7 @@ func (observer *runtimeStatus) upsertFlowObservation(flowID protocol.FlowID, tar
 		}
 	}
 	if entry.IDHash == "" {
-		entry.IDHash = observer.hasher.FlowID(flowID)
+		entry.IDHash = observer.hasher.ScopedFlowID(key.principal, key.id)
 	}
 	if entry.TargetHash == "" {
 		entry.TargetHash = observer.hasher.Target(target)
@@ -820,7 +836,7 @@ func (observer *runtimeStatus) upsertFlowObservation(flowID protocol.FlowID, tar
 		observer.adjustFlowState(previous.entry.State, -1)
 		observer.adjustFlowState(state, 1)
 	}
-	observer.flows[flowID] = runtimeFlowStatus{
+	observer.flows[key] = runtimeFlowStatus{
 		target: target, entry: entry,
 		recoveringSince: recoveringSince, recoveryCount: recoveryCount, recoveryMicros: recoveryMicros,
 	}
@@ -831,24 +847,24 @@ func (observer *runtimeStatus) upsertFlowObservation(flowID protocol.FlowID, tar
 	observer.repository.TryRecord(statusapi.Event{Kind: statusapi.EventUpsertFlow, Flow: entry})
 }
 
-func (observer *runtimeStatus) terminalFlow(flowID protocol.FlowID, state statusapi.FlowState, reason statusapi.TransitionReason) {
-	if observer == nil || flowID == (protocol.FlowID{}) || state != statusapi.FlowClosed && state != statusapi.FlowReset {
+func (observer *runtimeStatus) terminalFlow(key runtimeFlowKey, state statusapi.FlowState, reason statusapi.TransitionReason) {
+	if observer == nil || key.id == (protocol.FlowID{}) || state != statusapi.FlowClosed && state != statusapi.FlowReset {
 		return
 	}
 	observer.mu.Lock()
-	previous, exists := observer.flows[flowID]
+	previous, exists := observer.flows[key]
 	id := previous.entry.IDHash
 	if exists {
 		observer.adjustFlowState(previous.entry.State, -1)
-		delete(observer.flows, flowID)
-		delete(observer.flowTraffic, flowID)
+		delete(observer.flows, key)
+		delete(observer.flowTraffic, key)
 		if observer.resources.Flows != 0 {
 			observer.resources.Flows--
 		}
 		observer.publishResourcesLocked()
 	}
 	if id == "" {
-		id = observer.hasher.FlowID(flowID)
+		id = observer.hasher.ScopedFlowID(key.principal, key.id)
 	}
 	terminal := statusapi.Terminal{
 		IDHash: id, FlowID: previous.entry.FlowID, State: state, Reason: reason,
@@ -873,6 +889,8 @@ func (observer *runtimeStatus) reconcileRepository() {
 
 	observer.mu.Lock()
 	observer.pruneTerminalsLocked(now)
+	observer.publishResourcesLocked()
+	observer.repository.TryRecord(statusapi.Event{Kind: statusapi.EventSetRejected, Rejected: observer.rejections})
 	interfaces := make(map[int]struct{}, len(observer.interfaces))
 	for index := range observer.interfaces {
 		interfaces[index] = struct{}{}

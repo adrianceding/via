@@ -631,29 +631,18 @@ func (daemon *serverDaemon) completeOpenSession(session *wireSession, request pr
 	if instance == nil || instance.owner == nil {
 		return session.send(protocol.OpenResult{FlowID: request.FlowID, Result: protocol.OpenInternalFailure})
 	}
-	attachment, published := session.attachment(request.FlowID)
-	if published {
+	if _, published := session.attachment(request.FlowID); published {
 		result.ImplicitAttachment = true
 		return session.send(result)
 	}
-	attachmentGeneration, ok := allocateDaemonGeneration(&daemon.nextAttachment)
+	pending, ok := instance.beginJoin(session)
 	if !ok {
-		return session.send(protocol.OpenResult{FlowID: request.FlowID, Result: protocol.OpenResourceLimit})
-	}
-	attachment = flow.AttachmentKey{SessionGeneration: session.attachmentGeneration, AttachmentGeneration: attachmentGeneration}
-	if err := session.reserve(request.FlowID, attachment); err != nil {
-		return session.send(protocol.OpenResult{FlowID: request.FlowID, Result: protocol.OpenResourceLimit})
-	}
-	lifecycleGeneration, ok := instance.beginJoin(attachment)
-	if !ok {
-		session.release(request.FlowID, attachment)
 		return session.send(protocol.OpenResult{FlowID: request.FlowID, Result: protocol.OpenResourceLimit})
 	}
 	result.ImplicitAttachment = true
 	openErr := session.send(result)
-	published = instance.completeJoin(attachment, lifecycleGeneration, openErr == nil)
+	published := instance.completeJoin(session, pending, openErr == nil)
 	if !published {
-		session.release(request.FlowID, attachment)
 		if openErr == nil {
 			_ = session.send(protocol.Reset{FlowID: request.FlowID, Reason: protocol.ResetCancelled})
 			session.close()
@@ -741,28 +730,13 @@ func (daemon *serverDaemon) handleJoin(session *wireSession, request protocol.Jo
 	if instance == nil || instance.owner != authorization.Flow {
 		return session.send(protocol.JoinResult{FlowID: request.FlowID, Result: protocol.JoinFailure})
 	}
-	attachment, published := session.attachment(request.FlowID)
-	if !published {
-		attachmentGeneration, ok := allocateDaemonGeneration(&daemon.nextAttachment)
-		if !ok {
-			return session.send(protocol.JoinResult{FlowID: request.FlowID, Result: protocol.JoinFailure})
-		}
-		attachment = flow.AttachmentKey{SessionGeneration: session.attachmentGeneration, AttachmentGeneration: attachmentGeneration}
-		if err := session.reserve(request.FlowID, attachment); err != nil {
-			return session.send(protocol.JoinResult{FlowID: request.FlowID, Result: protocol.JoinFailure})
-		}
-	}
-	lifecycleGeneration, ok := instance.beginJoin(attachment)
+	pending, ok := instance.beginJoin(session)
 	if !ok {
-		if !published {
-			session.release(request.FlowID, attachment)
-		}
 		return session.send(protocol.JoinResult{FlowID: request.FlowID, Result: protocol.JoinFailure})
 	}
 	err := session.send(protocol.JoinResult{FlowID: request.FlowID, Result: protocol.JoinSuccess})
-	actuallyPublished := instance.completeJoin(attachment, lifecycleGeneration, err == nil)
+	actuallyPublished := instance.completeJoin(session, pending, err == nil)
 	if !actuallyPublished {
-		session.release(request.FlowID, attachment)
 		if err == nil {
 			// A terminal transition won while JOIN_RESULT was in flight. Make the
 			// ordered success explicitly unusable and retire the shared session so

@@ -53,6 +53,7 @@ type serverFlow struct {
 	cancel        context.CancelFunc
 
 	mu             sync.Mutex
+	joinWrites     map[uint64]*serverJoinWrites
 	timersMu       sync.Mutex
 	timers         map[relayTimerKind]*serverRelayTimer
 	timersClosed   bool
@@ -202,7 +203,7 @@ func (instance *serverFlow) finishTransitionLocked(actions []servercore.RelayAct
 		instance.host.registry.MarkTerminal(instance.key, instance.owner, kind)
 		instance.host.statusObserver.setTombstones(uint64(instance.host.registry.Snapshot().Tombstones))
 		if instance.statusActive {
-			instance.host.statusObserver.terminalFlow(instance.key.FlowID, terminalState, effectiveReason)
+			instance.host.statusObserver.terminalFlow(runtimeFlowKey{principal: instance.key.PrincipalID, id: instance.key.FlowID}, terminalState, effectiveReason)
 		}
 		instance.stopTimers()
 		instance.cancel()
@@ -210,7 +211,7 @@ func (instance *serverFlow) finishTransitionLocked(actions []servercore.RelayAct
 	} else if instance.statusActive {
 		flowStatus, policyStatus := instance.relay.StatusSnapshot()
 		instance.host.statusObserver.upsertFlowObservation(
-			instance.key.FlowID, instance.destination, instance.mode, instance.selection,
+			runtimeFlowKey{principal: instance.key.PrincipalID, id: instance.key.FlowID}, instance.destination, instance.mode, instance.selection,
 			runtimeFlowObservation{
 				correlationID: instance.correlationID, lifecycleState: flowStatus.LifecycleState,
 				adaptiveState: policyStatus.State, adaptiveTransition: policyStatus.Transition,
@@ -251,7 +252,7 @@ func (instance *serverFlow) recordRelayCountersLocked(actions []servercore.Relay
 		}
 		copies[key]++
 	}
-	instance.host.statusObserver.recordFlowTraffic(instance.key.FlowID, retransmitted, redundant)
+	instance.host.statusObserver.recordFlowTraffic(runtimeFlowKey{principal: instance.key.PrincipalID, id: instance.key.FlowID}, retransmitted, redundant)
 }
 
 func (instance *serverFlow) activateStatus() {
@@ -264,7 +265,7 @@ func (instance *serverFlow) activateStatus() {
 		instance.lastReason = statusapi.ReasonStarted
 		flowStatus, policyStatus := instance.relay.StatusSnapshot()
 		instance.host.statusObserver.upsertFlowObservation(
-			instance.key.FlowID, instance.destination, instance.mode, instance.selection,
+			runtimeFlowKey{principal: instance.key.PrincipalID, id: instance.key.FlowID}, instance.destination, instance.mode, instance.selection,
 			runtimeFlowObservation{
 				correlationID: instance.correlationID, lifecycleState: flowStatus.LifecycleState,
 				adaptiveState: policyStatus.State, adaptiveTransition: policyStatus.Transition,
@@ -511,44 +512,6 @@ func flowErrorCategory(err error) string {
 	return "internal error"
 }
 
-func (instance *serverFlow) beginJoin(attachment flow.AttachmentKey) (uint64, bool) {
-	instance.mu.Lock()
-	if instance.terminal {
-		instance.mu.Unlock()
-		return 0, false
-	}
-	actions, err := instance.owner.Handle(flow.FlowEvent{
-		Kind:      flow.FlowLifecycle,
-		Lifecycle: flow.LifecycleEvent{Kind: flow.LifecycleJoinRequested, Attachment: attachment},
-	})
-	instance.mu.Unlock()
-	if err != nil {
-		return 0, false
-	}
-	action, ok := joinLifecycleAction(actions, flow.LifecycleActionSendJoinSuccess)
-	return action.Generation, ok && action.Generation != 0
-}
-
-func (instance *serverFlow) completeJoin(attachment flow.AttachmentKey, generation uint64, succeeded bool) bool {
-	kind := flow.LifecycleJoinResultSendFailed
-	if succeeded {
-		kind = flow.LifecycleJoinResultSendCompleted
-	}
-	instance.applyLifecycle(flow.LifecycleEvent{
-		Kind: kind, Attachment: attachment, Generation: generation,
-	})
-	instance.mu.Lock()
-	published := false
-	for _, current := range instance.relay.Snapshot().Flow.Lifecycle.Published {
-		if current == attachment {
-			published = true
-			break
-		}
-	}
-	instance.mu.Unlock()
-	return published
-}
-
 func (instance *serverFlow) attachmentLost(attachment flow.AttachmentKey) {
 	instance.applyLifecycle(flow.LifecycleEvent{Kind: flow.LifecycleAttachmentLost, Attachment: attachment})
 }
@@ -580,6 +543,15 @@ func (instance *serverFlow) applyLifecycle(event flow.LifecycleEvent) {
 		instance.mu.Unlock()
 		return
 	}
+	followups, lost, closes, err := instance.applyLifecycleLocked(event)
+	instance.mu.Unlock()
+	instance.runEffects(followups, lost, closes)
+	if err != nil {
+		_ = instance.handle(servercore.RelayEvent{Kind: servercore.RelayResetRequested, ResetReason: protocol.ResetInternalFailure})
+	}
+}
+
+func (instance *serverFlow) applyLifecycleLocked(event flow.LifecycleEvent) ([]servercore.RelayEvent, []flow.AttachmentKey, []servercore.RelayAction, error) {
 	refreshErr := instance.refreshSessionQualitiesLocked(servercore.RelayApplyFlowActions)
 	flowActions, flowErr := instance.owner.Handle(flow.FlowEvent{
 		Kind:      flow.FlowLifecycle,
@@ -589,11 +561,7 @@ func (instance *serverFlow) applyLifecycle(event flow.LifecycleEvent) {
 	relayErr = errors.Join(refreshErr, relayErr)
 	reason := statusReasonForLifecycleEvent(event, errors.Join(flowErr, relayErr))
 	followups, lost, closes := instance.finishTransitionLocked(relayActions, reason)
-	instance.mu.Unlock()
-	instance.runEffects(followups, lost, closes)
-	if flowErr != nil || relayErr != nil {
-		_ = instance.handle(servercore.RelayEvent{Kind: servercore.RelayResetRequested, ResetReason: protocol.ResetInternalFailure})
-	}
+	return followups, lost, closes, errors.Join(flowErr, relayErr)
 }
 
 func (instance *serverFlow) armTimer(kind relayTimerKind, generation uint64, duration time.Duration) {
