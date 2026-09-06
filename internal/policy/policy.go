@@ -598,7 +598,7 @@ func (policy *Policy) placeOne(request PlacementRequest, excluded map[flow.Attac
 	if policy.config.Selection == protocol.PathFastest {
 		chosen := candidates[0]
 		if len(excluded) == 0 {
-			chosen = policy.selectFastest(candidates)
+			chosen = policy.selectFastest(candidates, request.Bytes)
 		}
 		return []Placement{policy.placementFor(chosen)}
 	}
@@ -714,7 +714,7 @@ func (policy *Policy) normalizeAssigned() {
 	}
 }
 
-func (policy *Policy) selectFastest(candidates []candidate) candidate {
+func (policy *Policy) selectFastest(candidates []candidate, payloadBytes uint64) candidate {
 	best := candidates[0]
 	now := policy.currentNow()
 	if !policy.hasIncumbent {
@@ -733,11 +733,11 @@ func (policy *Policy) selectFastest(candidates []candidate) candidate {
 		return best
 	}
 	incumbent := candidates[incumbentIndex]
-	// Keep a continuous byte stream on one healthy path. Queue depth changes
-	// faster than delivery quality and must not turn fastest mode into striping;
-	// explicit gap/retry recovery still moves away from a stalled incumbent.
+	// Pending DATA must not stripe in response to queue or RTT fluctuations.
+	// A measured capacity advantage can still challenge a slowed incumbent.
 	incumbentQuality := policy.qualitySnapshot(policy.attachments[incumbent.attachment])
-	if policy.pending && incumbentQuality.StallPenalty == 0 {
+	if policy.pending && incumbentQuality.StallPenalty == 0 &&
+		!pendingCapacityImprovement(incumbentQuality, policy.qualitySnapshot(policy.attachments[best.attachment]), payloadBytes) {
 		policy.clearCandidate()
 		return incumbent
 	}
@@ -760,6 +760,16 @@ func (policy *Policy) selectFastest(candidates []candidate) candidate {
 	}
 	policy.setIncumbent(best.attachment, now, true)
 	return best
+}
+
+func pendingCapacityImprovement(incumbent, candidate QualitySnapshot, payloadBytes uint64) bool {
+	if payloadBytes == 0 || !incumbent.DataSampleFresh || incumbent.DataSamples == 0 || candidate.DataSamples == 0 ||
+		candidate.CapacityEstimate() <= incumbent.CapacityEstimate() {
+		return false
+	}
+	incumbent.QueuedBytes, incumbent.InFlightBytes = 0, 0
+	candidate.QueuedBytes, candidate.InFlightBytes = 0, 0
+	return fastestImprovement(incumbent.DeliveryEstimate(payloadBytes), candidate.DeliveryEstimate(payloadBytes))
 }
 
 func fastestImprovement(incumbent, candidate time.Duration) bool {

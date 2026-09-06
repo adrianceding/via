@@ -24,6 +24,8 @@ Via 是一个面向 Linux 的多线路 TCP 中继。它通过 SOCKS5 接收应�
 
 当前版本仅支持 TCP 和 SOCKS5 `CONNECT`，不是 VPN，也不支持 UDP。
 
+自适应 `fastest` 的新 DATA 始终只走一条路径。持续传输期间，已测得的容量优势满足既有改善阈值、挑战期和冷却期后可以触发切换；单纯排队或 RTT 波动不会触发这种换路。旧的未确认 DATA 仍由既有恢复流程处理。
+
 ## Docker 部署
 
 建议使用仓库提供的 [compose.yml](../compose.yml)，在两台 Linux 主机上分别运行服务端和客户端。先在两台主机上下载仓库：

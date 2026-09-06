@@ -24,6 +24,8 @@ Via is a multipath TCP relay for Linux. Applications connect through a local SOC
 
 Via currently supports TCP and SOCKS5 `CONNECT` only. It is not a VPN and does not support UDP.
 
+Adaptive `fastest` keeps new DATA on one path. During continuous transfers, a measured capacity advantage can trigger a switch after the existing improvement threshold, challenge, and hold-down checks; queue or RTT fluctuations alone do not trigger this switch. Unacknowledged DATA remains in the existing recovery process.
+
 ## Docker Deployment
 
 The recommended deployment uses the repository's [compose.yml](compose.yml), with the server and client running on separate Linux hosts. Clone the repository on both hosts:

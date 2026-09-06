@@ -1157,6 +1157,43 @@ func TestApplicationRelayACKRearmsRetryWithLearnedPathEstimate(t *testing.T) {
 	}
 }
 
+func TestApplicationRelayCapacityShiftPreservesPendingData(t *testing.T) {
+	now := time.Unix(340, 0)
+	relay, machine := newRelayFixtureWithClock(t, policy.Config{
+		Mode: protocol.DeliveryAdaptive, Selection: protocol.PathFastest,
+	}, func() time.Time { return now })
+	publishRelayAttachment(t, relay, machine, testRelayA)
+	publishRelayAttachment(t, relay, machine, testRelayB)
+	qualities := map[flow.AttachmentKey]policy.QualitySnapshot{
+		testRelayA: {DataSamples: 1, DataSampleFresh: true, SRTT: 4 * time.Millisecond, CapacityBytesSec: 1_250_000},
+		testRelayB: {DataSamples: 1, DataSampleFresh: true, SRTT: 24 * time.Millisecond, CapacityBytesSec: 625_000},
+	}
+	for index, want := range []flow.AttachmentKey{testRelayA, testRelayA, testRelayB} {
+		if index == 1 {
+			a := qualities[testRelayA]
+			a.CapacityBytesSec, a.DataSamples = 250_000, 2
+			qualities[testRelayA] = a
+		}
+		if _, err := relay.Handle(ApplicationRelayEvent{Kind: ApplicationRelaySetSessionQualities, SessionQualities: qualities}); err != nil {
+			t.Fatal(err)
+		}
+		actions, err := relay.Handle(ApplicationRelayEvent{
+			Kind: ApplicationRelayReadResult, Generation: relay.Snapshot().ApplicationReadGeneration, Data: make([]byte, 32<<10),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		send := requireMessageAction[protocol.Data](t, actions)
+		if send.Attachment != want || countRelayActions(actions, ApplicationRelayActionSendMessage) != 1 {
+			t.Fatalf("step %d DATA placement = %+v, want %+v", index, actions, want)
+		}
+		if machine.TxReplayBytes() != uint64(index+1)*(32<<10) {
+			t.Fatalf("capacity switch changed unacknowledged DATA: %d", machine.TxReplayBytes())
+		}
+		now = now.Add(300 * time.Millisecond)
+	}
+}
+
 func TestApplicationRelayRetryDeadlineFollowsEarliestUnacknowledgedItem(t *testing.T) {
 	now := time.Unix(350, 0)
 	relay, machine := newRelayFixtureWithClock(t, policy.Config{

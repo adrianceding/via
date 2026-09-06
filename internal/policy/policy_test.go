@@ -334,6 +334,110 @@ func TestFastestPolicyPinsHealthyIncumbentWhileDataIsPending(t *testing.T) {
 	}
 }
 
+func TestFastestPolicyRelearnsCapacityWhileDataIsPending(t *testing.T) {
+	now := time.Unix(350, 0)
+	selection := newTestPolicyWithClock(t, Config{Mode: protocol.DeliveryAdaptive, Selection: protocol.PathFastest}, func() time.Time { return now })
+	addTestAttachments(t, selection)
+	qualityA := QualitySnapshot{DataSamples: 1, DataSampleFresh: true, SRTT: 4 * time.Millisecond, CapacityBytesSec: 1_250_000}
+	qualityB := QualitySnapshot{DataSamples: 1, DataSampleFresh: true, SRTT: 24 * time.Millisecond, CapacityBytesSec: 625_000}
+	setQualities := func() {
+		t.Helper()
+		if err := selection.SetQualitySnapshots(map[flow.AttachmentKey]QualitySnapshot{testAttachmentA: qualityA, testAttachmentB: qualityB}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	place := func(want flow.AttachmentKey) {
+		t.Helper()
+		got := selection.PlaceNew(PlacementRequest{Bytes: 32 << 10})
+		if len(got) != 1 || got[0].Attachment != want {
+			t.Fatalf("single DATA placement = %+v, want %+v", got, want)
+		}
+	}
+	setQualities()
+	place(testAttachmentA)
+	selection.SetPending(true)
+	qualityA.CapacityBytesSec = 250_000
+	qualityA.DataSamples++
+	setQualities()
+	place(testAttachmentA)
+	now = now.Add(fastestChallengeDuration - time.Nanosecond)
+	place(testAttachmentA)
+	now = now.Add(time.Nanosecond)
+	place(testAttachmentB)
+
+	qualityA.CapacityBytesSec = 1_250_000
+	qualityA.DataSamples++
+	setQualities()
+	place(testAttachmentB)
+	now = now.Add(fastestChallengeDuration)
+	place(testAttachmentB)
+	now = now.Add(fastestHoldDownDuration - fastestChallengeDuration)
+	place(testAttachmentA)
+}
+
+func TestFastestPolicyPendingCapacityChallengeRequiresEvidence(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		change func(*QualitySnapshot, *QualitySnapshot)
+	}{
+		{name: "queue only", change: func(a, b *QualitySnapshot) { a.QueuedBytes = 2 << 20 }},
+		{name: "RTT only", change: func(a, b *QualitySnapshot) { a.SRTT = time.Second }},
+		{name: "stale incumbent", change: func(a, b *QualitySnapshot) {
+			a.CapacityBytesSec, a.LastDataCapacity, a.DataSampleFresh = 250_000, 250_000, false
+		}},
+		{name: "unmeasured candidate", change: func(a, b *QualitySnapshot) {
+			a.CapacityBytesSec, b.DataSamples = 250_000, 0
+		}},
+		{name: "insufficient unloaded improvement", change: func(a, b *QualitySnapshot) {
+			a.CapacityBytesSec, b.CapacityBytesSec, a.InFlightBytes = 250_000, 260_000, 2<<20
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			now := time.Unix(360, 0)
+			selection := newTestPolicyWithClock(t, Config{Mode: protocol.DeliveryAdaptive, Selection: protocol.PathFastest}, func() time.Time { return now })
+			addTestAttachments(t, selection)
+			a := QualitySnapshot{DataSamples: 1, DataSampleFresh: true, SRTT: 4 * time.Millisecond, CapacityBytesSec: 1_250_000}
+			b := QualitySnapshot{DataSamples: 1, DataSampleFresh: true, SRTT: 24 * time.Millisecond, CapacityBytesSec: 625_000}
+			if err := selection.SetQualitySnapshots(map[flow.AttachmentKey]QualitySnapshot{testAttachmentA: a, testAttachmentB: b}); err != nil {
+				t.Fatal(err)
+			}
+			selection.PlaceNew(PlacementRequest{Bytes: 32 << 10})
+			selection.SetPending(true)
+			test.change(&a, &b)
+			if err := selection.SetQualitySnapshots(map[flow.AttachmentKey]QualitySnapshot{testAttachmentA: a, testAttachmentB: b}); err != nil {
+				t.Fatal(err)
+			}
+			for range 2 {
+				got := selection.PlaceNew(PlacementRequest{Bytes: 32 << 10})
+				if len(got) != 1 || got[0].Attachment != testAttachmentA || selection.Snapshot().HasCandidate {
+					t.Fatalf("pending placement without capacity evidence = %+v, state = %+v", got, selection.StatusSnapshot())
+				}
+				now = now.Add(fastestChallengeDuration)
+			}
+		})
+	}
+}
+
+func TestFastestPolicyPendingCapacityChallengeResetsAfterTransientImprovement(t *testing.T) {
+	now := time.Unix(370, 0)
+	selection := newTestPolicyWithClock(t, Config{Mode: protocol.DeliveryAdaptive, Selection: protocol.PathFastest}, func() time.Time { return now })
+	addTestAttachments(t, selection)
+	a := QualitySnapshot{DataSamples: 1, DataSampleFresh: true, SRTT: 4 * time.Millisecond, CapacityBytesSec: 1_250_000}
+	b := QualitySnapshot{DataSamples: 1, DataSampleFresh: true, SRTT: 24 * time.Millisecond, CapacityBytesSec: 625_000}
+	for index, capacity := range []float64{1_250_000, 250_000, 1_250_000, 250_000, 250_000} {
+		a.CapacityBytesSec = capacity
+		if err := selection.SetQualitySnapshots(map[flow.AttachmentKey]QualitySnapshot{testAttachmentA: a, testAttachmentB: b}); err != nil {
+			t.Fatal(err)
+		}
+		got := selection.PlaceNew(PlacementRequest{Bytes: 32 << 10})
+		if len(got) != 1 || got[0].Attachment != testAttachmentA {
+			t.Fatalf("step %d switched before a continuous challenge: %+v", index, got)
+		}
+		selection.SetPending(true)
+		now = now.Add(100 * time.Millisecond)
+	}
+}
+
 func TestFastestPolicyMovesFromStalledIncumbentWhileDataIsPending(t *testing.T) {
 	now := time.Unix(400, 0)
 	policy := newTestPolicyWithClock(t, Config{Mode: protocol.DeliveryAdaptive, Selection: protocol.PathFastest}, func() time.Time { return now })
